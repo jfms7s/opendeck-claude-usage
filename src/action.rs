@@ -55,6 +55,60 @@ impl UsageGaugeAction {
         };
         instance.set_feedback(&feedback).await
     }
+
+    /// Reads the source, and on success caches it in `latest` for
+    /// `render_cached` - shared by `refresh_one` and `refresh_all` so the
+    /// "read, then cache on success" step exists in exactly one place.
+    async fn read_and_cache(&self) -> Result<UsageSnapshot, crate::source::UsageSourceError> {
+        let result = self.shared.source.read().await;
+        if let Ok(snapshot) = &result {
+            let _ = self.shared.latest.send(Some(snapshot.clone()));
+        }
+        result
+    }
+
+    /// Reads the source directly and renders just this one dial immediately
+    /// - used on a dial press, without waiting for the next scheduled tick.
+    async fn refresh_one(&self, instance: &Instance, window: WindowKind) -> OpenActionResult<()> {
+        let feedback = match self.read_and_cache().await {
+            Ok(snapshot) => build_feedback(&snapshot, window, chrono::Utc::now()),
+            Err(e) => {
+                log::warn!("usage source read failed: {e}");
+                error_feedback()
+            }
+        };
+        instance.set_feedback(&feedback).await
+    }
+
+    /// Runs forever: every ~20s, reads the usage source once and pushes a
+    /// fresh render to every currently-registered dial. Spawned once from
+    /// `main.rs` alongside `register_action`.
+    pub async fn poll_loop(&self) {
+        loop {
+            self.refresh_all().await;
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        }
+    }
+
+    async fn refresh_all(&self) {
+        let read_result = self.read_and_cache().await;
+        if let Err(e) = &read_result {
+            log::warn!("usage source read failed: {e}");
+        }
+
+        for entry in self.shared.registry.iter() {
+            let instance_id = entry.key().clone();
+            let window = *entry.value();
+            let Some(instance) = openaction::get_instance(instance_id).await else {
+                continue; // dial disappeared between the registry snapshot and now
+            };
+            let feedback = match &read_result {
+                Ok(snapshot) => build_feedback(snapshot, window, chrono::Utc::now()),
+                Err(_) => error_feedback(),
+            };
+            let _ = instance.set_feedback(&feedback).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -75,6 +129,10 @@ impl Action for UsageGaugeAction {
     async fn will_disappear(&self, instance: &Instance, _settings: &Self::Settings) -> OpenActionResult<()> {
         self.untrack(&instance.instance_id);
         Ok(())
+    }
+
+    async fn dial_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
+        self.refresh_one(instance, settings.window).await
     }
 }
 
