@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::source::{MonthlyUsage, UsageSnapshot, WindowKind, WindowUsage};
 
@@ -62,7 +62,12 @@ fn window_feedback(window: &WindowUsage, now: DateTime<Utc>) -> Value {
         Some(resets_at) => format_countdown(resets_at, now),
         None => "no reset info".to_string(),
     };
-    bar_feedback(window.percent, bar_color(window.percent), &format_percent(window.percent), &detail)
+    bar_feedback(
+        window.percent,
+        bar_color(window.percent),
+        &format_percent(window.percent),
+        &detail,
+    )
 }
 
 fn monthly_feedback(monthly: &MonthlyUsage) -> Value {
@@ -74,7 +79,12 @@ fn monthly_feedback(monthly: &MonthlyUsage) -> Value {
         (Some(used), Some(limit)) => format!("${used:.2} / ${limit:.2}"),
         _ => "spend unavailable".to_string(),
     };
-    bar_feedback(percent, bar_color(percent), &format_percent(percent), &detail)
+    bar_feedback(
+        percent,
+        bar_color(percent),
+        &format_percent(percent),
+        &detail,
+    )
 }
 
 fn bar_feedback(bar_value: f64, bar_color: &str, percent_text: &str, detail_text: &str) -> Value {
@@ -97,7 +107,8 @@ mod tests {
     use chrono::TimeZone;
 
     fn dt(hour: u32, minute: u32, second: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 9, 13, hour, minute, second).unwrap()
+        Utc.with_ymd_and_hms(2026, 9, 13, hour, minute, second)
+            .unwrap()
     }
 
     #[test]
@@ -119,17 +130,26 @@ mod tests {
 
     #[test]
     fn countdown_with_hours_and_minutes() {
-        assert_eq!(format_countdown(dt(22, 40, 0), dt(20, 30, 0)), "resets in 2h 10m");
+        assert_eq!(
+            format_countdown(dt(22, 40, 0), dt(20, 30, 0)),
+            "resets in 2h 10m"
+        );
     }
 
     #[test]
     fn countdown_under_an_hour() {
-        assert_eq!(format_countdown(dt(20, 45, 0), dt(20, 30, 0)), "resets in 15m");
+        assert_eq!(
+            format_countdown(dt(20, 45, 0), dt(20, 30, 0)),
+            "resets in 15m"
+        );
     }
 
     #[test]
     fn countdown_under_a_minute() {
-        assert_eq!(format_countdown(dt(20, 30, 30), dt(20, 30, 0)), "resets in <1m");
+        assert_eq!(
+            format_countdown(dt(20, 30, 30), dt(20, 30, 0)),
+            "resets in <1m"
+        );
     }
 
     #[test]

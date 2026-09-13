@@ -116,22 +116,38 @@ impl Action for UsageGaugeAction {
     const UUID: &'static str = "com.jfms7s.claudeusage.usagegauge";
     type Settings = UsageGaugeSettings;
 
-    async fn will_appear(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
+    async fn will_appear(
+        &self,
+        instance: &Instance,
+        settings: &Self::Settings,
+    ) -> OpenActionResult<()> {
         self.track(&instance.instance_id, settings.window);
         self.render_cached(instance, settings.window).await
     }
 
-    async fn did_receive_settings(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
+    async fn did_receive_settings(
+        &self,
+        instance: &Instance,
+        settings: &Self::Settings,
+    ) -> OpenActionResult<()> {
         self.track(&instance.instance_id, settings.window);
         self.render_cached(instance, settings.window).await
     }
 
-    async fn will_disappear(&self, instance: &Instance, _settings: &Self::Settings) -> OpenActionResult<()> {
+    async fn will_disappear(
+        &self,
+        instance: &Instance,
+        _settings: &Self::Settings,
+    ) -> OpenActionResult<()> {
         self.untrack(&instance.instance_id);
         Ok(())
     }
 
-    async fn dial_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
+    async fn dial_up(
+        &self,
+        instance: &Instance,
+        settings: &Self::Settings,
+    ) -> OpenActionResult<()> {
         self.refresh_one(instance, settings.window).await
     }
 }
@@ -153,7 +169,10 @@ mod tests {
     fn track_then_untrack_round_trips_through_the_registry() {
         let action = UsageGaugeAction::new(NeverCalled);
         action.track("ctx1", WindowKind::Weekly);
-        assert_eq!(*action.shared.registry.get("ctx1").unwrap(), WindowKind::Weekly);
+        assert_eq!(
+            *action.shared.registry.get("ctx1").unwrap(),
+            WindowKind::Weekly
+        );
 
         action.untrack("ctx1");
         assert!(action.shared.registry.get("ctx1").is_none());
@@ -164,7 +183,10 @@ mod tests {
         let action = UsageGaugeAction::new(NeverCalled);
         action.track("ctx1", WindowKind::Session);
         action.track("ctx1", WindowKind::Monthly);
-        assert_eq!(*action.shared.registry.get("ctx1").unwrap(), WindowKind::Monthly);
+        assert_eq!(
+            *action.shared.registry.get("ctx1").unwrap(),
+            WindowKind::Monthly
+        );
     }
 
     #[test]

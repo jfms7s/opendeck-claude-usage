@@ -3,7 +3,7 @@ mod format;
 mod source;
 
 use action::UsageGaugeAction;
-use openaction::{register_action, run, OpenActionResult};
+use openaction::{OpenActionResult, register_action, run};
 use source::file::FileUsageSource;
 
 #[tokio::main]
