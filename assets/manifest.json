@@ -1,0 +1,27 @@
+{
+	"Name": "Claude Usage",
+	"Author": "jfms7s",
+	"Version": "0.1.0",
+	"Category": "Utilities",
+	"Icon": "icons/icon",
+	"OS": [{ "Platform": "linux" }],
+	"CodePaths": {
+		"x86_64-unknown-linux-gnu": "opendeck-claude-usage-x86_64-unknown-linux-gnu",
+		"aarch64-unknown-linux-gnu": "opendeck-claude-usage-aarch64-unknown-linux-gnu"
+	},
+	"CodePathLin": "opendeck-claude-usage-x86_64-unknown-linux-gnu",
+	"Actions": [
+		{
+			"UUID": "com.jfms7s.claudeusage.usagegauge",
+			"Name": "Usage Gauge",
+			"Icon": "icons/icon",
+			"Tooltip": "Shows Claude session/weekly/monthly usage and time until reset",
+			"Controllers": ["Encoder"],
+			"PropertyInspectorPath": "propertyInspector/index.html",
+			"States": [{ "Image": "icons/actionDefaultImage" }],
+			"Encoder": {
+				"layout": "layouts/usage.json"
+			}
+		}
+	]
+}
