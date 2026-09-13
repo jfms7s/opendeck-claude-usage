@@ -2,7 +2,7 @@
 // Assembles dist/<uuid>.sdPlugin/ from assets/ + a release binary for one target.
 // Usage: node build.mjs <target-triple>
 // Requires: cargo build --release --target <target-triple> already run for that triple.
-import { cpSync, copyFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
+import { cpSync, copyFileSync, mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const UUID = "com.jfms7s.claudeusage";
@@ -11,6 +11,27 @@ const BIN_NAME = "opendeck-claude-usage";
 const target = process.argv[2];
 if (!target) {
 	console.error("usage: node build.mjs <target-triple>");
+	process.exit(1);
+}
+
+// Cargo.toml's [package] version and manifest.json's "Version" have nothing
+// keeping them in sync - catch drift here rather than shipping a plugin
+// whose crate version and Elgato-facing manifest version disagree.
+const cargoToml = readFileSync("Cargo.toml", "utf8");
+const cargoVersionMatch = cargoToml.match(/^version\s*=\s*"([^"]+)"/m);
+if (!cargoVersionMatch) {
+	console.error("could not find `version = \"...\"` in Cargo.toml");
+	process.exit(1);
+}
+const cargoVersion = cargoVersionMatch[1];
+
+const manifest = JSON.parse(readFileSync("assets/manifest.json", "utf8"));
+const manifestVersion = manifest.Version;
+
+if (cargoVersion !== manifestVersion) {
+	console.error(
+		`version mismatch: Cargo.toml is ${cargoVersion} but assets/manifest.json is ${manifestVersion} - bump them together`,
+	);
 	process.exit(1);
 }
 
