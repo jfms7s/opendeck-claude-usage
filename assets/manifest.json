@@ -1,7 +1,7 @@
 {
 	"Name": "Claude Usage",
 	"Author": "jfms7s",
-	"Version": "0.1.0",
+	"Version": "0.2.0",
 	"Category": "Utilities",
 	"Icon": "icons/icon",
 	"OS": [{ "Platform": "linux" }],
@@ -16,7 +16,7 @@
 			"Name": "Usage Gauge",
 			"Icon": "icons/icon",
 			"Tooltip": "Shows Claude session/weekly/monthly usage and time until reset",
-			"Controllers": ["Encoder"],
+			"Controllers": ["Encoder", "Keypad"],
 			"PropertyInspectorPath": "propertyInspector/index.html",
 			"States": [{ "Image": "icons/actionDefaultImage" }],
 			"Encoder": {

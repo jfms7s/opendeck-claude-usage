@@ -1,5 +1,6 @@
 mod action;
 mod format;
+mod icon;
 mod source;
 
 use action::UsageGaugeAction;

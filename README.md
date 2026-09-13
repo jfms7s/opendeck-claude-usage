@@ -1,13 +1,20 @@
 # OpenDeck Claude Usage
 
 An [OpenDeck](https://github.com/nekename/OpenDeck) plugin with one action,
-**Usage Gauge**, for a Stream Deck dial: its touch strip shows a live bar,
-percent used, and time until reset for one of Claude's usage windows -
+**Usage Gauge**, assignable to a Stream Deck dial or a keypad tile. It shows
+percent used and time until reset for one of Claude's usage windows -
 **Session** (5 hour), **Weekly** (7 day), or **Monthly** (pay-as-you-go extra
 usage spend, if enabled on your account).
 
-Built for a Stream Deck XL+'s 6 dials and 1200x100 touch strip - assign up
-to three dials (one per window) for an always-visible usage readout.
+On a dial, the touch strip shows a live bar, percent, and detail text. On a
+keypad tile (no touch strip), the same data renders as a title (percent +
+detail, two lines) over a generated speedometer-style gauge icon - a
+three-zone semicircle (green/yellow/red, at the same 50%/80% thresholds as
+the dial's bar) with a needle pointing at the current percent.
+
+Built for a Stream Deck XL+'s 6 dials, 1200x100 touch strip, and 32 keys -
+assign up to three dials or tiles (one per window) for an always-visible
+usage readout.
 
 ## Where the data comes from
 
@@ -39,12 +46,12 @@ either double-click it (if your file manager associates the extension with
 OpenDeck) or unzip it into `~/.config/opendeck/plugins/` and restart OpenDeck
 (plugins are only loaded at startup).
 
-## Using a dial
+## Using a dial or tile
 
-1. Add a **Usage Gauge** key on a dial.
+1. Add a **Usage Gauge** key on a dial or a keypad tile.
 2. Pick which window to show: Session, Weekly, or Monthly (extra usage).
-3. The touch strip updates automatically roughly every 20 seconds; press the
-   dial for an immediate refresh.
+3. It updates automatically roughly every 20 seconds; press the dial or tap
+   the tile for an immediate refresh.
 
 ## Manual smoke-test checklist
 
@@ -55,10 +62,14 @@ development environment, which has no OpenDeck/Stream Deck to test against:
 
 - [ ] Session/Weekly/Monthly dials each show a percent, bar, and detail line
       shortly after appearing. *(not yet verified)*
-- [ ] Display refreshes within ~20s without any interaction. *(not yet verified)*
-- [ ] Pressing a dial refreshes it immediately. *(not yet verified)*
-- [ ] Monthly dial shows "not enabled" cleanly when extra usage is off. *(not yet verified)*
-- [ ] Removing a dial doesn't error on the next poll tick. *(not yet verified)*
+- [ ] Session/Weekly/Monthly keypad tiles each show a title (percent +
+      detail) and a gauge icon with the needle at the right position shortly
+      after appearing. *(not yet verified)*
+- [ ] Display refreshes within ~20s without any interaction, on both a dial
+      and a tile. *(not yet verified)*
+- [ ] Pressing a dial or tapping a tile refreshes it immediately. *(not yet verified)*
+- [ ] Monthly dial/tile shows "not enabled" cleanly when extra usage is off. *(not yet verified)*
+- [ ] Removing a dial or tile doesn't error on the next poll tick. *(not yet verified)*
 
 ## Development
 

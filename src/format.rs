@@ -43,66 +43,94 @@ pub fn format_countdown(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> String 
     }
 }
 
-/// Builds the `setFeedback` payload for one dial: a flat object keyed by
-/// each layout item's `key` (see assets/layouts/usage.json) - "percent" and
-/// "detail" are plain strings (Text items), "bar" is an object updating both
-/// the fill value and its color in one push (Bar items accept either a bare
-/// number/string for just `value`, or an object for `value` plus any of its
-/// other fields like `bar_fill_c`).
-pub fn build_feedback(snapshot: &UsageSnapshot, window: WindowKind, now: DateTime<Utc>) -> Value {
+/// Everything needed to render one instance's current state, independent of
+/// which controller (Encoder touch-strip feedback, Keypad title+icon) ends
+/// up drawing it - both surfaces render from the same computed values so
+/// they can never drift apart.
+pub struct UsageDisplay {
+    pub percent_text: String,
+    pub color: &'static str,
+    pub detail_text: String,
+    /// Clamped to 0..=100 - a genuine >100% (e.g. an overage) still shows as
+    /// "105%" in `percent_text`, but an out-of-range bar/gauge value renders
+    /// undefined on the actual hardware.
+    pub bar_value: f64,
+}
+
+/// Computes what to show for one instance's current state, independent of
+/// which controller ends up rendering it. `feedback_for_display` below turns
+/// this into an Encoder's `setFeedback` payload; `icon::build_icon` and a
+/// two-line title turn it into a Keypad tile.
+pub fn build_display(
+    snapshot: &UsageSnapshot,
+    window: WindowKind,
+    now: DateTime<Utc>,
+) -> UsageDisplay {
     match window {
-        WindowKind::Session => window_feedback(&snapshot.session, now),
-        WindowKind::Weekly => window_feedback(&snapshot.weekly, now),
-        WindowKind::Monthly => monthly_feedback(&snapshot.monthly),
+        WindowKind::Session => window_display(&snapshot.session, now),
+        WindowKind::Weekly => window_display(&snapshot.weekly, now),
+        WindowKind::Monthly => monthly_display(&snapshot.monthly),
     }
 }
 
-fn window_feedback(window: &WindowUsage, now: DateTime<Utc>) -> Value {
+fn window_display(window: &WindowUsage, now: DateTime<Utc>) -> UsageDisplay {
     let detail = match window.resets_at {
         Some(resets_at) => format_countdown(resets_at, now),
         None => "no reset info".to_string(),
     };
-    bar_feedback(
-        window.percent,
-        bar_color(window.percent),
-        &format_percent(window.percent),
-        &detail,
-    )
+    make_display(window.percent, bar_color(window.percent), &detail)
 }
 
-fn monthly_feedback(monthly: &MonthlyUsage) -> Value {
+fn monthly_display(monthly: &MonthlyUsage) -> UsageDisplay {
     if !monthly.enabled {
-        return bar_feedback(0.0, DISABLED_COLOR, "\u{2014}", "not enabled");
+        return UsageDisplay {
+            percent_text: "\u{2014}".to_string(),
+            color: DISABLED_COLOR,
+            detail_text: "not enabled".to_string(),
+            bar_value: 0.0,
+        };
     }
     let percent = monthly.percent.unwrap_or(0.0);
     let detail = match (monthly.used_dollars, monthly.limit_dollars) {
         (Some(used), Some(limit)) => format!("${used:.2} / ${limit:.2}"),
         _ => "spend unavailable".to_string(),
     };
-    bar_feedback(
-        percent,
-        bar_color(percent),
-        &format_percent(percent),
-        &detail,
-    )
+    make_display(percent, bar_color(percent), &detail)
 }
 
-fn bar_feedback(bar_value: f64, bar_color: &str, percent_text: &str, detail_text: &str) -> Value {
-    // Only the bar's numeric value is clamped - a genuine >100% (e.g. an
-    // overage) should still show as "105%" in the text percent, but an
-    // out-of-range bar value renders undefined on the actual hardware.
-    let bar_value = bar_value.clamp(0.0, 100.0);
+fn make_display(percent: f64, color: &'static str, detail_text: &str) -> UsageDisplay {
+    UsageDisplay {
+        percent_text: format_percent(percent),
+        color,
+        detail_text: detail_text.to_string(),
+        bar_value: percent.clamp(0.0, 100.0),
+    }
+}
+
+/// Converts an already-computed `UsageDisplay` into an Encoder's
+/// `setFeedback` payload: a flat object keyed by each layout item's `key`
+/// (see assets/layouts/usage.json) - "percent" and "detail" are plain
+/// strings (Text items), "bar" is an object updating both the fill value
+/// and its color in one push (Bar items accept either a bare number/string
+/// for just `value`, or an object for `value` plus other fields like
+/// `bar_fill_c`).
+pub fn feedback_for_display(display: &UsageDisplay) -> Value {
     json!({
-        "bar": { "value": bar_value, "bar_fill_c": bar_color },
-        "percent": percent_text,
-        "detail": detail_text,
+        "bar": { "value": display.bar_value, "bar_fill_c": display.color },
+        "percent": display.percent_text,
+        "detail": display.detail_text,
     })
 }
 
-/// Rendered when `UsageSource::read()` fails - a clearly-labeled "no data"
+/// Computed when `UsageSource::read()` fails - a clearly-labeled "no data"
 /// state, never a blank or stale display.
-pub fn error_feedback() -> Value {
-    bar_feedback(0.0, DISABLED_COLOR, "\u{2014}", "no data")
+pub fn error_display() -> UsageDisplay {
+    UsageDisplay {
+        percent_text: "\u{2014}".to_string(),
+        color: DISABLED_COLOR,
+        detail_text: "no data".to_string(),
+        bar_value: 0.0,
+    }
 }
 
 #[cfg(test)]
@@ -181,6 +209,18 @@ mod tests {
         }
     }
 
+    // `build_feedback`/`error_feedback` aren't kept as production functions
+    // (nothing outside tests calls them since `render()` in action.rs
+    // dispatches through `UsageDisplay` instead) - these two just compose
+    // the same pipeline for the JSON-shape assertions below.
+    fn build_feedback(snapshot: &UsageSnapshot, window: WindowKind, now: DateTime<Utc>) -> Value {
+        feedback_for_display(&build_display(snapshot, window, now))
+    }
+
+    fn error_feedback() -> Value {
+        feedback_for_display(&error_display())
+    }
+
     #[test]
     fn builds_session_feedback() {
         let feedback = build_feedback(&snapshot(), WindowKind::Session, dt(20, 30, 0));
@@ -233,5 +273,46 @@ mod tests {
         let feedback = error_feedback();
         assert_eq!(feedback["detail"], "no data");
         assert_eq!(feedback["bar"]["value"], 0.0);
+    }
+
+    #[test]
+    fn display_session() {
+        let d = build_display(&snapshot(), WindowKind::Session, dt(20, 30, 0));
+        assert_eq!(d.percent_text, "33%");
+        assert_eq!(d.color, "#22c55e");
+        assert_eq!(d.detail_text, "resets in 2h 10m");
+        assert_eq!(d.bar_value, 33.0);
+    }
+
+    #[test]
+    fn display_disabled_monthly() {
+        let mut s = snapshot();
+        s.monthly = MonthlyUsage {
+            enabled: false,
+            percent: None,
+            used_dollars: None,
+            limit_dollars: None,
+        };
+        let d = build_display(&s, WindowKind::Monthly, dt(20, 30, 0));
+        assert_eq!(d.percent_text, "\u{2014}");
+        assert_eq!(d.color, DISABLED_COLOR);
+        assert_eq!(d.detail_text, "not enabled");
+    }
+
+    #[test]
+    fn display_clamps_bar_value_but_not_percent_text() {
+        let mut s = snapshot();
+        s.session.percent = 142.0;
+        let d = build_display(&s, WindowKind::Session, dt(20, 30, 0));
+        assert_eq!(d.percent_text, "142%");
+        assert_eq!(d.bar_value, 100.0);
+    }
+
+    #[test]
+    fn error_display_is_a_clear_no_data_state() {
+        let d = error_display();
+        assert_eq!(d.detail_text, "no data");
+        assert_eq!(d.bar_value, 0.0);
+        assert_eq!(d.color, DISABLED_COLOR);
     }
 }

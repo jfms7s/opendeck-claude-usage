@@ -1,4 +1,5 @@
-use crate::format::{build_feedback, error_feedback};
+use crate::format::{UsageDisplay, build_display, error_display, feedback_for_display};
+use crate::icon::build_icon;
 use crate::source::{UsageSnapshot, UsageSource, WindowKind};
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -7,6 +8,11 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
+
+/// The wire value OpenDeck sends as `Instance::controller` for a keypad
+/// tile (vs. `"Encoder"` for a dial) - confirmed against openaction 2.7's
+/// own `GenericInstancePayload`, which just forwards this string verbatim.
+const KEYPAD_CONTROLLER: &str = "Keypad";
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct UsageGaugeSettings {
@@ -53,16 +59,32 @@ impl UsageGaugeAction {
         self.shared.registry.remove(instance_id);
     }
 
-    /// Renders from the last cached snapshot (no fresh read) - used when a
-    /// dial appears or its settings change, so it shows *something*
+    /// Renders from the last cached snapshot (no fresh read) - used when an
+    /// instance appears or its settings change, so it shows *something*
     /// immediately rather than waiting for the next poll tick.
     async fn render_cached(&self, instance: &Instance, window: WindowKind) -> OpenActionResult<()> {
         let snapshot = self.shared.latest.read().await.clone();
-        let feedback = match snapshot {
-            Some(s) => build_feedback(&s, window, chrono::Utc::now()),
-            None => error_feedback(),
+        let display = match snapshot {
+            Some(s) => build_display(&s, window, chrono::Utc::now()),
+            None => error_display(),
         };
-        instance.set_feedback(&feedback).await
+        Self::render(instance, &display).await
+    }
+
+    /// Pushes `display` to one instance via whichever surface its
+    /// controller actually has: a dial's touch-strip feedback layout, or a
+    /// keypad tile's title text + a generated icon (keys have no touch
+    /// strip). Both branches render from the same `UsageDisplay`, computed
+    /// once by the caller, so the two surfaces can never show different
+    /// numbers for the same instance.
+    async fn render(instance: &Instance, display: &UsageDisplay) -> OpenActionResult<()> {
+        if instance.controller == KEYPAD_CONTROLLER {
+            let title = format!("{}\n{}", display.percent_text, display.detail_text);
+            instance.set_title(Some(title), None).await?;
+            instance.set_image(Some(build_icon(display)), None).await
+        } else {
+            instance.set_feedback(&feedback_for_display(display)).await
+        }
     }
 
     /// Reads the source, and on success caches it in `latest` for
@@ -76,17 +98,18 @@ impl UsageGaugeAction {
         result
     }
 
-    /// Reads the source directly and renders just this one dial immediately
-    /// - used on a dial press, without waiting for the next scheduled tick.
+    /// Reads the source directly and renders just this one instance
+    /// immediately - used on a dial press or keypad tap, without waiting
+    /// for the next scheduled tick.
     async fn refresh_one(&self, instance: &Instance, window: WindowKind) -> OpenActionResult<()> {
-        let feedback = match self.read_and_cache().await {
-            Ok(snapshot) => build_feedback(&snapshot, window, chrono::Utc::now()),
+        let display = match self.read_and_cache().await {
+            Ok(snapshot) => build_display(&snapshot, window, chrono::Utc::now()),
             Err(e) => {
                 log::warn!("usage source read failed: {e}");
-                error_feedback()
+                error_display()
             }
         };
-        instance.set_feedback(&feedback).await
+        Self::render(instance, &display).await
     }
 
     /// Logs the poll loop's read outcome, but only on a transition (first
@@ -138,14 +161,14 @@ impl UsageGaugeAction {
 
         for (instance_id, window) in entries {
             let Some(instance) = openaction::get_instance(instance_id).await else {
-                continue; // dial disappeared between the registry snapshot and now
+                continue; // instance disappeared between the registry snapshot and now
             };
-            let feedback = match &read_result {
-                Ok(snapshot) => build_feedback(snapshot, window, chrono::Utc::now()),
-                Err(_) => error_feedback(),
+            let display = match &read_result {
+                Ok(snapshot) => build_display(snapshot, window, chrono::Utc::now()),
+                Err(_) => error_display(),
             };
-            if let Err(e) = instance.set_feedback(&feedback).await {
-                log::warn!("set_feedback failed: {e}");
+            if let Err(e) = Self::render(&instance, &display).await {
+                log::warn!("render failed: {e}");
             }
         }
     }
@@ -188,6 +211,12 @@ impl Action for UsageGaugeAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
+        self.refresh_one(instance, settings.window).await
+    }
+
+    /// Keypad's equivalent of `dial_up` - a tap forces an immediate refresh
+    /// of just that tile, same as a dial press does for an Encoder.
+    async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
         self.refresh_one(instance, settings.window).await
     }
 }
@@ -252,7 +281,8 @@ mod tests {
             .iter()
             .map(|i| i["key"].as_str().unwrap())
             .collect();
-        for k in crate::format::error_feedback().as_object().unwrap().keys() {
+        let feedback = feedback_for_display(&error_display());
+        for k in feedback.as_object().unwrap().keys() {
             assert!(keys.contains(&k.as_str()), "layout has no item keyed {k}");
         }
     }
