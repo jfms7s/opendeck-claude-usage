@@ -88,6 +88,10 @@ fn monthly_feedback(monthly: &MonthlyUsage) -> Value {
 }
 
 fn bar_feedback(bar_value: f64, bar_color: &str, percent_text: &str, detail_text: &str) -> Value {
+    // Only the bar's numeric value is clamped - a genuine >100% (e.g. an
+    // overage) should still show as "105%" in the text percent, but an
+    // out-of-range bar value renders undefined on the actual hardware.
+    let bar_value = bar_value.clamp(0.0, 100.0);
     json!({
         "bar": { "value": bar_value, "bar_fill_c": bar_color },
         "percent": percent_text,
@@ -213,6 +217,15 @@ mod tests {
         assert_eq!(feedback["percent"], "\u{2014}");
         assert_eq!(feedback["detail"], "not enabled");
         assert_eq!(feedback["bar"]["bar_fill_c"], DISABLED_COLOR);
+    }
+
+    #[test]
+    fn bar_value_is_clamped_but_percent_text_is_not() {
+        let mut s = snapshot();
+        s.session.percent = 142.0;
+        let feedback = build_feedback(&s, WindowKind::Session, dt(20, 30, 0));
+        assert_eq!(feedback["percent"], "142%");
+        assert_eq!(feedback["bar"]["value"], 100.0);
     }
 
     #[test]
