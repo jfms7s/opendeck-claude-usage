@@ -24,6 +24,13 @@ session and weekly exist. The "Monthly" setting shows `extra_usage`
 closest real metric to what "monthly" usually means. It renders "not
 enabled" if you haven't turned on pay-as-you-go overage credits.
 
+The dollar amounts shown for Monthly (`used_credits`/`monthly_limit` in the
+source file) are assumed to already be decimal dollars (e.g. `12.5` means
+$12.50), not minor units needing further scaling - this is unverified,
+since the account used to build this plugin has never had `extra_usage`
+enabled. The `currency` field in `extra_usage` is currently ignored
+entirely; the `$` sign is hardcoded regardless of account currency.
+
 ## Installing
 
 Download the latest `.streamDeckPlugin` from
@@ -42,14 +49,16 @@ OpenDeck) or unzip it into `~/.config/opendeck/plugins/` and restart OpenDeck
 ## Manual smoke-test checklist
 
 Run this against a live OpenDeck + Stream Deck XL+ session before cutting a
-release:
+release. None of these have been verified on real hardware as of this
+version - the manual smoke test was deliberately not run in this
+development environment, which has no OpenDeck/Stream Deck to test against:
 
 - [ ] Session/Weekly/Monthly dials each show a percent, bar, and detail line
-      shortly after appearing. *(verified / not yet verified)*
-- [ ] Display refreshes within ~20s without any interaction. *(verified / not yet verified)*
-- [ ] Pressing a dial refreshes it immediately. *(verified / not yet verified)*
-- [ ] Monthly dial shows "not enabled" cleanly when extra usage is off. *(verified / not yet verified)*
-- [ ] Removing a dial doesn't error on the next poll tick. *(verified / not yet verified)*
+      shortly after appearing. *(not yet verified)*
+- [ ] Display refreshes within ~20s without any interaction. *(not yet verified)*
+- [ ] Pressing a dial refreshes it immediately. *(not yet verified)*
+- [ ] Monthly dial shows "not enabled" cleanly when extra usage is off. *(not yet verified)*
+- [ ] Removing a dial doesn't error on the next poll tick. *(not yet verified)*
 
 ## Development
 

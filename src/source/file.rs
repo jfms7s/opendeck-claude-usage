@@ -69,6 +69,13 @@ fn parse_snapshot(json: &str) -> Result<UsageSnapshot, UsageSourceError> {
     Ok(UsageSnapshot {
         session: parse_window(raw.five_hour),
         weekly: parse_window(raw.seven_day),
+        // `used_credits`/`monthly_limit` are taken as-is and treated as
+        // decimal dollar amounts (e.g. 12.5 == $12.50), not minor units
+        // that would need scaling by some `decimal_places` field. This is
+        // unverified: the account used to build this plugin has never had
+        // `extra_usage` enabled, so there's no real sample to check the
+        // assumption against. If a real account later shows fractional-cent
+        // drift here, that's the first place to look.
         monthly: MonthlyUsage {
             enabled: raw.extra_usage.is_enabled,
             percent: raw.extra_usage.utilization,
