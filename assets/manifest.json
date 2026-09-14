@@ -1,7 +1,7 @@
 {
 	"Name": "Claude Usage",
 	"Author": "jfms7s",
-	"Version": "0.2.0",
+	"Version": "0.3.0",
 	"Category": "Utilities",
 	"Icon": "icons/icon",
 	"OS": [{ "Platform": "linux" }],
@@ -22,6 +22,15 @@
 			"Encoder": {
 				"layout": "layouts/usage.json"
 			}
+		},
+		{
+			"UUID": "com.jfms7s.claudeusage.peakclock",
+			"Name": "Peak Clock",
+			"Icon": "icons/icon",
+			"Tooltip": "Shows a 24h clock with Claude's peak hours marked, whether it's currently peak or off-peak, and time until the next transition",
+			"Controllers": ["Keypad"],
+			"PropertyInspectorPath": "propertyInspector/peakclock.html",
+			"States": [{ "Image": "icons/actionDefaultImage" }]
 		}
 	]
 }

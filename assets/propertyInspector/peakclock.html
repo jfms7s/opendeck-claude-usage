@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<style>
+		body { font: 12px system-ui, sans-serif; margin: 0; padding: 8px 12px; }
+		label { display: block; margin-top: 10px; font-size: 11px; opacity: 0.8; }
+		input { width: 100%; box-sizing: border-box; margin-top: 2px; }
+	</style>
+</head>
+<body>
+	<label for="peak_start">Peak starts at</label>
+	<input type="time" id="peak_start" />
+
+	<label for="peak_end">Peak ends at</label>
+	<input type="time" id="peak_end" />
+
+	<script>
+		window.connectOpenActionSocketData = new Promise((resolve) => {
+			window.connectOpenActionSocket = (...args) => resolve(args);
+			window.connectElgatoStreamDeckSocket = window.connectOpenActionSocket;
+		});
+
+		let websocket;
+		let uuid;
+
+		window.connectOpenActionSocketData.then(([inPort, inUUID, inRegisterEvent, inInfo, inActionInfo]) => {
+			uuid = inUUID;
+			const actionInfo = JSON.parse(inActionInfo);
+			websocket = new WebSocket(`ws://127.0.0.1:${inPort}`);
+
+			websocket.onopen = () => {
+				websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
+				applySettings(actionInfo.payload.settings || {});
+			};
+
+			websocket.onmessage = (event) => {
+				const message = JSON.parse(event.data);
+				if (message.event === "didReceiveSettings") {
+					applySettings(message.payload.settings || {});
+				}
+			};
+		});
+
+		function applySettings(settings) {
+			document.getElementById("peak_start").value = settings.peak_start || "13:00";
+			document.getElementById("peak_end").value = settings.peak_end || "18:00";
+		}
+
+		function sendSettings() {
+			websocket.send(JSON.stringify({
+				event: "setSettings",
+				context: uuid,
+				payload: {
+					peak_start: document.getElementById("peak_start").value,
+					peak_end: document.getElementById("peak_end").value,
+				},
+			}));
+		}
+
+		document.getElementById("peak_start").addEventListener("change", sendSettings);
+		document.getElementById("peak_end").addEventListener("change", sendSettings);
+	</script>
+</body>
+</html>
