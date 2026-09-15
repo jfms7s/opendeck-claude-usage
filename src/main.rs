@@ -4,6 +4,7 @@ mod clock_icon;
 mod format;
 mod icon;
 mod peak;
+mod pricing;
 mod source;
 
 use action::UsageGaugeAction;
