@@ -66,16 +66,10 @@ fn minutes_until(from: u32, to: u32) -> u32 {
     (to + 1440 - from) % 1440
 }
 
-fn format_minutes(total_minutes: u32) -> String {
+fn format_hhmm(total_minutes: u32) -> String {
     let hours = total_minutes / 60;
     let minutes = total_minutes % 60;
-    if hours > 0 {
-        format!("{hours}h {minutes:02}m")
-    } else if minutes > 0 {
-        format!("{minutes}m")
-    } else {
-        "<1m".to_string()
-    }
+    format!("{hours:02}:{minutes:02}")
 }
 
 pub fn peak_status(window: PeakWindow, now: NaiveTime) -> PeakStatus {
@@ -88,9 +82,9 @@ pub fn peak_status(window: PeakWindow, now: NaiveTime) -> PeakStatus {
         ("Off-peak", minutes_until(now_minutes, window.start_minutes))
     };
     let countdown_text = if is_peak {
-        format!("peak ends in {}", format_minutes(until))
+        format!("off-peak in {}", format_hhmm(until))
     } else {
-        format!("peak starts in {}", format_minutes(until))
+        format!("peak in {}", format_hhmm(until))
     };
     PeakStatus {
         is_peak,
@@ -168,7 +162,7 @@ mod tests {
         let status = peak_status(window, time(10, 0));
         assert!(status.is_peak);
         assert_eq!(status.status_text, "Peak");
-        assert_eq!(status.countdown_text, "peak ends in 7h 00m");
+        assert_eq!(status.countdown_text, "off-peak in 07:00");
     }
 
     #[test]
@@ -180,7 +174,7 @@ mod tests {
         let status = peak_status(window, time(8, 0));
         assert!(!status.is_peak);
         assert_eq!(status.status_text, "Off-peak");
-        assert_eq!(status.countdown_text, "peak starts in 1h 00m");
+        assert_eq!(status.countdown_text, "peak in 01:00");
     }
 
     #[test]
@@ -191,7 +185,7 @@ mod tests {
         };
         let status = peak_status(window, time(23, 0));
         assert!(status.is_peak);
-        assert_eq!(status.countdown_text, "peak ends in 7h 00m");
+        assert_eq!(status.countdown_text, "off-peak in 07:00");
     }
 
     #[test]
@@ -202,7 +196,7 @@ mod tests {
         };
         let status = peak_status(window, time(12, 0));
         assert!(!status.is_peak);
-        assert_eq!(status.countdown_text, "peak starts in 10h 00m");
+        assert_eq!(status.countdown_text, "peak in 10:00");
     }
 
     #[test]
