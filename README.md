@@ -1,10 +1,11 @@
 # OpenDeck Claude Usage
 
-An [OpenDeck](https://github.com/nekename/OpenDeck) plugin with one action,
-**Usage Gauge**, assignable to a Stream Deck dial or a keypad tile. It shows
-percent used and time until reset for one of Claude's usage windows -
-**Session** (5 hour), **Weekly** (7 day), or **Monthly** (pay-as-you-go extra
-usage spend, if enabled on your account).
+An [OpenDeck](https://github.com/nekename/OpenDeck) plugin with three actions
+- **Usage Gauge**, **Peak Clock**, and **Metric Tile**. Usage Gauge is
+assignable to a Stream Deck dial or a keypad tile and shows percent used and
+time until reset for one of Claude's usage windows - **Session** (5 hour),
+**Weekly** (7 day), or **Monthly** (pay-as-you-go extra usage spend, if
+enabled on your account).
 
 On a dial, the touch strip shows a live bar, percent, and detail text. On a
 keypad tile (no touch strip), the same data renders as a title (percent +

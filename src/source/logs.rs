@@ -13,7 +13,10 @@ pub struct LogEntry {
 
 impl LogEntry {
     pub fn total_tokens(&self) -> u64 {
-        self.input_tokens + self.output_tokens + self.cache_creation_input_tokens + self.cache_read_input_tokens
+        self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_input_tokens
+            + self.cache_read_input_tokens
     }
 }
 
@@ -214,7 +217,9 @@ mod tests {
         assert_eq!(entry.output_tokens, 346);
         assert_eq!(entry.cache_creation_input_tokens, 19929);
         assert_eq!(entry.cache_read_input_tokens, 29011);
-        let expected = DateTime::parse_from_rfc3339("2026-09-13T12:59:01.971Z").unwrap().with_timezone(&Utc);
+        let expected = DateTime::parse_from_rfc3339("2026-09-13T12:59:01.971Z")
+            .unwrap()
+            .with_timezone(&Utc);
         assert_eq!(entry.timestamp, expected);
     }
 
@@ -251,7 +256,11 @@ mod tests {
     fn parse_file_skips_malformed_lines_but_keeps_valid_ones() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
-        fs::write(&path, format!("{ASSISTANT_LINE}\nnot json\n{SYNTHETIC_LINE}\n{USER_LINE}\n")).unwrap();
+        fs::write(
+            &path,
+            format!("{ASSISTANT_LINE}\nnot json\n{SYNTHETIC_LINE}\n{USER_LINE}\n"),
+        )
+        .unwrap();
 
         let entries = parse_file(&path);
         assert_eq!(entries.len(), 1);

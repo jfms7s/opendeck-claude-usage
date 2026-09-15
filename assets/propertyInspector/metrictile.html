@@ -60,13 +60,14 @@
 		}
 
 		function sendSettings() {
+			const refreshSeconds = Math.min(3600, Math.max(5, parseInt(document.getElementById("refresh_seconds").value, 10) || 60));
 			websocket.send(JSON.stringify({
 				event: "setSettings",
 				context: uuid,
 				payload: {
 					metric: document.getElementById("metric").value,
 					range: document.getElementById("range").value,
-					refresh_seconds: parseInt(document.getElementById("refresh_seconds").value, 10) || 60,
+					refresh_seconds: refreshSeconds,
 				},
 			}));
 		}

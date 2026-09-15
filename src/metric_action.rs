@@ -1,7 +1,7 @@
 use crate::metric::{MetricKind, RangeKind};
+use crate::source::UsageSource;
 use crate::source::file::FileUsageSource;
 use crate::source::logs::LogUsageSource;
-use crate::source::UsageSource;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use openaction::{Action, Instance, OpenActionResult};
@@ -54,7 +54,10 @@ impl MetricTileAction {
     fn track(&self, instance_id: &str, settings: MetricTileSettings) {
         self.registry.insert(
             instance_id.to_string(),
-            TrackedInstance { settings, next_due: Instant::now() },
+            TrackedInstance {
+                settings,
+                next_due: Instant::now(),
+            },
         );
     }
 
@@ -77,11 +80,15 @@ impl MetricTileAction {
         let display = if entries.is_empty() {
             crate::metric::error_display()
         } else {
-            let session_resets_at = session_source
-                .read()
-                .await
-                .ok()
-                .and_then(|s| s.session.resets_at);
+            let session_resets_at = if settings.range == crate::metric::RangeKind::Session {
+                session_source
+                    .read()
+                    .await
+                    .ok()
+                    .and_then(|s| s.session.resets_at)
+            } else {
+                None
+            };
             crate::metric::build_metric_display(
                 &entries,
                 settings.metric,
@@ -90,10 +97,16 @@ impl MetricTileAction {
                 session_resets_at,
             )
         };
-        let title = format!("{}\n{}\n{}", display.label, display.value_text, display.subtitle);
+        let title = format!(
+            "{}\n{}\n{}",
+            display.label, display.value_text, display.subtitle
+        );
         instance.set_title(Some(title), None).await?;
         instance
-            .set_image(Some(crate::metric_icon::build_metric_icon(display.accent_color)), None)
+            .set_image(
+                Some(crate::metric_icon::build_metric_icon(display.accent_color)),
+                None,
+            )
             .await
     }
 
@@ -123,12 +136,15 @@ impl MetricTileAction {
                 continue; // removed between the snapshot and now
             };
             if let Some(mut tracked) = self.registry.get_mut(&instance_id) {
-                tracked.next_due = Instant::now() + Duration::from_secs(settings.refresh_seconds.max(1));
+                tracked.next_due =
+                    Instant::now() + Duration::from_secs(settings.refresh_seconds.max(1));
             }
             let Some(instance) = openaction::get_instance(instance_id).await else {
                 continue; // instance disappeared between the snapshot and now
             };
-            if let Err(e) = Self::render(&instance, &self.log_source, &self.session_source, &settings).await {
+            if let Err(e) =
+                Self::render(&instance, &self.log_source, &self.session_source, &settings).await
+            {
                 log::warn!("metric tile render failed: {e}");
             }
         }
@@ -151,17 +167,29 @@ impl Action for MetricTileAction {
     const UUID: &'static str = "com.jfms7s.claudeusage.metrictile";
     type Settings = MetricTileSettings;
 
-    async fn will_appear(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
+    async fn will_appear(
+        &self,
+        instance: &Instance,
+        settings: &Self::Settings,
+    ) -> OpenActionResult<()> {
         self.track(&instance.instance_id, settings.clone());
         Self::render(instance, &self.log_source, &self.session_source, settings).await
     }
 
-    async fn did_receive_settings(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
+    async fn did_receive_settings(
+        &self,
+        instance: &Instance,
+        settings: &Self::Settings,
+    ) -> OpenActionResult<()> {
         self.track(&instance.instance_id, settings.clone());
         Self::render(instance, &self.log_source, &self.session_source, settings).await
     }
 
-    async fn will_disappear(&self, instance: &Instance, _settings: &Self::Settings) -> OpenActionResult<()> {
+    async fn will_disappear(
+        &self,
+        instance: &Instance,
+        _settings: &Self::Settings,
+    ) -> OpenActionResult<()> {
         self.untrack(&instance.instance_id);
         Ok(())
     }
@@ -210,8 +238,22 @@ mod tests {
     #[test]
     fn tracking_the_same_instance_twice_overwrites_its_settings() {
         let action = MetricTileAction::new(LogUsageSource::default(), FileUsageSource::default());
-        action.track("ctx1", MetricTileSettings { metric: MetricKind::Tokens, range: RangeKind::Today, refresh_seconds: 60 });
-        action.track("ctx1", MetricTileSettings { metric: MetricKind::Cost, range: RangeKind::Session, refresh_seconds: 30 });
+        action.track(
+            "ctx1",
+            MetricTileSettings {
+                metric: MetricKind::Tokens,
+                range: RangeKind::Today,
+                refresh_seconds: 60,
+            },
+        );
+        action.track(
+            "ctx1",
+            MetricTileSettings {
+                metric: MetricKind::Cost,
+                range: RangeKind::Session,
+                refresh_seconds: 30,
+            },
+        );
         let tracked = action.registry.get("ctx1").unwrap();
         assert_eq!(tracked.settings.metric, MetricKind::Cost);
         assert_eq!(tracked.settings.refresh_seconds, 30);
@@ -227,7 +269,10 @@ mod tests {
         ];
         let mut due = due_instance_ids(&tracked, now);
         due.sort();
-        assert_eq!(due, vec!["already_due".to_string(), "exactly_due".to_string()]);
+        assert_eq!(
+            due,
+            vec!["already_due".to_string(), "exactly_due".to_string()]
+        );
     }
 
     #[test]

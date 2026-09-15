@@ -57,18 +57,29 @@ pub fn range_bounds(
 }
 
 /// `< 1000` as an exact integer; otherwise one decimal place with a
-/// K/M suffix, trimming a trailing ".0" (`318000` -> `"318K"`, `318500`
+/// K/M/B suffix, trimming a trailing ".0" (`318000` -> `"318K"`, `318500`
 /// -> `"318.5K"`, `1234567` -> `"1.2M"`) - matches the mockup this tile
 /// is based on.
 pub fn format_tokens(total: u64) -> String {
+    const K: u64 = 1_000;
+    const M: u64 = 1_000_000;
+    const B: u64 = 1_000_000_000;
+    // The lower-tier cutoff for each boundary is 999_950 (or its scaled
+    // equivalent), not the round power of ten - a raw `< 1_000_000` check
+    // would let e.g. 999_950 format at the K tier, round to "1000.0" at
+    // one decimal place, and display as the nonsensical "1000K" instead
+    // of switching tiers to "1M".
     if total < 1000 {
         return total.to_string();
     }
-    let (value, suffix) = if total < 1_000_000 {
-        (total as f64 / 1_000.0, "K")
+    let (divisor, suffix) = if total < 999_950 {
+        (K, "K")
+    } else if total < 999_950 * K {
+        (M, "M")
     } else {
-        (total as f64 / 1_000_000.0, "M")
+        (B, "B")
     };
+    let value = total as f64 / divisor as f64;
     let formatted = format!("{value:.1}");
     let trimmed = formatted.strip_suffix(".0").unwrap_or(&formatted);
     format!("{trimmed}{suffix}")
@@ -203,6 +214,24 @@ mod tests {
     }
 
     #[test]
+    fn format_tokens_billions() {
+        assert_eq!(format_tokens(2_586_419_159), "2.6B");
+        assert_eq!(format_tokens(5_000_000_000), "5B");
+    }
+
+    #[test]
+    fn format_tokens_switches_tiers_at_the_rounding_boundary_not_the_power_of_ten() {
+        assert_eq!(format_tokens(999_949), "999.9K");
+        assert_eq!(format_tokens(999_950), "1M");
+        assert_eq!(format_tokens(999_999), "1M");
+    }
+
+    #[test]
+    fn format_tokens_switches_from_millions_to_billions_at_the_same_rounding_boundary() {
+        assert_eq!(format_tokens(999_999_999), "1B");
+    }
+
+    #[test]
     fn format_cost_always_shows_two_decimals() {
         assert_eq!(format_cost(0.0), "$0.00");
         assert_eq!(format_cost(8.4), "$8.40");
@@ -227,7 +256,8 @@ mod tests {
             entry(now - Duration::hours(1), "claude-sonnet-5", 100, 50), // within last 24h
             entry(now - Duration::hours(30), "claude-sonnet-5", 999, 999), // outside the Today (24h) window
         ];
-        let display = build_metric_display(&entries, MetricKind::Tokens, RangeKind::Today, now, None);
+        let display =
+            build_metric_display(&entries, MetricKind::Tokens, RangeKind::Today, now, None);
         assert_eq!(display.label, "Tokens");
         assert_eq!(display.value_text, "150");
         assert_eq!(display.subtitle, "today");
@@ -250,8 +280,16 @@ mod tests {
     fn build_metric_display_subtitle_matches_each_range() {
         let now = dt(20, 0);
         let entries: Vec<LogEntry> = vec![];
-        assert_eq!(build_metric_display(&entries, MetricKind::Tokens, RangeKind::SevenDay, now, None).subtitle, "7 days");
-        assert_eq!(build_metric_display(&entries, MetricKind::Tokens, RangeKind::Session, now, None).subtitle, "session");
+        assert_eq!(
+            build_metric_display(&entries, MetricKind::Tokens, RangeKind::SevenDay, now, None)
+                .subtitle,
+            "7 days"
+        );
+        assert_eq!(
+            build_metric_display(&entries, MetricKind::Tokens, RangeKind::Session, now, None)
+                .subtitle,
+            "session"
+        );
     }
 
     #[test]
