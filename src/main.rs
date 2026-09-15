@@ -3,6 +3,7 @@ mod clock_action;
 mod clock_icon;
 mod format;
 mod icon;
+mod metric;
 mod peak;
 mod pricing;
 mod source;
