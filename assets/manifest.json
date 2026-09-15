@@ -31,6 +31,15 @@
 			"Controllers": ["Keypad"],
 			"PropertyInspectorPath": "propertyInspector/peakclock.html",
 			"States": [{ "Image": "icons/actionDefaultImage" }]
+		},
+		{
+			"UUID": "com.jfms7s.claudeusage.metrictile",
+			"Name": "Metric Tile",
+			"Icon": "icons/icon",
+			"Tooltip": "Shows total Claude Code tokens or estimated cost, parsed from local transcript logs, for today/7 days/the current session",
+			"Controllers": ["Keypad"],
+			"PropertyInspectorPath": "propertyInspector/metrictile.html",
+			"States": [{ "Image": "icons/actionDefaultImage" }]
 		}
 	]
 }

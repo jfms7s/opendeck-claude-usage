@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<style>
+		body { font: 12px system-ui, sans-serif; margin: 0; padding: 8px 12px; }
+		label { display: block; margin-top: 10px; font-size: 11px; opacity: 0.8; }
+		select, input { width: 100%; box-sizing: border-box; margin-top: 2px; }
+	</style>
+</head>
+<body>
+	<label for="metric">Metric</label>
+	<select id="metric">
+		<option value="tokens">Tokens</option>
+		<option value="cost">Cost</option>
+	</select>
+
+	<label for="range">Range</label>
+	<select id="range">
+		<option value="today">Today</option>
+		<option value="sevenday">7 days</option>
+		<option value="session">Session (5 hour)</option>
+	</select>
+
+	<label for="refresh_seconds">Refresh every (seconds)</label>
+	<input type="number" id="refresh_seconds" min="5" max="3600" step="1" />
+
+	<script>
+		window.connectOpenActionSocketData = new Promise((resolve) => {
+			window.connectOpenActionSocket = (...args) => resolve(args);
+			window.connectElgatoStreamDeckSocket = window.connectOpenActionSocket;
+		});
+
+		let websocket;
+		let uuid;
+
+		window.connectOpenActionSocketData.then(([inPort, inUUID, inRegisterEvent, inInfo, inActionInfo]) => {
+			uuid = inUUID;
+			const actionInfo = JSON.parse(inActionInfo);
+			websocket = new WebSocket(`ws://127.0.0.1:${inPort}`);
+
+			websocket.onopen = () => {
+				websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
+				applySettings(actionInfo.payload.settings || {});
+			};
+
+			websocket.onmessage = (event) => {
+				const message = JSON.parse(event.data);
+				if (message.event === "didReceiveSettings") {
+					applySettings(message.payload.settings || {});
+				}
+			};
+		});
+
+		function applySettings(settings) {
+			document.getElementById("metric").value = settings.metric || "tokens";
+			document.getElementById("range").value = settings.range || "today";
+			document.getElementById("refresh_seconds").value = settings.refresh_seconds || 60;
+		}
+
+		function sendSettings() {
+			const refreshSeconds = Math.min(3600, Math.max(5, parseInt(document.getElementById("refresh_seconds").value, 10) || 60));
+			websocket.send(JSON.stringify({
+				event: "setSettings",
+				context: uuid,
+				payload: {
+					metric: document.getElementById("metric").value,
+					range: document.getElementById("range").value,
+					refresh_seconds: refreshSeconds,
+				},
+			}));
+		}
+
+		document.getElementById("metric").addEventListener("change", sendSettings);
+		document.getElementById("range").addEventListener("change", sendSettings);
+		document.getElementById("refresh_seconds").addEventListener("change", sendSettings);
+	</script>
+</body>
+</html>

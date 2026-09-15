@@ -1,10 +1,11 @@
 # OpenDeck Claude Usage
 
-An [OpenDeck](https://github.com/nekename/OpenDeck) plugin with one action,
-**Usage Gauge**, assignable to a Stream Deck dial or a keypad tile. It shows
-percent used and time until reset for one of Claude's usage windows -
-**Session** (5 hour), **Weekly** (7 day), or **Monthly** (pay-as-you-go extra
-usage spend, if enabled on your account).
+An [OpenDeck](https://github.com/nekename/OpenDeck) plugin with three actions
+- **Usage Gauge**, **Peak Clock**, and **Metric Tile**. Usage Gauge is
+assignable to a Stream Deck dial or a keypad tile and shows percent used and
+time until reset for one of Claude's usage windows - **Session** (5 hour),
+**Weekly** (7 day), or **Monthly** (pay-as-you-go extra usage spend, if
+enabled on your account).
 
 On a dial, the touch strip shows a live bar, percent, and detail text. On a
 keypad tile (no touch strip), the same data renders as a title (percent +
@@ -38,6 +39,33 @@ since the account used to build this plugin has never had `extra_usage`
 enabled. The `currency` field in `extra_usage` is currently ignored
 entirely; the `$` sign is hardcoded regardless of account currency.
 
+## Where the Tokens/Cost tile's data comes from
+
+The **Metric Tile** action reads a different source: Claude Code's own
+per-session transcript logs at `~/.claude/projects/<project>/<session-id>.jsonl`,
+one file per session, across every project. Each assistant turn in these
+files carries token usage (input/output/cache-read/cache-write) but
+**no cost figure at all** - Cost is estimated by multiplying tokens by a
+hardcoded per-model-family price table in `src/pricing.rs`.
+
+That price table is a **best-effort, unverified snapshot** - it isn't
+sourced from Claude Code, isn't fetched from any live pricing API, and
+hasn't been re-checked against a real invoice. If Anthropic changes
+pricing, the Cost tile's numbers will drift until the table is updated
+by hand. Treat Cost as an estimate; treat Tokens (a direct sum from the
+logs) as exact.
+
+Entries with `model == "<synthetic>"` (Claude Code's placeholder for
+locally-generated content like compaction summaries) are excluded
+entirely, since they represent no real API call.
+
+The tile's **Session** range reuses the Usage Gauge's 5-hour rate-limit
+window (`resets_at` from `~/.claude/statusline-usage.json`) rather than
+a fixed rolling window, so it lines up with what "session" means
+elsewhere in this plugin. If that file is missing or has no
+`resets_at`, it falls back to a rolling last-5-hour window instead of
+erroring.
+
 ## Installing
 
 Download the latest `.streamDeckPlugin` from
@@ -52,6 +80,15 @@ OpenDeck) or unzip it into `~/.config/opendeck/plugins/` and restart OpenDeck
 2. Pick which window to show: Session, Weekly, or Monthly (extra usage).
 3. It updates automatically roughly every 20 seconds; press the dial or tap
    the tile for an immediate refresh.
+
+## Using a Metric Tile
+
+1. Add a **Metric Tile** key on a keypad tile (no dial/Encoder variant).
+2. Pick the metric (Tokens or Cost), the range (Today/7 days/Session),
+   and how often it refreshes (in seconds).
+3. It updates automatically on that schedule; tap the tile for an
+   immediate refresh (this doesn't reset the schedule - the next
+   automatic refresh still happens on time).
 
 ## Manual smoke-test checklist
 
@@ -70,6 +107,14 @@ development environment, which has no OpenDeck/Stream Deck to test against:
 - [ ] Pressing a dial or tapping a tile refreshes it immediately. *(not yet verified)*
 - [ ] Monthly dial/tile shows "not enabled" cleanly when extra usage is off. *(not yet verified)*
 - [ ] Removing a dial or tile doesn't error on the next poll tick. *(not yet verified)*
+- [ ] Metric Tile shows the right label/value/subtitle for each metric
+      (Tokens/Cost) × range (Today/7 days/Session) combination.
+      *(not yet verified)*
+- [ ] Metric Tile's configured refresh interval actually changes how
+      often it updates (e.g. set to 5s, confirm faster updates than the
+      default 60s). *(not yet verified)*
+- [ ] Tapping a Metric Tile refreshes it immediately without disrupting
+      its next scheduled refresh. *(not yet verified)*
 
 ## Development
 
