@@ -37,7 +37,7 @@ pub struct MetricDisplay {
 /// rolling windows ending at `now` (not calendar-aligned). `Session`
 /// mirrors the existing Usage Gauge's 5-hour rate-limit window:
 /// `[resets_at - 5h, resets_at]` when `session_resets_at` is known
-/// (read from the same statusline-usage.json the gauge reads), falling
+/// (from the same usage fetch the gauge renders), falling
 /// back to a rolling last-5h window when it isn't - a fallback, not an
 /// error, matching this plugin's existing convention.
 pub fn range_bounds(

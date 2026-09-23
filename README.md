@@ -19,11 +19,26 @@ usage readout.
 
 ## Where the data comes from
 
-Claude Code itself maintains `~/.claude/statusline-usage.json`, refreshed
-whenever its statusLine hook fires during an active session. This plugin
-reads that file every ~20 seconds; it does not call any API directly. If
-you've never run Claude Code, or haven't in a while, the file may not exist
-or may be stale - each dial then shows a "no data" state rather than a
+The plugin asks Anthropic directly: it calls
+`https://api.anthropic.com/api/oauth/usage` (the same endpoint Claude Code's
+`/usage` reads) with the OAuth login Claude Code stores in
+`~/.claude/.credentials.json`, and keeps the answer in memory only - nothing
+is written to disk. It works the same whether you use Claude Code from the
+CLI, the desktop app, or an IDE extension, as long as one of them has logged
+in on this machine.
+
+The token is only read and sent in the request's `Authorization` header. The
+plugin never refreshes it (that would log Claude Code out); if it has
+expired, the dials show "no data" until Claude Code next runs and renews it.
+
+That endpoint is undocumented and rate-limited per account - and the limit
+is shared with anything else that calls it (Claude Code's `/usage`, editor
+extensions that show your limits). The plugin makes at most one request a
+minute however many dials, tiles, and taps are involved. When a request fails
+(a 429 because something else used the minute's allowance, a network blip,
+an expired token), it retries after 2, 4, 8... minutes (capped at 10) and
+keeps showing the last good numbers meanwhile; only once those are more
+than 15 minutes old does each dial switch to a "no data" state - never a
 crash or a blank display.
 
 There is no native monthly rate-limit window in Claude's usage data - only
@@ -60,10 +75,9 @@ locally-generated content like compaction summaries) are excluded
 entirely, since they represent no real API call.
 
 The tile's **Session** range reuses the Usage Gauge's 5-hour rate-limit
-window (`resets_at` from `~/.claude/statusline-usage.json`) rather than
-a fixed rolling window, so it lines up with what "session" means
-elsewhere in this plugin. If that file is missing or has no
-`resets_at`, it falls back to a rolling last-5-hour window instead of
+window (the same `resets_at` the gauge fetches) rather than a fixed
+rolling window, so it lines up with what "session" means elsewhere in
+this plugin. If that fetch fails or has no `resets_at`, it falls back to a rolling last-5-hour window instead of
 erroring.
 
 ## Installing
@@ -107,6 +121,8 @@ development environment, which has no OpenDeck/Stream Deck to test against:
 - [ ] Pressing a dial or tapping a tile refreshes it immediately. *(not yet verified)*
 - [ ] Monthly dial/tile shows "not enabled" cleanly when extra usage is off. *(not yet verified)*
 - [ ] Removing a dial or tile doesn't error on the next poll tick. *(not yet verified)*
+- [ ] Dials keep updating with only the Claude desktop app open (no CLI
+      session, no editor extension). *(not yet verified)*
 - [ ] Metric Tile shows the right label/value/subtitle for each metric
       (Tokens/Cost) × range (Today/7 days/Session) combination.
       *(not yet verified)*
@@ -120,6 +136,7 @@ development environment, which has no OpenDeck/Stream Deck to test against:
 
 ```bash
 cargo test                                   # unit tests (no live OpenDeck needed)
+cargo test -- --ignored live_                # one real request to the usage API with your login
 cargo build --release --target <triple>
 node build.mjs <triple>                      # assembles dist/<uuid>.sdPlugin
 cp -r dist/com.jfms7s.claudeusage.sdPlugin ~/.config/opendeck/plugins/
