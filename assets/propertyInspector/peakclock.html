@@ -6,7 +6,11 @@
 	<style>
 		body { font: 12px system-ui, sans-serif; margin: 0; padding: 8px 12px; }
 		label { display: block; margin-top: 10px; font-size: 11px; opacity: 0.8; }
-		input { width: 100%; box-sizing: border-box; margin-top: 2px; }
+		input[type="time"] { width: 100%; box-sizing: border-box; margin-top: 2px; }
+		fieldset { border: 0; margin: 10px 0 0; padding: 0; }
+		legend { padding: 0; font-size: 11px; opacity: 0.8; }
+		.days { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; }
+		.days label { display: inline-flex; align-items: center; gap: 3px; margin: 0; font-size: 12px; opacity: 1; }
 	</style>
 </head>
 <body>
@@ -15,6 +19,19 @@
 
 	<label for="peak_end">Peak ends at</label>
 	<input type="time" id="peak_end" />
+
+	<fieldset>
+		<legend>Peak applies on</legend>
+		<div class="days" id="peak_days">
+			<label><input type="checkbox" value="mon" />Mon</label>
+			<label><input type="checkbox" value="tue" />Tue</label>
+			<label><input type="checkbox" value="wed" />Wed</label>
+			<label><input type="checkbox" value="thu" />Thu</label>
+			<label><input type="checkbox" value="fri" />Fri</label>
+			<label><input type="checkbox" value="sat" />Sat</label>
+			<label><input type="checkbox" value="sun" />Sun</label>
+		</div>
+	</fieldset>
 
 	<script>
 		window.connectOpenActionSocketData = new Promise((resolve) => {
@@ -43,9 +60,16 @@
 			};
 		});
 
+		const DEFAULT_PEAK_DAYS = ["mon", "tue", "wed", "thu", "fri"];
+		const dayBoxes = document.querySelectorAll("#peak_days input");
+
 		function applySettings(settings) {
 			document.getElementById("peak_start").value = settings.peak_start || "13:00";
 			document.getElementById("peak_end").value = settings.peak_end || "18:00";
+			// Only a missing key falls back to weekdays - an empty list means
+			// the user unticked every day.
+			const days = Array.isArray(settings.peak_days) ? settings.peak_days : DEFAULT_PEAK_DAYS;
+			dayBoxes.forEach((box) => { box.checked = days.includes(box.value); });
 		}
 
 		function sendSettings() {
@@ -55,12 +79,14 @@
 				payload: {
 					peak_start: document.getElementById("peak_start").value,
 					peak_end: document.getElementById("peak_end").value,
+					peak_days: Array.from(dayBoxes).filter((box) => box.checked).map((box) => box.value),
 				},
 			}));
 		}
 
 		document.getElementById("peak_start").addEventListener("change", sendSettings);
 		document.getElementById("peak_end").addEventListener("change", sendSettings);
+		dayBoxes.forEach((box) => box.addEventListener("change", sendSettings));
 	</script>
 </body>
 </html>
