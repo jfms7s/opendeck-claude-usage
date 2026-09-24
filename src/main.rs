@@ -9,6 +9,7 @@ mod metric_icon;
 mod peak;
 mod pricing;
 mod source;
+mod tile;
 
 use action::UsageGaugeAction;
 use clock_action::PeakClockAction;

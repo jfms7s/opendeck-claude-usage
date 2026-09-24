@@ -1,19 +1,24 @@
 use crate::format::UsageDisplay;
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
+use crate::tile::{self, MUTED_TEXT_COLOR, TEXT_COLOR};
 
 const ZONE_GREEN: &str = "#22c55e";
 const ZONE_YELLOW: &str = "#eab308";
 const ZONE_RED: &str = "#ef4444";
-const NEEDLE_COLOR: &str = "#1f2937";
+/// Light, so the needle stands out against the dark card.
+const NEEDLE_COLOR: &str = TEXT_COLOR;
 
 const CENTER_X: f64 = 50.0;
-const CENTER_Y: f64 = 65.0;
-const RADIUS: f64 = 35.0;
-const STROKE_WIDTH: f64 = 12.0;
-const NEEDLE_LENGTH: f64 = 28.0;
-const NEEDLE_HALF_WIDTH: f64 = 2.5;
-const PIVOT_RADIUS: f64 = 4.0;
+const CENTER_Y: f64 = 48.0;
+const RADIUS: f64 = 32.0;
+const STROKE_WIDTH: f64 = 10.0;
+const NEEDLE_LENGTH: f64 = 25.0;
+const NEEDLE_HALF_WIDTH: f64 = 3.0;
+const PIVOT_RADIUS: f64 = 5.0;
+
+const PERCENT_BASELINE: f64 = 79.0;
+const PERCENT_SIZE: f64 = 26.0;
+const DETAIL_BASELINE: f64 = 96.0;
+const DETAIL_SIZE: f64 = 15.0;
 
 /// A point on the gauge's dome at `theta_deg` degrees, measured
 /// counter-clockwise from the positive x-axis. Screen y grows downward, so
@@ -46,12 +51,11 @@ fn needle_rotation_deg(bar_value: f64) -> f64 {
     bar_value.clamp(0.0, 100.0) * 1.8 - 90.0
 }
 
-/// Renders the gauge as an SVG string: a fixed three-zone semicircular
-/// speedometer background (zone boundaries match `bar_color`'s own
-/// 50%/80% thresholds) plus a needle rotated to `display.bar_value`. The
-/// percent/detail text is deliberately not drawn here - it renders as the
-/// tile's native title text instead (crisper font rendering, one less thing
-/// to keep in sync with this SVG).
+/// Renders the tile as an SVG string: a dark card, a fixed three-zone
+/// semicircular speedometer (zone boundaries match `bar_color`'s own
+/// 50%/80% thresholds), a needle rotated to `display.bar_value`, and the
+/// percent + compact countdown as two text lines underneath (see `tile.rs`
+/// for why the text lives in the image rather than the native title).
 fn render_svg(display: &UsageDisplay) -> String {
     let rotation = needle_rotation_deg(display.bar_value);
 
@@ -68,20 +72,30 @@ fn render_svg(display: &UsageDisplay) -> String {
     let nx2 = CENTER_X + NEEDLE_HALF_WIDTH;
     let tip_y = CENTER_Y - NEEDLE_LENGTH;
 
+    let card = tile::card();
+    let percent = tile::text_line(
+        PERCENT_BASELINE,
+        PERCENT_SIZE,
+        true,
+        TEXT_COLOR,
+        &display.percent_text,
+    );
+    let detail = tile::text_line(
+        DETAIL_BASELINE,
+        DETAIL_SIZE,
+        false,
+        MUTED_TEXT_COLOR,
+        &display.tile_detail,
+    );
+
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">{arcs}<polygon points="{nx1},{CENTER_Y} {nx2},{CENTER_Y} {CENTER_X},{tip_y}" fill="{NEEDLE_COLOR}" transform="rotate({rotation:.2} {CENTER_X} {CENTER_Y})" /><circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{PIVOT_RADIUS}" fill="{NEEDLE_COLOR}" /></svg>"#
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">{card}{arcs}<polygon points="{nx1},{CENTER_Y} {nx2},{CENTER_Y} {CENTER_X},{tip_y}" fill="{NEEDLE_COLOR}" stroke-linejoin="round" transform="rotate({rotation:.2} {CENTER_X} {CENTER_Y})" /><circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{PIVOT_RADIUS}" fill="{NEEDLE_COLOR}" />{percent}{detail}</svg>"#
     )
 }
 
-/// Builds the `image` string OpenDeck's `setImage` event expects: always a
-/// base64 data URI, since `setImage` only treats `image` as inline data when
-/// it starts with `"data:"` - anything else is treated as a relative
-/// filename inside the plugin's bundle directory (same rule
-/// opendeck-focus-launcher's icon.rs documents).
+/// Builds the `image` string OpenDeck's `setImage` event expects.
 pub fn build_icon(display: &UsageDisplay) -> String {
-    let svg = render_svg(display);
-    let encoded = STANDARD.encode(svg.as_bytes());
-    format!("data:image/svg+xml;base64,{encoded}")
+    tile::data_uri(&render_svg(display))
 }
 
 #[cfg(test)]
@@ -93,9 +107,13 @@ mod tests {
             percent_text: format!("{bar_value}%"),
             color: ZONE_GREEN,
             detail_text: "resets in 1h".to_string(),
+            tile_detail: "1h".to_string(),
             bar_value,
         }
     }
+
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
 
     fn decode(uri: &str) -> String {
         let prefix = "data:image/svg+xml;base64,";
@@ -114,21 +132,28 @@ mod tests {
     }
 
     #[test]
+    fn draws_percent_and_detail_text_in_the_image() {
+        let svg = decode(&build_icon(&display(42.0)));
+        assert!(svg.contains(">42%</text>"), "got: {svg}");
+        assert!(svg.contains(">1h</text>"), "got: {svg}");
+    }
+
+    #[test]
     fn needle_points_left_at_zero_percent() {
         let svg = decode(&build_icon(&display(0.0)));
-        assert!(svg.contains("rotate(-90.00 50 65)"), "got: {svg}");
+        assert!(svg.contains("rotate(-90.00 50 48)"), "got: {svg}");
     }
 
     #[test]
     fn needle_points_up_at_fifty_percent() {
         let svg = decode(&build_icon(&display(50.0)));
-        assert!(svg.contains("rotate(0.00 50 65)"), "got: {svg}");
+        assert!(svg.contains("rotate(0.00 50 48)"), "got: {svg}");
     }
 
     #[test]
     fn needle_points_right_at_hundred_percent() {
         let svg = decode(&build_icon(&display(100.0)));
-        assert!(svg.contains("rotate(90.00 50 65)"), "got: {svg}");
+        assert!(svg.contains("rotate(90.00 50 48)"), "got: {svg}");
     }
 
     #[test]
@@ -146,9 +171,10 @@ mod tests {
             percent_text: "\u{2014}".to_string(),
             color: "#6b7280",
             detail_text: "not enabled".to_string(),
+            tile_detail: "not enabled".to_string(),
             bar_value: 0.0,
         };
         let svg = decode(&build_icon(&d));
-        assert!(svg.contains("rotate(-90.00 50 65)"), "got: {svg}");
+        assert!(svg.contains("rotate(-90.00 50 48)"), "got: {svg}");
     }
 }

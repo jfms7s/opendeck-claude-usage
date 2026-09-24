@@ -1,7 +1,7 @@
 {
 	"Name": "Claude Usage",
 	"Author": "jfms7s",
-	"Version": "0.4.1",
+	"Version": "0.4.2",
 	"Category": "Utilities",
 	"Icon": "icons/icon",
 	"OS": [{ "Platform": "linux" }],
