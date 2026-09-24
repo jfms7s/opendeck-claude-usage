@@ -3,6 +3,9 @@ use crate::tile::{self, MUTED_TEXT_COLOR, TEXT_COLOR};
 
 const FACE_COLOR: &str = "#4b5563";
 const PEAK_COLOR: &str = "#ef4444";
+/// Peak arcs on a day the window doesn't apply to - still visible so the
+/// configured hours read at a glance, but clearly not "live".
+const INACTIVE_PEAK_COLOR: &str = "#7f1d1d";
 const POINTER_COLOR: &str = TEXT_COLOR;
 const PEAK_TEXT_COLOR: &str = "#f87171";
 const OFF_PEAK_TEXT_COLOR: &str = "#4ade80";
@@ -36,7 +39,12 @@ fn point_on_ring(minute_of_day: u32, radius: f64) -> (f64, f64) {
 /// One or two red arcs marking the peak window on the ring - two when the
 /// window crosses midnight, since a single SVG arc command can't jump from
 /// `end_minutes` back to `0`.
-fn peak_arcs(window: PeakWindow) -> String {
+fn peak_arcs(window: PeakWindow, active: bool) -> String {
+    let color = if active {
+        PEAK_COLOR
+    } else {
+        INACTIVE_PEAK_COLOR
+    };
     let spans: Vec<(u32, u32)> = if window.start_minutes <= window.end_minutes {
         vec![(window.start_minutes, window.end_minutes)]
     } else {
@@ -51,7 +59,7 @@ fn peak_arcs(window: PeakWindow) -> String {
             let (ex, ey) = point_on_ring(end, FACE_RADIUS);
             let large_arc = if end - start > 720 { 1 } else { 0 };
             format!(
-                r#"<path d="M {sx:.2} {sy:.2} A {FACE_RADIUS} {FACE_RADIUS} 0 {large_arc} 1 {ex:.2} {ey:.2}" fill="none" stroke="{PEAK_COLOR}" stroke-width="{RING_STROKE_WIDTH}" stroke-linecap="round" />"#
+                r#"<path d="M {sx:.2} {sy:.2} A {FACE_RADIUS} {FACE_RADIUS} 0 {large_arc} 1 {ex:.2} {ey:.2}" fill="none" stroke="{color}" stroke-width="{RING_STROKE_WIDTH}" stroke-linecap="round" />"#
             )
         })
         .collect()
@@ -59,12 +67,18 @@ fn peak_arcs(window: PeakWindow) -> String {
 
 /// Renders the tile as an SVG string: a dark card, the 24h clock face (a
 /// full ring, red arc(s) over the peak window, and a light pointer at
-/// `now_minutes`), and the status + countdown as two text lines underneath,
+/// `now_minutes`; the arcs dimmed when `arcs_active` is false because the
+/// window doesn't apply today), and the status + countdown as two text lines underneath,
 /// the status colored red/green so peak vs off-peak reads at a glance (see
 /// `tile.rs` for why the text lives in the image).
-fn render_svg(window: PeakWindow, now_minutes: u32, status: &PeakStatus) -> String {
+fn render_svg(
+    window: PeakWindow,
+    now_minutes: u32,
+    arcs_active: bool,
+    status: &PeakStatus,
+) -> String {
     let card = tile::card();
-    let arcs = peak_arcs(window);
+    let arcs = peak_arcs(window, arcs_active);
     let (tx, ty) = point_on_ring(now_minutes, POINTER_LENGTH);
     let status_line = tile::text_line(
         STATUS_BASELINE,
@@ -95,8 +109,13 @@ fn status_color(is_peak: bool) -> &'static str {
 }
 
 /// Builds the `image` string OpenDeck's `setImage` event expects.
-pub fn build_clock_icon(window: PeakWindow, now_minutes: u32, status: &PeakStatus) -> String {
-    tile::data_uri(&render_svg(window, now_minutes, status))
+pub fn build_clock_icon(
+    window: PeakWindow,
+    now_minutes: u32,
+    arcs_active: bool,
+    status: &PeakStatus,
+) -> String {
+    tile::data_uri(&render_svg(window, now_minutes, arcs_active, status))
 }
 
 #[cfg(test)]
@@ -135,7 +154,7 @@ mod tests {
     }
 
     fn render(window: PeakWindow, now_minutes: u32) -> String {
-        decode(&build_clock_icon(window, now_minutes, &status(false)))
+        decode(&build_clock_icon(window, now_minutes, true, &status(false)))
     }
 
     fn pointer_tip(x: f64, y: f64) -> String {
@@ -204,9 +223,21 @@ mod tests {
 
     #[test]
     fn status_text_is_red_when_peak_and_green_when_off_peak() {
-        let peak = decode(&build_clock_icon(normal_window(), 600, &status(true)));
+        let peak = decode(&build_clock_icon(normal_window(), 600, true, &status(true)));
         assert!(peak.contains(&format!("fill=\"{PEAK_TEXT_COLOR}\">Peak</text>")));
         let off = render(normal_window(), 600);
         assert!(off.contains(&format!("fill=\"{OFF_PEAK_TEXT_COLOR}\">Off-peak</text>")));
+    }
+
+    #[test]
+    fn inactive_day_dims_the_peak_arc() {
+        let svg = decode(&build_clock_icon(
+            normal_window(),
+            600,
+            false,
+            &status(false),
+        ));
+        assert_eq!(svg.matches(PEAK_COLOR).count(), 0);
+        assert_eq!(svg.matches(INACTIVE_PEAK_COLOR).count(), 1);
     }
 }
