@@ -1,4 +1,5 @@
-pub mod file;
+pub mod api;
+pub mod cached;
 pub mod logs;
 
 use async_trait::async_trait;
@@ -39,12 +40,18 @@ pub enum WindowKind {
     Monthly,
 }
 
-#[derive(Debug, Error)]
+/// Errors carry only their message (not the underlying `io::Error` /
+/// `reqwest::Error`), so they're `Clone` - `CachedUsageSource` hands the
+/// same failed outcome to every caller within its throttle window instead
+/// of re-requesting on each one.
+#[derive(Debug, Clone, Error)]
 pub enum UsageSourceError {
-    #[error("failed to read usage file: {0}")]
-    Read(#[from] std::io::Error),
-    #[error("failed to parse usage file: {0}")]
-    Parse(#[from] serde_json::Error),
+    #[error("no usable Claude credentials: {0}")]
+    Credentials(String),
+    #[error("usage request failed: {0}")]
+    Request(String),
+    #[error("failed to parse usage response: {0}")]
+    Parse(String),
 }
 
 #[async_trait]
@@ -61,10 +68,7 @@ mod tests {
     #[async_trait]
     impl UsageSource for AlwaysFails {
         async fn read(&self) -> Result<UsageSnapshot, UsageSourceError> {
-            Err(UsageSourceError::Read(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "no file",
-            )))
+            Err(UsageSourceError::Request("offline".to_string()))
         }
     }
 
@@ -72,7 +76,7 @@ mod tests {
     async fn trait_object_is_usable_through_a_dyn_reference() {
         let source: Box<dyn UsageSource> = Box::new(AlwaysFails);
         let result = source.read().await;
-        assert!(matches!(result, Err(UsageSourceError::Read(_))));
+        assert!(matches!(result, Err(UsageSourceError::Request(_))));
     }
 
     #[test]

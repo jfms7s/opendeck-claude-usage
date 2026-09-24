@@ -1,6 +1,5 @@
 use crate::metric::{MetricKind, RangeKind};
 use crate::source::UsageSource;
-use crate::source::file::FileUsageSource;
 use crate::source::logs::LogUsageSource;
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -35,12 +34,12 @@ struct TrackedInstance {
 #[derive(Clone)]
 pub struct MetricTileAction {
     log_source: Arc<LogUsageSource>,
-    session_source: Arc<FileUsageSource>,
+    session_source: Arc<dyn UsageSource>,
     registry: Arc<DashMap<String, TrackedInstance>>,
 }
 
 impl MetricTileAction {
-    pub fn new(log_source: LogUsageSource, session_source: FileUsageSource) -> Self {
+    pub fn new(log_source: LogUsageSource, session_source: impl UsageSource + 'static) -> Self {
         Self {
             log_source: Arc::new(log_source),
             session_source: Arc::new(session_source),
@@ -65,15 +64,15 @@ impl MetricTileAction {
         self.registry.remove(instance_id);
     }
 
-    /// Reads the log source and (for the Session range) the existing
-    /// statusline-usage.json reset time, then renders one instance -
+    /// Reads the log source and (for the Session range) the shared
+    /// usage source's session reset time, then renders one instance -
     /// used by `will_appear`/`did_receive_settings` (so a tile shows
     /// real data immediately), `key_up` (tap-to-refresh), and the tick
     /// loop.
     async fn render(
         instance: &Instance,
         log_source: &LogUsageSource,
-        session_source: &FileUsageSource,
+        session_source: &dyn UsageSource,
         settings: &MetricTileSettings,
     ) -> OpenActionResult<()> {
         let entries = log_source.entries().await;
@@ -142,8 +141,13 @@ impl MetricTileAction {
             let Some(instance) = openaction::get_instance(instance_id).await else {
                 continue; // instance disappeared between the snapshot and now
             };
-            if let Err(e) =
-                Self::render(&instance, &self.log_source, &self.session_source, &settings).await
+            if let Err(e) = Self::render(
+                &instance,
+                &self.log_source,
+                &*self.session_source,
+                &settings,
+            )
+            .await
             {
                 log::warn!("metric tile render failed: {e}");
             }
@@ -173,7 +177,7 @@ impl Action for MetricTileAction {
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
         self.track(&instance.instance_id, settings.clone());
-        Self::render(instance, &self.log_source, &self.session_source, settings).await
+        Self::render(instance, &self.log_source, &*self.session_source, settings).await
     }
 
     async fn did_receive_settings(
@@ -182,7 +186,7 @@ impl Action for MetricTileAction {
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
         self.track(&instance.instance_id, settings.clone());
-        Self::render(instance, &self.log_source, &self.session_source, settings).await
+        Self::render(instance, &self.log_source, &*self.session_source, settings).await
     }
 
     async fn will_disappear(
@@ -199,13 +203,14 @@ impl Action for MetricTileAction {
     /// `next_due`, since a tap is a bonus refresh, not a reason to skip
     /// the next one.
     async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-        Self::render(instance, &self.log_source, &self.session_source, settings).await
+        Self::render(instance, &self.log_source, &*self.session_source, settings).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::api::ApiUsageSource;
 
     #[test]
     fn default_settings_are_tokens_today_at_sixty_seconds() {
@@ -227,7 +232,7 @@ mod tests {
 
     #[test]
     fn track_then_untrack_round_trips_through_the_registry() {
-        let action = MetricTileAction::new(LogUsageSource::default(), FileUsageSource::default());
+        let action = MetricTileAction::new(LogUsageSource::default(), ApiUsageSource::default());
         action.track("ctx1", MetricTileSettings::default());
         assert!(action.registry.contains_key("ctx1"));
 
@@ -237,7 +242,7 @@ mod tests {
 
     #[test]
     fn tracking_the_same_instance_twice_overwrites_its_settings() {
-        let action = MetricTileAction::new(LogUsageSource::default(), FileUsageSource::default());
+        let action = MetricTileAction::new(LogUsageSource::default(), ApiUsageSource::default());
         action.track(
             "ctx1",
             MetricTileSettings {
