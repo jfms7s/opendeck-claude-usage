@@ -8,10 +8,14 @@ time until reset for one of Claude's usage windows - **Session** (5 hour),
 enabled on your account).
 
 On a dial, the touch strip shows a live bar, percent, and detail text. On a
-keypad tile (no touch strip), the same data renders as a title (percent +
-detail, two lines) over a generated speedometer-style gauge icon - a
-three-zone semicircle (green/yellow/red, at the same 50%/80% thresholds as
-the dial's bar) with a needle pointing at the current percent.
+keypad tile (no touch strip), the same data renders as a generated icon on
+a dark card: a speedometer-style gauge - a three-zone semicircle
+(green/yellow/red, at the same 50%/80% thresholds as the dial's bar) with a
+light needle pointing at the current percent - above the percent and a
+compact countdown (e.g. `3h 54m`, `6d 10h`). The text is drawn into the
+icon itself rather than the key's native title, so it looks the same
+whatever title font/size/alignment the key is set to, and needs no custom
+background color to stay readable.
 
 Built for a Stream Deck XL+'s 6 dials, 1200x100 touch strip, and 32 keys -
 assign up to three dials or tiles (one per window) for an always-visible
@@ -113,8 +117,8 @@ development environment, which has no OpenDeck/Stream Deck to test against:
 
 - [ ] Session/Weekly/Monthly dials each show a percent, bar, and detail line
       shortly after appearing. *(not yet verified)*
-- [ ] Session/Weekly/Monthly keypad tiles each show a title (percent +
-      detail) and a gauge icon with the needle at the right position shortly
+- [ ] Session/Weekly/Monthly keypad tiles each show a gauge icon with the
+      percent and countdown drawn in with the needle at the right position shortly
       after appearing. *(not yet verified)*
 - [ ] Display refreshes within ~20s without any interaction, on both a dial
       and a tile. *(not yet verified)*

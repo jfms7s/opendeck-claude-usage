@@ -73,14 +73,15 @@ impl UsageGaugeAction {
 
     /// Pushes `display` to one instance via whichever surface its
     /// controller actually has: a dial's touch-strip feedback layout, or a
-    /// keypad tile's title text + a generated icon (keys have no touch
+    /// keypad tile's generated icon (keys have no touch
     /// strip). Both branches render from the same `UsageDisplay`, computed
     /// once by the caller, so the two surfaces can never show different
     /// numbers for the same instance.
     async fn render(instance: &Instance, display: &UsageDisplay) -> OpenActionResult<()> {
         if instance.controller == KEYPAD_CONTROLLER {
-            let title = format!("{}\n{}", display.percent_text, display.detail_text);
-            instance.set_title(Some(title), None).await?;
+            // The text is drawn inside the icon (see tile.rs); clear the
+            // native title so OpenDeck doesn't paint a second copy on top.
+            instance.set_title(Some(String::new()), None).await?;
             instance.set_image(Some(build_icon(display)), None).await
         } else {
             instance.set_feedback(&feedback_for_display(display)).await

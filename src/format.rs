@@ -23,24 +23,43 @@ pub fn bar_color(percent: f64) -> &'static str {
     }
 }
 
-/// "resets in Xh Ym" / "resets in Ym" / "resets in <1m" / "resets now",
-/// taking `now` explicitly so this stays a pure, deterministic function
-/// rather than reading the system clock itself.
+/// "resets in Xd Yh" / "resets in Xh Ym" / "resets in Ym" /
+/// "resets in <1m" / "resets now", taking `now` explicitly so this stays a
+/// pure, deterministic function rather than reading the system clock itself.
 pub fn format_countdown(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    match format_remaining(resets_at, now) {
+        Some(remaining) => format!("resets in {remaining}"),
+        None => "resets now".to_string(),
+    }
+}
+
+/// The bare remaining time - "Xd Yh" / "Xh Ym" / "Ym" / "<1m" - or `None`
+/// once `resets_at` has passed. Days kick in at 24h so a weekly window
+/// reads "6d 10h" rather than "154h 34m".
+fn format_remaining(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> Option<String> {
     let remaining = resets_at - now;
     if remaining <= chrono::Duration::zero() {
-        return "resets now".to_string();
+        return None;
     }
     let total_minutes = remaining.num_minutes();
-    let hours = total_minutes / 60;
+    let days = total_minutes / (24 * 60);
+    let hours = total_minutes / 60 % 24;
     let minutes = total_minutes % 60;
-    if hours > 0 {
-        format!("resets in {hours}h {minutes:02}m")
+    Some(if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes:02}m")
     } else if minutes > 0 {
-        format!("resets in {minutes}m")
+        format!("{minutes}m")
     } else {
-        "resets in <1m".to_string()
-    }
+        "<1m".to_string()
+    })
+}
+
+/// Keypad-tile variant of `format_countdown`: the tile has room for about
+/// a dozen characters, so it drops the "resets in" prefix.
+fn format_countdown_short(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    format_remaining(resets_at, now).unwrap_or_else(|| "now".to_string())
 }
 
 /// Everything needed to render one instance's current state, independent of
@@ -51,6 +70,8 @@ pub struct UsageDisplay {
     pub percent_text: String,
     pub color: &'static str,
     pub detail_text: String,
+    /// Shorter `detail_text` for the keypad tile's second line.
+    pub tile_detail: String,
     /// Clamped to 0..=100 - a genuine >100% (e.g. an overage) still shows as
     /// "105%" in `percent_text`, but an out-of-range bar/gauge value renders
     /// undefined on the actual hardware.
@@ -74,11 +95,19 @@ pub fn build_display(
 }
 
 fn window_display(window: &WindowUsage, now: DateTime<Utc>) -> UsageDisplay {
-    let detail = match window.resets_at {
-        Some(resets_at) => format_countdown(resets_at, now),
-        None => "no reset info".to_string(),
+    let (detail, tile_detail) = match window.resets_at {
+        Some(resets_at) => (
+            format_countdown(resets_at, now),
+            format_countdown_short(resets_at, now),
+        ),
+        None => ("no reset info".to_string(), "\u{2014}".to_string()),
     };
-    make_display(window.percent, bar_color(window.percent), &detail)
+    make_display(
+        window.percent,
+        bar_color(window.percent),
+        detail,
+        tile_detail,
+    )
 }
 
 fn monthly_display(monthly: &MonthlyUsage) -> UsageDisplay {
@@ -87,22 +116,32 @@ fn monthly_display(monthly: &MonthlyUsage) -> UsageDisplay {
             percent_text: "\u{2014}".to_string(),
             color: DISABLED_COLOR,
             detail_text: "not enabled".to_string(),
+            tile_detail: "not enabled".to_string(),
             bar_value: 0.0,
         };
     }
     let percent = monthly.percent.unwrap_or(0.0);
-    let detail = match (monthly.used_dollars, monthly.limit_dollars) {
-        (Some(used), Some(limit)) => format!("${used:.2} / ${limit:.2}"),
-        _ => "spend unavailable".to_string(),
+    let (detail, tile_detail) = match (monthly.used_dollars, monthly.limit_dollars) {
+        (Some(used), Some(limit)) => (
+            format!("${used:.2} / ${limit:.2}"),
+            format!("${used:.2}/${limit:.0}"),
+        ),
+        _ => ("spend unavailable".to_string(), "no spend".to_string()),
     };
-    make_display(percent, bar_color(percent), &detail)
+    make_display(percent, bar_color(percent), detail, tile_detail)
 }
 
-fn make_display(percent: f64, color: &'static str, detail_text: &str) -> UsageDisplay {
+fn make_display(
+    percent: f64,
+    color: &'static str,
+    detail_text: String,
+    tile_detail: String,
+) -> UsageDisplay {
     UsageDisplay {
         percent_text: format_percent(percent),
         color,
-        detail_text: detail_text.to_string(),
+        detail_text,
+        tile_detail,
         bar_value: percent.clamp(0.0, 100.0),
     }
 }
@@ -129,6 +168,7 @@ pub fn error_display() -> UsageDisplay {
         percent_text: "\u{2014}".to_string(),
         color: DISABLED_COLOR,
         detail_text: "no data".to_string(),
+        tile_detail: "no data".to_string(),
         bar_value: 0.0,
     }
 }
@@ -182,6 +222,26 @@ mod tests {
             format_countdown(dt(20, 30, 30), dt(20, 30, 0)),
             "resets in <1m"
         );
+    }
+
+    #[test]
+    fn countdown_of_a_day_or_more_uses_days() {
+        assert_eq!(
+            format_countdown(
+                dt(20, 30, 0) + chrono::Duration::minutes(154 * 60 + 34),
+                dt(20, 30, 0)
+            ),
+            "resets in 6d 10h"
+        );
+    }
+
+    #[test]
+    fn short_countdown_drops_the_prefix() {
+        assert_eq!(
+            format_countdown_short(dt(22, 40, 0), dt(20, 30, 0)),
+            "2h 10m"
+        );
+        assert_eq!(format_countdown_short(dt(20, 0, 0), dt(20, 30, 0)), "now");
     }
 
     #[test]
@@ -281,7 +341,14 @@ mod tests {
         assert_eq!(d.percent_text, "33%");
         assert_eq!(d.color, "#22c55e");
         assert_eq!(d.detail_text, "resets in 2h 10m");
+        assert_eq!(d.tile_detail, "2h 10m");
         assert_eq!(d.bar_value, 33.0);
+    }
+
+    #[test]
+    fn display_enabled_monthly_tile_detail_is_compact() {
+        let d = build_display(&snapshot(), WindowKind::Monthly, dt(20, 30, 0));
+        assert_eq!(d.tile_detail, "$12.50/$50");
     }
 
     #[test]

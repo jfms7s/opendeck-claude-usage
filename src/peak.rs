@@ -82,7 +82,7 @@ pub fn peak_status(window: PeakWindow, now: NaiveTime) -> PeakStatus {
         ("Off-peak", minutes_until(now_minutes, window.start_minutes))
     };
     let countdown_text = if is_peak {
-        format!("off-peak in {}", format_hhmm(until))
+        format!("ends in {}", format_hhmm(until))
     } else {
         format!("peak in {}", format_hhmm(until))
     };
@@ -162,7 +162,7 @@ mod tests {
         let status = peak_status(window, time(10, 0));
         assert!(status.is_peak);
         assert_eq!(status.status_text, "Peak");
-        assert_eq!(status.countdown_text, "off-peak in 07:00");
+        assert_eq!(status.countdown_text, "ends in 07:00");
     }
 
     #[test]
@@ -185,7 +185,7 @@ mod tests {
         };
         let status = peak_status(window, time(23, 0));
         assert!(status.is_peak);
-        assert_eq!(status.countdown_text, "off-peak in 07:00");
+        assert_eq!(status.countdown_text, "ends in 07:00");
     }
 
     #[test]

@@ -55,13 +55,11 @@ impl PeakClockAction {
         let now = Local::now().time();
         let now_minutes = now.num_seconds_from_midnight() / 60;
         let status = peak_status(window, now);
-        let title = format!("{}\n{}", status.status_text, status.countdown_text);
-        instance.set_title(Some(title), None).await?;
+        // The text is drawn inside the icon (see tile.rs); clear the native
+        // title so OpenDeck doesn't paint a second copy on top.
+        instance.set_title(Some(String::new()), None).await?;
         instance
-            .set_image(
-                Some(build_clock_icon(window, now_minutes, status.is_peak)),
-                None,
-            )
+            .set_image(Some(build_clock_icon(window, now_minutes, &status)), None)
             .await
     }
 
