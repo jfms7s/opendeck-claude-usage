@@ -4,6 +4,8 @@ mod burn_action;
 mod burn_icon;
 mod clock_action;
 mod clock_icon;
+mod combo;
+mod combo_action;
 mod format;
 mod hub;
 mod level;
@@ -12,6 +14,7 @@ mod metric_action;
 mod metric_icon;
 mod pace;
 mod peak;
+mod press;
 mod pricing;
 mod source;
 mod style;
@@ -21,6 +24,7 @@ mod tile;
 use action::UsageGaugeAction;
 use burn_action::BurnRateAction;
 use clock_action::PeakClockAction;
+use combo_action::ComboAction;
 use hub::UsageHub;
 use metric_action::MetricTileAction;
 use openaction::{OpenActionResult, register_action, run};
@@ -48,13 +52,14 @@ async fn main() -> OpenActionResult<()> {
         },
     );
 
-    // Every usage-driven action (gauge, burn rate) registers its instances
+    // Every usage-driven action (gauge, burn rate, combo) registers its instances
     // in this one hub, so a single poll loop serves them all.
     let hub = UsageHub::new(usage.clone());
     tokio::spawn(hub.clone().poll_loop());
 
     let action = UsageGaugeAction::new(hub.clone());
     let burn_rate = BurnRateAction::new(hub.clone());
+    let combo = ComboAction::new(hub.clone());
 
     let clock = PeakClockAction::new();
     let ticker = clock.clone();
@@ -68,5 +73,6 @@ async fn main() -> OpenActionResult<()> {
     register_action(clock).await;
     register_action(metric_tile).await;
     register_action(burn_rate).await;
+    register_action(combo).await;
     run(std::env::args().collect()).await
 }

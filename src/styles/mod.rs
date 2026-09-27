@@ -3,6 +3,7 @@
 //! wraps the chosen one as the data URI OpenDeck's `setImage` expects.
 
 pub mod bar;
+pub mod combo;
 pub mod donut;
 pub mod ring;
 pub mod speedometer;

@@ -1,0 +1,64 @@
+{
+	"$schema": "https://schemas.elgato.com/streamdeck/plugins/layout.json",
+	"id": "com.jfms7s.claudeusage.combo-layout",
+	"items": [
+		{
+			"key": "s_label",
+			"type": "text",
+			"rect": [10, 4, 40, 22],
+			"alignment": "left",
+			"color": "white",
+			"value": "5h",
+			"font": { "size": 16, "weight": 700 }
+		},
+		{
+			"key": "s_value",
+			"type": "text",
+			"rect": [50, 4, 140, 22],
+			"alignment": "right",
+			"color": "white",
+			"value": "--",
+			"font": { "size": 15, "weight": 600 }
+		},
+		{
+			"key": "s_bar",
+			"type": "bar",
+			"rect": [10, 28, 180, 14],
+			"value": 0,
+			"bar_bg_c": "#374151",
+			"bar_fill_c": "#d97757",
+			"bar_border_c": "#111827",
+			"border_w": 1,
+			"subtype": 0
+		},
+		{
+			"key": "w_label",
+			"type": "text",
+			"rect": [10, 52, 40, 22],
+			"alignment": "left",
+			"color": "white",
+			"value": "7d",
+			"font": { "size": 16, "weight": 700 }
+		},
+		{
+			"key": "w_value",
+			"type": "text",
+			"rect": [50, 52, 140, 22],
+			"alignment": "right",
+			"color": "white",
+			"value": "--",
+			"font": { "size": 15, "weight": 600 }
+		},
+		{
+			"key": "w_bar",
+			"type": "bar",
+			"rect": [10, 76, 180, 14],
+			"value": 0,
+			"bar_bg_c": "#374151",
+			"bar_fill_c": "#d97757",
+			"bar_border_c": "#111827",
+			"border_w": 1,
+			"subtype": 0
+		}
+	]
+}
