@@ -224,7 +224,10 @@ impl HistoryStore {
         }
     }
 
-    /// Write-then-rename, so a crash mid-rewrite leaves the old file.
+    /// Write-then-rename, so a crash mid-rewrite leaves the old file. The
+    /// temp file is always freshly created (`create_new`, i.e. `O_EXCL`),
+    /// so a symlink left at its path is never followed; a leftover from a
+    /// crash is removed first (removing a symlink removes only the link).
     fn rewrite(&self, readings: &[Reading]) {
         let Some(path) = &self.path else {
             return;
@@ -235,14 +238,19 @@ impl HistoryStore {
             .map(|l| l + "\n")
             .collect();
         let tmp = path.with_extension("jsonl.tmp");
-        let result = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)
-            .and_then(|mut file| file.write_all(body.as_bytes()))
-            .and_then(|_| std::fs::rename(&tmp, path));
+        let result = match std::fs::remove_file(&tmp) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+        .and_then(|_| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)
+        })
+        .and_then(|mut file| file.write_all(body.as_bytes()))
+        .and_then(|_| std::fs::rename(&tmp, path));
         if let Err(e) = result {
             self.warn_write(path, &e);
         }
@@ -523,6 +531,26 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         HistoryStore::load(path.clone(), at(10));
         assert_eq!(mode(&path), 0o600);
+    }
+
+    /// A symlink planted at the temp path must not be followed: the
+    /// rewrite would otherwise overwrite whatever it points at.
+    #[test]
+    fn a_rewrite_does_not_follow_a_symlink_at_the_temp_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "keep me").unwrap();
+        std::os::unix::fs::symlink(&victim, path.with_extension("jsonl.tmp")).unwrap();
+        let kept = reading(at(9), 20.0);
+        std::fs::write(&path, format!("{}\n", line(&kept))).unwrap();
+        HistoryStore::load(path.clone(), at(10));
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{}\n", line(&kept))
+        );
+        assert!(!std::fs::symlink_metadata(&path).unwrap().is_symlink());
     }
 
     #[test]
