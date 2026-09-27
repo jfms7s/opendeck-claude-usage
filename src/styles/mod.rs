@@ -2,6 +2,7 @@
 //! share. Each renderer returns a bare SVG string; `build_styled_icon`
 //! wraps the chosen one as the data URI OpenDeck's `setImage` expects.
 
+pub mod bar;
 pub mod speedometer;
 
 use crate::tile::{self, TEXT_COLOR};
