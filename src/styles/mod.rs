@@ -76,11 +76,12 @@ pub fn arc(
     )
 }
 
-/// A short radial line across a ring at `deg` - how donuts and rings mark
-/// the Watch/Risk/Critical thresholds.
-pub fn radial_tick(cx: f64, cy: f64, r: f64, deg: f64) -> String {
-    let (x1, y1) = polar(cx, cy, r - 7.0, deg);
-    let (x2, y2) = polar(cx, cy, r + 7.0, deg);
+/// A short radial line across a ring at `deg`, reaching `half` either side
+/// of the stroke's center - how donuts and rings mark the Watch/Risk/
+/// Critical thresholds.
+pub fn radial_tick(cx: f64, cy: f64, r: f64, deg: f64, half: f64) -> String {
+    let (x1, y1) = polar(cx, cy, r - half, deg);
+    let (x2, y2) = polar(cx, cy, r + half, deg);
     format!(
         r#"<line x1="{x1:.2}" y1="{y1:.2}" x2="{x2:.2}" y2="{y2:.2}" stroke="{TEXT_COLOR}" stroke-width="1.5" />"#
     )
@@ -119,7 +120,7 @@ mod tests {
     #[test]
     fn radial_tick_spans_the_ring() {
         // At 0deg (right) a tick on r=28 around (50,47) runs x 71..85.
-        let t = radial_tick(50.0, 47.0, 28.0, 0.0);
+        let t = radial_tick(50.0, 47.0, 28.0, 0.0, 7.0);
         assert!(
             t.contains(r#"x1="71.00" y1="47.00" x2="85.00" y2="47.00""#),
             "got: {t}"

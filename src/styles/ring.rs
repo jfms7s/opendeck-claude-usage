@@ -10,6 +10,9 @@ const CY: f64 = 47.0;
 const R: f64 = 30.0;
 const WIDTH: f64 = 4.0;
 const TOP: f64 = -90.0;
+/// Shorter than the donuts' ticks: the ring sits lower relative to its
+/// label, and a longer tick at the bottom (50%) runs into it.
+const TICK_HALF: f64 = 4.0;
 
 fn angle(percent: f64) -> f64 {
     TOP + 360.0 * percent / 100.0
@@ -35,7 +38,7 @@ pub fn render(display: &UsageDisplay) -> String {
         display.marks.critical,
     ]
     .iter()
-    .map(|m| radial_tick(CX, CY, R, angle(*m)))
+    .map(|m| radial_tick(CX, CY, R, angle(*m), TICK_HALF))
     .collect();
     let number = tile::text_line(56.0, 24.0, true, TEXT_COLOR, &display.number_text);
     let label = tile::text_line(92.0, 11.0, true, MUTED_TEXT_COLOR, display.label);
@@ -63,9 +66,10 @@ mod tests {
     #[test]
     fn ring_ticks_at_default_marks() {
         let s = render(&display(42.0));
-        // watch 50 -> 90deg (straight down): tick from (50,70) to (50,84)
+        // watch 50 -> 90deg (straight down): tick from (50,73) to (50,81),
+        // short enough to clear the label underneath (cap top ~y 84).
         assert!(
-            s.contains(r#"x1="50.00" y1="70.00" x2="50.00" y2="84.00""#),
+            s.contains(r#"x1="50.00" y1="73.00" x2="50.00" y2="81.00""#),
             "got: {s}"
         );
     }

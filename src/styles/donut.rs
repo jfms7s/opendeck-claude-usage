@@ -15,6 +15,8 @@ const START: f64 = 135.0;
 const SWEEP: f64 = 270.0;
 const SEGMENTS: usize = 10;
 const SEGMENT_GAP: f64 = 6.0;
+/// Ticks reach past the 9-wide stroke on both sides.
+const TICK_HALF: f64 = 7.0;
 
 fn angle(percent: f64) -> f64 {
     START + SWEEP * percent / 100.0
@@ -48,7 +50,7 @@ pub fn render(display: &UsageDisplay, tracked: bool) -> String {
         display.marks.critical,
     ]
     .iter()
-    .map(|m| radial_tick(CX, CY, R, angle(*m)))
+    .map(|m| radial_tick(CX, CY, R, angle(*m), TICK_HALF))
     .collect();
     let number = tile::text_line(55.0, 22.0, true, TEXT_COLOR, &display.number_text);
     let label = tile::text_line(92.0, 11.0, true, MUTED_TEXT_COLOR, display.label);
