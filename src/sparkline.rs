@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::burn::burn_window;
 use crate::format::{DISABLED_COLOR, format_percent};
-use crate::history::Reading;
+use crate::history::{Reading, same_reset};
 use crate::level::ColorSettings;
 use crate::pace::{pace, window_length};
 use crate::source::{WindowKind, WindowUsage};
@@ -105,27 +105,29 @@ fn usage(reading: &Reading, kind: WindowKind) -> Usage {
 /// Usage added between two consecutive readings: the new % minus the old,
 /// or the new % itself when the window reset in between. Never negative.
 fn step(prev: Usage, cur: Usage) -> f64 {
-    let added = if prev.1 != cur.1 {
-        cur.0
-    } else {
+    let added = if same_reset(prev.1, cur.1) {
         cur.0 - prev.0
+    } else {
+        cur.0
     };
     added.max(0.0)
 }
 
-/// Readings in the latest reading's window (all of them if it has no
-/// reset time).
-fn current_window(readings: &[Reading], kind: WindowKind) -> Vec<&Reading> {
+/// Readings in the latest reading's window. Without a reset time (an idle,
+/// expired session), the last window length up to `now` - never all eight
+/// days of history.
+fn current_window(readings: &[Reading], kind: WindowKind, now: DateTime<Utc>) -> Vec<&Reading> {
     let Some(last) = readings.last() else {
         return Vec::new();
     };
-    match (usage(last, kind).1, window_length(kind)) {
-        (Some(resets_at), Some(length)) => readings
-            .iter()
-            .filter(|r| r.at >= resets_at - length)
-            .collect(),
-        _ => readings.iter().collect(),
-    }
+    let Some(length) = window_length(kind) else {
+        return readings.iter().collect();
+    };
+    let start = match usage(last, kind).1 {
+        Some(resets_at) => resets_at - length,
+        None => now - length,
+    };
+    readings.iter().filter(|r| r.at >= start).collect()
 }
 
 fn trend(window: &[&Reading], kind: WindowKind) -> Series {
@@ -156,7 +158,17 @@ fn today<Tz: TimeZone>(readings: &[Reading], kind: WindowKind, now: &DateTime<Tz
         return Vec::new();
     };
     let (mut prev, start, mut out) = if first > 0 {
-        (usage(&readings[first - 1], kind), first, Vec::new())
+        // Start at 0 at local midnight, so a day with a single change (or
+        // none yet) still draws.
+        let midnight = today
+            .and_hms_opt(0, 0, 0)
+            .and_then(|m| tz.from_local_datetime(&m).earliest())
+            .map(|m| m.with_timezone(&Utc));
+        (
+            usage(&readings[first - 1], kind),
+            first,
+            midnight.map(|m| vec![(m, 0.0)]).unwrap_or_default(),
+        )
     } else {
         (usage(&readings[0], kind), 1, vec![(readings[0].at, 0.0)])
     };
@@ -193,7 +205,22 @@ pub fn build_sparkline<Tz: TimeZone>(
         "5H"
     };
     let caption = format!("{} \u{b7} {span}", settings.series.label());
-    let window = current_window(readings, kind);
+    let now_utc = now.with_timezone(&Utc);
+    // Readings are only recorded when something changes, so hold the
+    // latest values up to now: idle time then shows as a flat end, a 0pp
+    // step and a falling even-burn ratio instead of stale numbers.
+    let mut extended = readings.to_vec();
+    if let Some(last) = readings.last()
+        && readings.len() >= 2
+        && now_utc > last.at
+    {
+        extended.push(Reading {
+            at: now_utc,
+            ..last.clone()
+        });
+    }
+    let readings = extended.as_slice();
+    let window = current_window(readings, kind, now_utc);
     let series = match settings.series {
         SparkSeries::Trend => trend(&window, kind),
         SparkSeries::BetweenPolls => between_polls(&window, kind),
@@ -204,7 +231,7 @@ pub fn build_sparkline<Tz: TimeZone>(
         Some(r) => {
             let (percent, resets_at) = usage(r, kind);
             let projected =
-                pace(&WindowUsage { percent, resets_at }, kind, r.at).map(|p| p.projected);
+                pace(&WindowUsage { percent, resets_at }, kind, now_utc).map(|p| p.projected);
             colors
                 .palette
                 .color(colors.level(percent, projected))
@@ -384,7 +411,10 @@ mod tests {
             weekly("2026-09-29T23:00:00Z", 32.0, W), // 01:00 local, today
             weekly("2026-09-30T05:00:00Z", 35.0, W),
         ]);
-        assert_eq!(d.points, vec![(0.0, 2.0), (1.0, 5.0)]);
+        // Midnight (22:00Z) at 0, the two changes, then "now" (12:00Z) holding 5.
+        assert_eq!(d.points.len(), 4);
+        assert_eq!(d.points[0], (0.0, 0.0));
+        assert_eq!(d.points[3], (1.0, 5.0));
         assert_eq!(d.headline, "5.0pp");
         assert_eq!(d.caption, "TODAY \u{b7} 7D");
     }
@@ -395,7 +425,8 @@ mod tests {
             weekly("2026-09-29T23:00:00Z", 32.0, W),
             weekly("2026-09-30T05:00:00Z", 35.0, W),
         ]);
-        assert_eq!(d.points, vec![(0.0, 0.0), (1.0, 3.0)]);
+        assert_eq!(d.points.first(), Some(&(0.0, 0.0)));
+        assert_eq!(d.points.last(), Some(&(1.0, 3.0)));
         assert_eq!(d.headline, "3.0pp");
     }
 
@@ -443,15 +474,17 @@ mod tests {
 
     #[test]
     fn color_follows_the_latest_level_and_pace_mode() {
-        let readings = [session("2026-09-30T08:15:00Z", 30.0, R)]; // projected 120%
-        let fixed = build(&readings, WindowKind::Session, SparkSeries::Trend, R);
+        // Colored as of now: 08:15 is 25% into the window, projecting 120%.
+        let at = "2026-09-30T08:15:00Z";
+        let readings = [session(at, 30.0, R)];
+        let fixed = build(&readings, WindowKind::Session, SparkSeries::Trend, at);
         assert_eq!(fixed.color, DEFAULT_NORMAL);
         let pace_colors = ColorSettings {
             mode: ColorMode::Pace,
             ..ColorSettings::default()
         };
         let settings = SparkSettings::default();
-        let paced = build_sparkline(&readings, &settings, &pace_colors, t(R));
+        let paced = build_sparkline(&readings, &settings, &pace_colors, t(at));
         assert_eq!(paced.color, DEFAULT_CRITICAL);
     }
 
@@ -479,5 +512,83 @@ mod tests {
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v, json!({"window": "weekly", "series": "today"}));
         assert_eq!(serde_json::from_value::<SparkSettings>(v).unwrap(), s);
+    }
+
+    fn jitter(r: &str, millis: i64) -> String {
+        (t(r) + chrono::Duration::milliseconds(millis)).to_rfc3339()
+    }
+
+    #[test]
+    fn request_jitter_on_resets_at_is_not_a_reset() {
+        let readings = [
+            session("2026-09-30T08:00:00Z", 10.0, &jitter(R, 186)),
+            session("2026-09-30T09:00:00Z", 12.0, &jitter(R, -447)),
+            session("2026-09-30T09:30:00Z", 13.5, &jitter(R, 552)),
+        ];
+        let d = build(
+            &readings,
+            WindowKind::Session,
+            SparkSeries::BetweenPolls,
+            "2026-09-30T09:30:00Z",
+        );
+        assert_eq!(d.points[0].1, 2.0);
+        assert_eq!(d.headline, "+1.5pp");
+    }
+
+    #[test]
+    fn without_a_reset_time_the_window_is_the_last_window_length() {
+        let none = |at: &str, pct: f64| Reading {
+            at: t(at),
+            session: pct,
+            session_resets_at: None,
+            weekly: 0.0,
+            weekly_resets_at: None,
+        };
+        let readings = [
+            none("2026-09-29T09:00:00Z", 90.0),
+            none("2026-09-30T08:00:00Z", 10.0),
+            none("2026-09-30T09:00:00Z", 20.0),
+        ];
+        let d = build(
+            &readings,
+            WindowKind::Session,
+            SparkSeries::Trend,
+            "2026-09-30T09:00:00Z",
+        );
+        assert_eq!(d.points, vec![(0.0, 10.0), (1.0, 20.0)]);
+    }
+
+    #[test]
+    fn idle_time_is_reflected_at_now() {
+        // 50% by 08:00, then nothing changes: at 11:00 (80% elapsed) even
+        // burn is 50/80 = 0.625x, not the stale ratio from 08:00.
+        let readings = [
+            session("2026-09-30T07:40:00Z", 20.0, R),
+            session("2026-09-30T08:00:00Z", 50.0, R),
+        ];
+        let d = build(
+            &readings,
+            WindowKind::Session,
+            SparkSeries::EvenBurn,
+            "2026-09-30T11:00:00Z",
+        );
+        assert_eq!(d.headline, "0.6x");
+        let per_poll = build(
+            &readings,
+            WindowKind::Session,
+            SparkSeries::BetweenPolls,
+            "2026-09-30T11:00:00Z",
+        );
+        assert_eq!(per_poll.headline, "+0.0pp");
+    }
+
+    #[test]
+    fn an_idle_day_with_a_baseline_reads_zero() {
+        // Only readings from yesterday; nothing changed yet today.
+        let d = today_at_plus_2(&[
+            weekly("2026-09-29T18:00:00Z", 28.0, W),
+            weekly("2026-09-29T21:00:00Z", 30.0, W),
+        ]);
+        assert_eq!(d.headline, "0.0pp");
     }
 }

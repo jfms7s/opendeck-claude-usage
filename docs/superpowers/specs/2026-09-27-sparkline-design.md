@@ -287,3 +287,23 @@ less than 1 (so a flat line doesn't divide by zero).
 - **README:** the privacy paragraph is updated, plus a "Using Usage
   Sparkline" section and smoke items (series cycle on key and dial,
   history file created and pruned, and chart visible on the strip).
+
+## Amendments after final review
+
+- **Reset detection tolerates request jitter.** The API stamps `resets_at`
+  with each request's sub-second fraction, so exact equality saw a "reset"
+  on nearly every poll. `history::same_reset` now treats reset times within
+  5 minutes as the same reset. Both the dedup in `record` and the step
+  detection in the series math use it.
+- **Latest values are held up to now.** With at least two readings,
+  `build_sparkline` appends a synthetic reading at `now` holding the latest
+  values. Idle time then shows as a flat line end, a `+0.0pp` step and an
+  even-burn ratio that falls over time. The color is also computed at
+  `now`, not at the last change.
+- **Today starts at local midnight when a baseline exists.** It begins at
+  0 at local midnight, so a day with one change (or none yet) still draws.
+- **Window without a reset time.** When the latest reading has no reset
+  time, the current window is the last window length up to `now`.
+- **Load decodes lossily and never wipes on error.** `load` decodes the
+  file lossily, and only rewrites it after a successful read, so a read
+  error can't wipe the history.

@@ -53,9 +53,23 @@ impl Reading {
     /// nothing to a trend.
     fn same_values(&self, other: &Reading) -> bool {
         self.session == other.session
-            && self.session_resets_at == other.session_resets_at
+            && same_reset(self.session_resets_at, other.session_resets_at)
             && self.weekly == other.weekly
-            && self.weekly_resets_at == other.weekly_resets_at
+            && same_reset(self.weekly_resets_at, other.weekly_resets_at)
+    }
+}
+
+/// Real resets are hours apart, but the API stamps `resets_at` with each
+/// request's own sub-second fraction, so the same reset reads slightly
+/// differently on every fetch. Anything within this is the same reset.
+const RESET_TOLERANCE: Duration = Duration::minutes(5);
+
+/// Whether two reset times are the same reset (see `RESET_TOLERANCE`).
+pub fn same_reset(a: Option<DateTime<Utc>>, b: Option<DateTime<Utc>>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => (a - b).abs() < RESET_TOLERANCE,
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -94,24 +108,32 @@ impl HistoryStore {
             path: Some(path.clone()),
             warned: AtomicBool::new(false),
         };
-        let mut readings: Vec<Reading> = match std::fs::read_to_string(&path) {
-            Ok(text) => text
-                .lines()
-                .filter_map(|l| serde_json::from_str(l).ok())
-                .collect(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        // Bytes, decoded lossily: one corrupt byte must only cost its own
+        // line, not fail the whole read.
+        let read = match std::fs::read(&path) {
+            Ok(bytes) => Some(
+                String::from_utf8_lossy(&bytes)
+                    .lines()
+                    .filter_map(|l| serde_json::from_str(l).ok())
+                    .collect::<Vec<Reading>>(),
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
                 store.warn_once(&format!(
                     "could not read usage history {}: {e}",
                     path.display()
                 ));
-                Vec::new()
+                None
             }
         };
+        let loaded = read.is_some();
+        let mut readings = read.unwrap_or_default();
         let cutoff = now - retention();
         readings.retain(|r| r.at >= cutoff);
         readings.sort_by_key(|r| r.at);
-        if path.exists() {
+        // Only rewrite what was actually read - rewriting after a failed
+        // read would wipe the file.
+        if loaded {
             store.rewrite(&readings);
         }
         *store.readings.lock().unwrap() = readings;
@@ -324,5 +346,51 @@ mod tests {
     fn default_path_ends_in_the_plugin_state_dir() {
         let p = HistoryStore::default_path();
         assert!(p.ends_with("opendeck-claude-usage/history.jsonl"), "{p:?}");
+    }
+
+    #[test]
+    fn reset_times_that_differ_by_request_jitter_are_the_same_reset() {
+        // The API stamps resets_at with the request's sub-second fraction,
+        // so the same reset reads differently on every fetch.
+        let a = Some(
+            "2026-09-13T22:40:00.186282Z"
+                .parse::<DateTime<Utc>>()
+                .unwrap(),
+        );
+        let b = Some(
+            "2026-09-13T22:39:59.552839Z"
+                .parse::<DateTime<Utc>>()
+                .unwrap(),
+        );
+        assert!(same_reset(a, b));
+        assert!(!same_reset(a, Some(at(12))));
+        assert!(same_reset(None, None));
+        assert!(!same_reset(a, None));
+    }
+
+    #[test]
+    fn jittered_reset_is_still_an_unchanged_reading() {
+        let store = HistoryStore::in_memory();
+        let mut s = snapshot(40.0, 20.0);
+        store.record(&s, at(9));
+        s.session.resets_at = s.session.resets_at.map(|r| r + Duration::milliseconds(634));
+        store.record(&s, at(10));
+        assert_eq!(store.readings().len(), 1);
+    }
+
+    #[test]
+    fn a_non_utf8_byte_does_not_wipe_the_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let good = reading(at(9), 20.0);
+        let mut bytes = format!("{}\n", line(&good)).into_bytes();
+        bytes.extend_from_slice(b"\xff\xfe garbage\n");
+        std::fs::write(&path, bytes).unwrap();
+        let store = HistoryStore::load(path.clone(), at(10));
+        assert_eq!(store.readings(), vec![good.clone()]);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{}\n", line(&good))
+        );
     }
 }
