@@ -3,6 +3,7 @@ mod clock_action;
 mod clock_icon;
 mod format;
 mod icon;
+mod level;
 mod metric;
 mod metric_action;
 mod metric_icon;
