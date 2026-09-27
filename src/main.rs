@@ -20,6 +20,7 @@ mod peak;
 mod press;
 mod pricing;
 mod source;
+mod sparkline;
 mod style;
 mod styles;
 mod tile;
