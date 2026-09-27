@@ -73,6 +73,9 @@ impl HistoryStore {
         base.join("opendeck-claude-usage").join("history.jsonl")
     }
 
+    /// A store that never touches disk - for tests of anything that
+    /// records history.
+    #[cfg(test)]
     pub fn in_memory() -> Arc<Self> {
         Arc::new(Self {
             readings: Mutex::new(Vec::new()),

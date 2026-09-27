@@ -30,6 +30,7 @@ use burn_action::BurnRateAction;
 use clock_action::PeakClockAction;
 use combo_action::ComboAction;
 use heatmap_action::HeatmapAction;
+use history::HistoryStore;
 use hub::UsageHub;
 use metric_action::MetricTileAction;
 use openaction::{OpenActionResult, register_action, run};
@@ -60,7 +61,10 @@ async fn main() -> OpenActionResult<()> {
 
     // Every usage-driven action (gauge, burn rate, combo) registers its instances
     // in this one hub, so a single poll loop serves them all.
-    let hub = UsageHub::new(usage.clone());
+    // Recorded %-of-limit readings for Usage Sparkline, kept in a small
+    // file under ~/.local/state so trends survive restarts.
+    let history = HistoryStore::load(HistoryStore::default_path(), chrono::Utc::now());
+    let hub = UsageHub::new(usage.clone(), history);
     tokio::spawn(hub.clone().poll_loop());
 
     let action = UsageGaugeAction::new(hub.clone());
