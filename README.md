@@ -1,8 +1,8 @@
 # OpenDeck Claude Usage
 
-An [OpenDeck](https://github.com/nekename/OpenDeck) plugin with five actions
-- **Usage Gauge**, **Session + Weekly**, **Burn Rate**, **Peak Clock**, and
-**Metric Tile**. Usage Gauge is
+An [OpenDeck](https://github.com/nekename/OpenDeck) plugin with six actions
+- **Usage Gauge**, **Session + Weekly**, **Burn Rate**, **Usage Heatmap**,
+**Peak Clock**, and **Metric Tile**. Usage Gauge is
 assignable to a Stream Deck dial or a keypad tile and shows percent used and
 time until reset for one of Claude's usage windows - **Session** (5 hour),
 **Weekly** (7 day), or **Monthly** (pay-as-you-go extra usage spend, if
@@ -157,6 +157,17 @@ touch-strip bar.
 4. Both bars share one set of marks and colors (**Colors & thresholds**),
    but each is colored by its own usage.
 
+## Using Usage Heatmap
+
+1. Add a **Usage Heatmap** key on a dial or a keypad tile.
+2. Pick what to measure — **Tokens** or estimated **Cost**, from the same
+   local Claude Code logs as Metric Tile — and a color.
+3. Each cell is one local calendar day, shaded relative to the busiest day
+   shown; days with no usage stay grey. The caption shows the total.
+4. A short press flips between **7 days** (today on the right) and a
+   **4-week** grid (oldest week on top); the key remembers it. Hold half a
+   second to refresh. On a dial the same chart fills the touch strip.
+
 ## Manual smoke-test checklist
 
 Run this against a live OpenDeck + Stream Deck XL+ session before cutting a
@@ -205,6 +216,12 @@ development environment, which has no OpenDeck/Stream Deck to test against:
       holding refreshes. *(not yet verified)*
 - [ ] On a dial the touch strip shows the 5h and 7d bars with percent and
       reset time. *(not yet verified)*
+- [ ] Usage Heatmap shows 7 days and 4 weeks on a key with today's cell on
+      the right and the correct weekday letters. *(not yet verified)*
+- [ ] A short press flips the view and it survives an OpenDeck restart.
+      *(not yet verified)*
+- [ ] On a dial the heatmap image fills the touch strip (confirms OpenDeck
+      renders an SVG image in a pixmap item). *(not yet verified)*
 
 ## Development
 

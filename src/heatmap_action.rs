@@ -219,4 +219,15 @@ mod tests {
         assert_eq!(f.color, "#123456");
         assert_eq!(f.metric, s.metric);
     }
+
+    /// The PI must offer both metrics and pass the stored view through, or
+    /// saving it would reset the view.
+    #[test]
+    fn property_inspector_offers_metrics_and_keeps_view() {
+        let html = include_str!("../assets/propertyInspector/heatmap.html");
+        assert!(html.contains(r#"<option value="tokens">"#));
+        assert!(html.contains(r#"<option value="cost">"#));
+        assert!(html.contains(r#"type="color""#));
+        assert!(html.contains("storedView"));
+    }
 }
