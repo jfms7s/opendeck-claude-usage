@@ -1,4 +1,6 @@
 mod action;
+mod burn;
+mod burn_icon;
 mod clock_action;
 mod clock_icon;
 mod format;
