@@ -115,7 +115,8 @@ fn step(prev: Usage, cur: Usage) -> f64 {
 
 /// Readings in the latest reading's window. Without a reset time (an idle,
 /// expired session), the last window length up to `now` - never all eight
-/// days of history.
+/// days of history. Once that window's reset has passed with no newer
+/// reading, the old window is over: only readings from its reset on count.
 fn current_window(readings: &[Reading], kind: WindowKind, now: DateTime<Utc>) -> Vec<&Reading> {
     let Some(last) = readings.last() else {
         return Vec::new();
@@ -124,6 +125,7 @@ fn current_window(readings: &[Reading], kind: WindowKind, now: DateTime<Utc>) ->
         return readings.iter().collect();
     };
     let start = match usage(last, kind).1 {
+        Some(resets_at) if resets_at <= now => resets_at,
         Some(resets_at) => resets_at - length,
         None => now - length,
     };
@@ -556,6 +558,30 @@ mod tests {
             "2026-09-30T09:00:00Z",
         );
         assert_eq!(d.points, vec![(0.0, 10.0), (1.0, 20.0)]);
+    }
+
+    #[test]
+    fn an_expired_window_is_not_shown_as_current() {
+        // The 07:00-12:00 session ended with no reading since: at 13:00
+        // there is no current window yet, so nothing to plot.
+        let readings = [
+            session("2026-09-30T08:00:00Z", 10.0, R),
+            session("2026-09-30T09:00:00Z", 20.0, R),
+        ];
+        for series in [
+            SparkSeries::Trend,
+            SparkSeries::BetweenPolls,
+            SparkSeries::EvenBurn,
+        ] {
+            let d = build(
+                &readings,
+                WindowKind::Session,
+                series,
+                "2026-09-30T13:00:00Z",
+            );
+            assert!(d.points.is_empty(), "{series:?}: {:?}", d.points);
+            assert_eq!(d.headline, "\u{2014}");
+        }
     }
 
     #[test]

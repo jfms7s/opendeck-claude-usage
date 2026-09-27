@@ -1,7 +1,7 @@
 use crate::heatmap::{HeatmapDisplay, HeatmapSettings, build_heatmap};
 use crate::hub::KEYPAD_CONTROLLER;
 use crate::press::{Press, PressTimer};
-use crate::source::logs::LogUsageSource;
+use crate::source::logs::{LogEntry, LogUsageSource};
 use crate::styles::heatmap::{render_key, render_strip};
 use crate::tile;
 use async_trait::async_trait;
@@ -66,7 +66,17 @@ impl HeatmapAction {
         settings: &HeatmapSettings,
     ) -> OpenActionResult<()> {
         let entries = self.logs.entries().await;
-        let display = build_heatmap(&entries, settings, chrono::Local::now());
+        Self::render_with(instance, settings, &entries).await
+    }
+
+    /// Renders from already-scanned entries, so a tick scans once for
+    /// every instance.
+    async fn render_with(
+        instance: &Instance,
+        settings: &HeatmapSettings,
+        entries: &[LogEntry],
+    ) -> OpenActionResult<()> {
+        let display = build_heatmap(entries, settings, chrono::Local::now());
         if instance.controller == KEYPAD_CONTROLLER {
             // Text is drawn inside the image (see tile.rs).
             instance.set_title(Some(String::new()), None).await?;
@@ -93,11 +103,15 @@ impl HeatmapAction {
                 .iter()
                 .map(|e| (e.key().clone(), e.value().clone()))
                 .collect();
+            if entries.is_empty() {
+                continue;
+            }
+            let logs = self.logs.entries().await;
             for (instance_id, settings) in entries {
                 let Some(instance) = openaction::get_instance(instance_id).await else {
                     continue;
                 };
-                if let Err(e) = self.render(&instance, &settings).await {
+                if let Err(e) = Self::render_with(&instance, &settings, &logs).await {
                     log::warn!("heatmap render failed: {e}");
                 }
             }

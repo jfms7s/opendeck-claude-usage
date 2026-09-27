@@ -91,23 +91,33 @@ fn parse_file(path: &Path) -> Vec<LogEntry> {
     contents.lines().filter_map(parse_line).collect()
 }
 
-type FileCache = HashMap<PathBuf, (SystemTime, Vec<LogEntry>)>;
+/// Every transcript file and its mtime, sorted.
+type FileList = Vec<(PathBuf, SystemTime)>;
+
+/// Each file's parsed entries by mtime, plus the last combined list and
+/// the `(file, mtime)` set it was built from.
+#[derive(Default)]
+struct ScanCache {
+    files: HashMap<PathBuf, (SystemTime, Vec<LogEntry>)>,
+    last: Option<(FileList, Arc<Vec<LogEntry>>)>,
+}
 
 /// Scans `~/.claude/projects/<project>/<session>.jsonl` transcript files
 /// for billable assistant turns. Caches each file's parsed entries keyed
 /// by its mtime, so an unchanged file across repeated `entries()` calls
 /// (e.g. multiple tile instances polling at their own cadence) is never
-/// re-read or re-parsed.
+/// re-read or re-parsed - and while no file changed, every caller shares
+/// one combined list instead of copying all entries again.
 pub struct LogUsageSource {
     projects_dir: PathBuf,
-    cache: Arc<Mutex<FileCache>>,
+    cache: Arc<Mutex<ScanCache>>,
 }
 
 impl LogUsageSource {
     pub fn new(projects_dir: PathBuf) -> Self {
         Self {
             projects_dir,
-            cache: Arc::new(Mutex::new(HashMap::new())),
+            cache: Arc::new(Mutex::new(ScanCache::default())),
         }
     }
 
@@ -126,7 +136,7 @@ impl LogUsageSource {
     /// callers always get *some* answer (possibly empty), matching this
     /// plugin's "malformed becomes a fallback" convention. Runs inside
     /// `spawn_blocking` since this may synchronously read many files.
-    pub async fn entries(&self) -> Vec<LogEntry> {
+    pub async fn entries(&self) -> Arc<Vec<LogEntry>> {
         let projects_dir = self.projects_dir.clone();
         let cache = Arc::clone(&self.cache);
         tokio::task::spawn_blocking(move || Self::scan(&projects_dir, &cache))
@@ -134,46 +144,65 @@ impl LogUsageSource {
             .unwrap_or_default()
     }
 
-    fn scan(projects_dir: &Path, cache: &Mutex<FileCache>) -> Vec<LogEntry> {
+    /// Every transcript file and its mtime, sorted so two scans of the
+    /// same files compare equal.
+    fn list_files(projects_dir: &Path) -> FileList {
         let Ok(project_dirs) = std::fs::read_dir(projects_dir) else {
             return Vec::new();
         };
-        let mut guard = cache.lock().unwrap();
-        let mut all = Vec::new();
+        let mut files = Vec::new();
         for project_entry in project_dirs.flatten() {
             let project_path = project_entry.path();
             if !project_path.is_dir() {
                 continue;
             }
-            let Ok(files) = std::fs::read_dir(&project_path) else {
+            let Ok(dir) = std::fs::read_dir(&project_path) else {
                 continue;
             };
-            for file_entry in files.flatten() {
+            for file_entry in dir.flatten() {
                 let file_path = file_entry.path();
                 if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                     continue;
                 }
-                let Ok(metadata) = file_entry.metadata() else {
+                let Ok(mtime) = file_entry.metadata().and_then(|m| m.modified()) else {
                     continue;
                 };
-                let Ok(mtime) = metadata.modified() else {
-                    continue;
-                };
-                let cached = guard
-                    .get(&file_path)
-                    .filter(|(cached_mtime, _)| *cached_mtime == mtime)
-                    .map(|(_, entries)| entries.clone());
-                let entries = match cached {
-                    Some(entries) => entries,
-                    None => {
-                        let parsed = parse_file(&file_path);
-                        guard.insert(file_path.clone(), (mtime, parsed.clone()));
-                        parsed
-                    }
-                };
-                all.extend(entries);
+                files.push((file_path, mtime));
             }
         }
+        files.sort();
+        files
+    }
+
+    fn scan(projects_dir: &Path, cache: &Mutex<ScanCache>) -> Arc<Vec<LogEntry>> {
+        let files = Self::list_files(projects_dir);
+        let mut guard = cache.lock().unwrap();
+        if let Some((seen, entries)) = &guard.last
+            && *seen == files
+        {
+            return Arc::clone(entries);
+        }
+        let mut all = Vec::new();
+        for (file_path, mtime) in &files {
+            let cached = guard
+                .files
+                .get(file_path)
+                .filter(|(cached_mtime, _)| cached_mtime == mtime);
+            match cached {
+                Some((_, entries)) => all.extend(entries.iter().cloned()),
+                None => {
+                    let parsed = parse_file(file_path);
+                    all.extend(parsed.iter().cloned());
+                    guard.files.insert(file_path.clone(), (*mtime, parsed));
+                }
+            }
+        }
+        // Forget files that are gone.
+        guard
+            .files
+            .retain(|path, _| files.binary_search_by(|(p, _)| p.cmp(path)).is_ok());
+        let all = Arc::new(all);
+        guard.last = Some((files, Arc::clone(&all)));
         all
     }
 }
@@ -286,7 +315,7 @@ mod tests {
     #[tokio::test]
     async fn entries_returns_empty_when_projects_dir_is_missing() {
         let source = LogUsageSource::new(PathBuf::from("/nonexistent/claude/projects"));
-        assert_eq!(source.entries().await, Vec::new());
+        assert!(source.entries().await.is_empty());
     }
 
     #[tokio::test]
@@ -309,6 +338,32 @@ mod tests {
         fs::write(&file_path, format!("{ASSISTANT_LINE}\n{ASSISTANT_LINE}\n")).unwrap();
 
         let second = source.entries().await;
+        assert_eq!(second.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn unchanged_logs_share_one_list_of_entries() {
+        let root = tempdir().unwrap();
+        let project = root.path().join("project-a");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("session1.jsonl"), ASSISTANT_LINE).unwrap();
+        let source = LogUsageSource::new(root.path().to_path_buf());
+        let first = source.entries().await;
+        let second = source.entries().await;
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn a_new_log_file_is_a_new_list() {
+        let root = tempdir().unwrap();
+        let project = root.path().join("project-a");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("session1.jsonl"), ASSISTANT_LINE).unwrap();
+        let source = LogUsageSource::new(root.path().to_path_buf());
+        let first = source.entries().await;
+        fs::write(project.join("session2.jsonl"), ASSISTANT_LINE).unwrap();
+        let second = source.entries().await;
+        assert!(!Arc::ptr_eq(&first, &second));
         assert_eq!(second.len(), 2);
     }
 }

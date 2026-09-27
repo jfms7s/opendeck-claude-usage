@@ -17,8 +17,8 @@ design; no fix planned)
 | KI-01 ⭐ | On a Sparkline dial strip, the caption and a long headline can overlap (e.g. `PER POLL · 5H` with `+12.3pp`). | `src/styles/sparkline.rs` `render_strip` | fixed in v0.11.1 |
 | KI-02 ⭐ | A big cost on the Heatmap key caption (`4 WEEKS · $5177.06`) is squeezed to ~74% width. Drop the cents at $1000 and above. | `src/heatmap.rs` `caption_cost` | fixed in v0.11.1 |
 | KI-03 ⭐ | A Combo key with no data still draws bright white ticks on empty grey tracks. | `src/styles/combo.rs` / `src/combo.rs` | fixed in v0.11.1 |
-| KI-04 | The Soft pill's 12px minimum width makes 1–15% look alike (the spec asked for this). | `src/styles/` soft pill | open |
-| KI-05 | Once the reset time has passed with no new reading, the Sparkline keeps showing the old window. | `src/sparkline.rs` `current_window` | open |
+| KI-04 | The Soft pill's 12px minimum width makes 1–15% look alike (the spec asked for this). | `src/styles/` soft pill | fixed in v0.11.2 |
+| KI-05 | Once the reset time has passed with no new reading, the Sparkline keeps showing the old window. | `src/sparkline.rs` `current_window` | fixed in v0.11.2 |
 
 ## Presses during a refresh (races)
 
@@ -44,15 +44,15 @@ design; no fix planned)
 
 | ID | Issue | Where | Status |
 |---|---|---|---|
-| KI-16 | The file is only trimmed to 8 days at startup, so it grows until the next restart (~KB–MB). | `src/history.rs` | open |
-| KI-17 | A warning while loading the file silences later write warnings (one shared `warn_once`). The message wording could also be clearer. | `src/history.rs` | open |
+| KI-16 | The file is only trimmed to 8 days at startup, so it grows until the next restart (~KB–MB). | `src/history.rs` | fixed in v0.11.2 |
+| KI-17 | A warning while loading the file silences later write warnings (one shared `warn_once`). The message wording could also be clearer. | `src/history.rs` | fixed in v0.11.2 |
 
 ## Performance
 
 | ID | Issue | Where | Status |
 |---|---|---|---|
-| KI-18 | Every Heatmap and Metric Tile instance rescans and clones all log entries on each tick. | `src/heatmap_action.rs`, `src/metric_action.rs` | open |
-| KI-19 | The history is cloned on every render for every view, not just sparklines. | `src/hub.rs` | open |
+| KI-18 | Every Heatmap and Metric Tile instance rescans and clones all log entries on each tick. | `src/heatmap_action.rs`, `src/metric_action.rs` | fixed in v0.11.2 |
+| KI-19 | The history is cloned on every render for every view, not just sparklines. | `src/hub.rs` | fixed in v0.11.2 |
 
 ## Code and tests
 

@@ -107,7 +107,7 @@ color is `#374151` and tick color is `TEXT_COLOR`. The fill uses
 | Style | Layout |
 |---|---|
 | Bar | label y 22 (12px bold muted); percent y 54 (28px bold, level color); track x 12, y 64, w 76, h 8; fill width `76·v/100`; ticks at `x = 12 + 76·mark/100` from y 61 to 75; `tile_detail` y 91 (13px muted) |
-| Soft pill | as Bar but track y 63, h 12, `rx 6`; a non-zero fill is at least 12 wide so its rounded ends never invert; percent text in `TEXT_COLOR` (the pill carries the color) |
+| Soft pill | as Bar but track y 63, h 12, `rx 6`; a non-zero fill is at least 4 wide (a visible dot), and its end radius is `min(6, width/2)` so its rounded ends never invert (was a 12-wide minimum; see KI-04); percent text in `TEXT_COLOR` (the pill carries the color) |
 | Open donut | center (50, 47), r 28, stroke 9, round caps; 270° track from 135° to 405° (gap at the bottom); progress from 135° to `135 + 270·v/100`; `number_text` y 55 (22px bold); label y 92 (11px bold muted) |
 | Tracked donut | the same 270° track split into 10 segments with 6° gaps (butt caps); segment `i` (0-based) is filled when `v > i·10`, so `ceil(v/10)` segments are lit and 0% lights none |
 | Thin ring | center (50, 47), r 30, stroke 4; full-circle track; progress from −90° (top) clockwise by `360·v/100`, round caps; `number_text` y 56 (24px bold); label y 92 |

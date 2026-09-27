@@ -6,7 +6,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, Utc};
@@ -29,13 +29,26 @@ pub fn retention() -> Duration {
     Duration::days(8)
 }
 
+/// Pruning only drops readings from memory; the file keeps them until it
+/// is rewritten. Rewriting once this many have been pruned keeps it to
+/// about `retention()` of readings without rewriting on every poll.
+const COMPACT_AFTER: usize = 100;
+
 pub struct HistoryStore {
     readings: Mutex<Vec<Reading>>,
     /// `None` for `in_memory()` - never touches disk.
     path: Option<PathBuf>,
-    /// Set after the first I/O failure, so a read-only disk warns once
-    /// instead of on every poll.
-    warned: AtomicBool,
+    /// Readings pruned from memory but still in the file (see
+    /// `COMPACT_AFTER`). Only changed while holding the `readings` lock.
+    stale_lines: AtomicUsize,
+    /// False when the file existed but couldn't be read: rewriting it from
+    /// memory would wipe readings that are still on disk.
+    rewritable: bool,
+    /// Set after the first failure of each kind, so a read-only disk warns
+    /// once instead of on every poll - and a failed load doesn't hide a
+    /// later write failure.
+    read_warned: AtomicBool,
+    write_warned: AtomicBool,
 }
 
 impl Reading {
@@ -94,7 +107,10 @@ impl HistoryStore {
         Arc::new(Self {
             readings: Mutex::new(Vec::new()),
             path: None,
-            warned: AtomicBool::new(false),
+            stale_lines: AtomicUsize::new(0),
+            rewritable: true,
+            read_warned: AtomicBool::new(false),
+            write_warned: AtomicBool::new(false),
         })
     }
 
@@ -103,10 +119,13 @@ impl HistoryStore {
     /// restarts. A missing file just starts empty; unreadable lines (e.g.
     /// a crash mid-append) are skipped.
     pub fn load(path: PathBuf, now: DateTime<Utc>) -> Arc<Self> {
-        let store = Self {
+        let mut store = Self {
             readings: Mutex::new(Vec::new()),
             path: Some(path.clone()),
-            warned: AtomicBool::new(false),
+            stale_lines: AtomicUsize::new(0),
+            rewritable: true,
+            read_warned: AtomicBool::new(false),
+            write_warned: AtomicBool::new(false),
         };
         // Bytes, decoded lossily: one corrupt byte must only cost its own
         // line, not fail the whole read.
@@ -119,10 +138,13 @@ impl HistoryStore {
             ),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
-                store.warn_once(&format!(
-                    "could not read usage history {}: {e}",
-                    path.display()
-                ));
+                if !store.read_warned.swap(true, Ordering::Relaxed) {
+                    log::warn!(
+                        "could not read usage history {}: {e}; starting with an empty history",
+                        path.display()
+                    );
+                }
+                store.rewritable = false;
                 None
             }
         };
@@ -140,21 +162,31 @@ impl HistoryStore {
         Arc::new(store)
     }
 
+    /// Adds a reading and appends it to the file - or, once enough old
+    /// readings have been pruned, rewrites the file with only the kept
+    /// ones. File I/O happens under the lock so an append can't slip in
+    /// between a rewrite's snapshot and its rename.
     pub fn record(&self, snapshot: &UsageSnapshot, now: DateTime<Utc>) {
         let reading = Reading::from_snapshot(snapshot, now);
+        let mut readings = self.readings.lock().unwrap();
+        if readings
+            .last()
+            .is_some_and(|last| last.same_values(&reading))
         {
-            let mut readings = self.readings.lock().unwrap();
-            if readings
-                .last()
-                .is_some_and(|last| last.same_values(&reading))
-            {
-                return;
-            }
-            readings.push(reading.clone());
-            let cutoff = now - retention();
-            readings.retain(|r| r.at >= cutoff);
+            return;
         }
-        self.append(&reading);
+        readings.push(reading.clone());
+        let before = readings.len();
+        let cutoff = now - retention();
+        readings.retain(|r| r.at >= cutoff);
+        let pruned = before - readings.len();
+        let stale = self.stale_lines.fetch_add(pruned, Ordering::Relaxed) + pruned;
+        if stale >= COMPACT_AFTER && self.rewritable {
+            self.stale_lines.store(0, Ordering::Relaxed);
+            self.rewrite(&readings);
+        } else {
+            self.append(&reading);
+        }
     }
 
     pub fn readings(&self) -> Vec<Reading> {
@@ -177,10 +209,7 @@ impl HistoryStore {
             writeln!(file, "{line}")
         })();
         if let Err(e) = result {
-            self.warn_once(&format!(
-                "could not write usage history {}: {e}",
-                path.display()
-            ));
+            self.warn_write(path, &e);
         }
     }
 
@@ -196,16 +225,17 @@ impl HistoryStore {
             .collect();
         let tmp = path.with_extension("jsonl.tmp");
         if let Err(e) = std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, path)) {
-            self.warn_once(&format!(
-                "could not rewrite usage history {}: {e}",
-                path.display()
-            ));
+            self.warn_write(path, &e);
         }
     }
 
-    fn warn_once(&self, message: &str) {
-        if !self.warned.swap(true, Ordering::Relaxed) {
-            log::warn!("{message}; keeping usage history in memory only");
+    fn warn_write(&self, path: &std::path::Path, e: &std::io::Error) {
+        if !self.write_warned.swap(true, Ordering::Relaxed) {
+            log::warn!(
+                "could not save usage history to {}: {e}; new readings are kept in memory \
+                 until the plugin restarts (further save errors are not logged)",
+                path.display()
+            );
         }
     }
 }
@@ -392,5 +422,49 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             format!("{}\n", line(&good))
         );
+    }
+
+    #[test]
+    fn enough_pruned_readings_compact_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let start = at(10) - Duration::days(7);
+        let old: String = (0..COMPACT_AFTER)
+            .map(|i| line(&reading(start + Duration::minutes(i as i64), i as f64)) + "\n")
+            .collect();
+        std::fs::write(&path, old).unwrap();
+        let store = HistoryStore::load(path.clone(), at(10));
+        assert_eq!(store.readings().len(), COMPACT_AFTER);
+        // Two days on, every loaded reading has aged out.
+        let later = at(10) + Duration::days(2);
+        store.record(&snapshot(40.0, 20.0), later);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 1, "got: {text}");
+        assert_eq!(store.readings().len(), 1);
+    }
+
+    #[test]
+    fn a_few_pruned_readings_only_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let old = reading(at(10) - Duration::days(7), 1.0);
+        std::fs::write(&path, format!("{}\n", line(&old))).unwrap();
+        let store = HistoryStore::load(path.clone(), at(10));
+        store.record(&snapshot(40.0, 20.0), at(10) + Duration::days(2));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 2, "got: {text}");
+    }
+
+    #[test]
+    fn a_load_warning_does_not_silence_write_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the file should be: reading and writing fail.
+        let path = dir.path().join("history.jsonl");
+        std::fs::create_dir(&path).unwrap();
+        let store = HistoryStore::load(path, at(10));
+        assert!(store.read_warned.load(Ordering::Relaxed));
+        assert!(!store.write_warned.load(Ordering::Relaxed));
+        store.record(&snapshot(40.0, 20.0), at(10));
+        assert!(store.write_warned.load(Ordering::Relaxed));
     }
 }

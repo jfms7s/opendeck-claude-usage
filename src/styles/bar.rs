@@ -7,6 +7,8 @@ use crate::tile::{self, MUTED_TEXT_COLOR, TEXT_COLOR};
 
 const TRACK_X: f64 = 12.0;
 const TRACK_W: f64 = 76.0;
+/// The Soft pill's smallest non-zero fill: a visible dot for 1-5%.
+const PILL_MIN_W: f64 = 4.0;
 
 /// `pill` = Soft pill: a thicker, rounded bar that carries the level color
 /// itself, so the percent above it stays white.
@@ -36,13 +38,17 @@ pub fn render(display: &UsageDisplay, pill: bool) -> String {
     );
     let fill = if display.bar_value > 0.0 {
         let mut width = TRACK_W * display.bar_value / 100.0;
-        if pill {
-            // Narrower than its height, a rounded rect's caps overlap and
-            // it renders as a lopsided blob.
-            width = width.max(height);
-        }
+        let fill_rounding = if pill {
+            // A tiny value still shows as a dot; above that the width
+            // tracks the value, so 5% and 15% don't look alike. The end
+            // radius shrinks with a narrow fill so its caps never overlap.
+            width = width.max(PILL_MIN_W);
+            format!(r#" rx="{:.2}" ry="{rx}""#, (width / 2.0).min(rx))
+        } else {
+            String::new()
+        };
         format!(
-            r#"<rect x="{TRACK_X}" y="{track_y}" width="{width:.2}" height="{height}"{rounding} fill="{}" />"#,
+            r#"<rect x="{TRACK_X}" y="{track_y}" width="{width:.2}" height="{height}"{fill_rounding} fill="{}" />"#,
             display.color
         )
     } else {
@@ -154,9 +160,10 @@ pub(crate) mod tests {
 
     #[test]
     fn pill_is_rounded_with_a_minimum_width_and_white_percent() {
+        // 76 * 0.03 = 2.28, raised to the 4px minimum dot.
         let s = render(&display(3.0), true);
         assert!(
-            s.contains(r##"width="12.00" height="12" rx="6" fill="#d97757""##),
+            s.contains(r##"width="4.00" height="12" rx="2.00" ry="6" fill="#d97757""##),
             "got: {s}"
         );
         assert!(
@@ -166,6 +173,32 @@ pub(crate) mod tests {
         assert!(
             s.contains(r#"x1="50.00" y1="60" x2="50.00" y2="78""#),
             "got: {s}"
+        );
+    }
+
+    fn pill_fill_width(v: f64) -> String {
+        let s = render(&display(v), true);
+        let fill = s
+            .split("<rect")
+            .find(|r| r.contains(r##"fill="#d97757""##))
+            .unwrap_or_else(|| panic!("no fill in {s}"));
+        let start = fill.find(r#"width=""#).unwrap() + 7;
+        fill[start..].split('"').next().unwrap().to_string()
+    }
+
+    #[test]
+    fn small_pill_values_are_told_apart() {
+        // 76px track: 10% = 7.6px, 15% = 11.4px - both used to be 12px.
+        assert_eq!(pill_fill_width(10.0), "7.60");
+        assert_eq!(pill_fill_width(15.0), "11.40");
+        assert_eq!(pill_fill_width(1.0), "4.00");
+    }
+
+    #[test]
+    fn a_wide_pill_keeps_full_rounding() {
+        assert!(
+            render(&display(50.0), true)
+                .contains(r##"width="38.00" height="12" rx="6.00" ry="6" fill="#d97757""##)
         );
     }
 }
