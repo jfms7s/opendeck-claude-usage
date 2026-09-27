@@ -5,6 +5,7 @@
 pub mod bar;
 pub mod combo;
 pub mod donut;
+pub mod heatmap;
 pub mod ring;
 pub mod speedometer;
 
