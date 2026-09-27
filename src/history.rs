@@ -2,9 +2,12 @@
 //! current session/weekly percentages, so trends need readings kept over
 //! time: an in-memory list mirrored to a small append-only JSONL file.
 //! It holds percentages and reset times only - no tokens, credentials or
-//! account data - and anything older than `retention()` is dropped.
+//! account data - and anything older than `retention()` is dropped. Still,
+//! it's nobody else's business how much someone uses Claude, so the file
+//! and any directory created for it are owner-only.
 
 use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -203,12 +206,16 @@ impl HistoryStore {
         };
         let result = (|| -> std::io::Result<()> {
             if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(dir)?;
             }
             let line = serde_json::to_string(reading).map_err(std::io::Error::other)?;
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
+                .mode(0o600)
                 .open(path)?;
             writeln!(file, "{line}")
         })();
@@ -228,7 +235,15 @@ impl HistoryStore {
             .map(|l| l + "\n")
             .collect();
         let tmp = path.with_extension("jsonl.tmp");
-        if let Err(e) = std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, path)) {
+        let result = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut file| file.write_all(body.as_bytes()))
+            .and_then(|_| std::fs::rename(&tmp, path));
+        if let Err(e) = result {
             self.warn_write(path, &e);
         }
     }
@@ -480,6 +495,34 @@ mod tests {
         store.record(&snapshot(40.0, 20.0), at(10) + Duration::days(2));
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.lines().count(), 2, "got: {text}");
+    }
+
+    fn mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn an_appended_file_and_its_directory_are_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state/history.jsonl");
+        let store = HistoryStore::load(path.clone(), at(10));
+        store.record(&snapshot(40.0, 20.0), at(10));
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+    }
+
+    /// A file saved by an older version with the default umask becomes
+    /// owner-only on the next load, since loading rewrites it.
+    #[test]
+    fn a_rewritten_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        std::fs::write(&path, format!("{}\n", line(&reading(at(9), 20.0)))).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        HistoryStore::load(path.clone(), at(10));
+        assert_eq!(mode(&path), 0o600);
     }
 
     #[test]
