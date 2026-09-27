@@ -2,7 +2,7 @@
 //! trend, per-poll increases, today's running increase, and the even-burn
 //! ratio. Pure - `now` carries the time zone for "today".
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -147,9 +147,16 @@ fn between_polls(window: &[&Reading], kind: WindowKind) -> Series {
     steps
 }
 
+/// How soon after local midnight today's first reading must be for the
+/// last reading before midnight to count as the baseline. While the plugin
+/// runs, `HistoryStore::record` keeps the first poll of each day, so this
+/// only fails when it wasn't running (or couldn't read) around midnight.
+const MIDNIGHT_GAP: Duration = Duration::minutes(15);
+
 /// Running total of usage added since local midnight. The baseline is the
-/// last reading before midnight; without one, the first reading today
-/// counts as zero.
+/// last reading before midnight when today's first reading follows
+/// midnight closely; otherwise nobody knows how much of the gap was
+/// yesterday's, so the first reading today counts as zero.
 fn today<Tz: TimeZone>(readings: &[Reading], kind: WindowKind, now: &DateTime<Tz>) -> Series {
     let tz = now.timezone();
     let today = now.date_naive();
@@ -159,20 +166,22 @@ fn today<Tz: TimeZone>(readings: &[Reading], kind: WindowKind, now: &DateTime<Tz
     else {
         return Vec::new();
     };
-    let (mut prev, start, mut out) = if first > 0 {
+    let midnight = today
+        .and_hms_opt(0, 0, 0)
+        .and_then(|m| tz.from_local_datetime(&m).earliest())
+        .map(|m| m.with_timezone(&Utc));
+    let baseline = midnight.filter(|m| first > 0 && readings[first].at - *m <= MIDNIGHT_GAP);
+    let (mut prev, start, mut out) = if let Some(midnight) = baseline {
         // Start at 0 at local midnight, so a day with a single change (or
         // none yet) still draws.
-        let midnight = today
-            .and_hms_opt(0, 0, 0)
-            .and_then(|m| tz.from_local_datetime(&m).earliest())
-            .map(|m| m.with_timezone(&Utc));
         (
             usage(&readings[first - 1], kind),
             first,
-            midnight.map(|m| vec![(m, 0.0)]).unwrap_or_default(),
+            vec![(midnight, 0.0)],
         )
     } else {
-        (usage(&readings[0], kind), 1, vec![(readings[0].at, 0.0)])
+        let start = &readings[first];
+        (usage(start, kind), first + 1, vec![(start.at, 0.0)])
     };
     let mut total = 0.0;
     for reading in &readings[start..] {
@@ -410,7 +419,7 @@ mod tests {
     fn today_starts_from_the_last_reading_before_midnight() {
         let d = today_at_plus_2(&[
             weekly("2026-09-29T21:00:00Z", 30.0, W), // 23:00 local, yesterday
-            weekly("2026-09-29T23:00:00Z", 32.0, W), // 01:00 local, today
+            weekly("2026-09-29T22:01:00Z", 32.0, W), // 00:01 local, today
             weekly("2026-09-30T05:00:00Z", 35.0, W),
         ]);
         // Midnight (22:00Z) at 0, the two changes, then "now" (12:00Z) holding 5.
@@ -419,6 +428,20 @@ mod tests {
         assert_eq!(d.points[3], (1.0, 5.0));
         assert_eq!(d.headline, "5.0pp");
         assert_eq!(d.caption, "TODAY \u{b7} 7D");
+    }
+
+    /// With no reading soon after midnight (the plugin wasn't running),
+    /// nobody knows how much of the gap was yesterday's: today starts at
+    /// its first reading instead of counting the whole gap.
+    #[test]
+    fn today_does_not_count_a_gap_over_midnight() {
+        let d = today_at_plus_2(&[
+            weekly("2026-09-29T16:00:00Z", 30.0, W), // 18:00 local, yesterday
+            weekly("2026-09-30T07:00:00Z", 32.0, W), // 09:00 local, today
+            weekly("2026-09-30T09:00:00Z", 35.0, W),
+        ]);
+        assert_eq!(d.points.first(), Some(&(0.0, 0.0)));
+        assert_eq!(d.headline, "3.0pp");
     }
 
     #[test]
@@ -435,8 +458,8 @@ mod tests {
     #[test]
     fn today_counts_resets_as_new_usage() {
         let d = today_at_plus_2(&[
-            weekly("2026-09-29T21:00:00Z", 90.0, "2026-09-29T22:30:00Z"),
-            weekly("2026-09-29T23:00:00Z", 2.0, W),
+            weekly("2026-09-29T21:00:00Z", 90.0, "2026-09-29T22:03:00Z"),
+            weekly("2026-09-29T22:05:00Z", 2.0, W),
             weekly("2026-09-30T05:00:00Z", 5.0, W),
         ]);
         assert_eq!(d.headline, "5.0pp");
@@ -610,11 +633,24 @@ mod tests {
 
     #[test]
     fn an_idle_day_with_a_baseline_reads_zero() {
-        // Only readings from yesterday; nothing changed yet today.
+        // Nothing changed yet today: just the unchanged midnight marker
+        // `HistoryStore::record` keeps from the first poll of the day.
+        let d = today_at_plus_2(&[
+            weekly("2026-09-29T18:00:00Z", 28.0, W),
+            weekly("2026-09-29T21:00:00Z", 30.0, W),
+            weekly("2026-09-29T22:00:20Z", 30.0, W),
+        ]);
+        assert_eq!(d.headline, "0.0pp");
+    }
+
+    /// No reading at all today means no successful poll today, so there's
+    /// nothing to say about today's usage.
+    #[test]
+    fn a_day_without_readings_has_no_today_line() {
         let d = today_at_plus_2(&[
             weekly("2026-09-29T18:00:00Z", 28.0, W),
             weekly("2026-09-29T21:00:00Z", 30.0, W),
         ]);
-        assert_eq!(d.headline, "0.0pp");
+        assert_eq!(d.headline, "\u{2014}");
     }
 }
