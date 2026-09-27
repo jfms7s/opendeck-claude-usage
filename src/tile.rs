@@ -91,7 +91,7 @@ pub fn text_line(y: f64, size: f64, bold: bool, color: &str, content: &str) -> S
     text_at(50.0, y, Anchor::Middle, size, bold, color, content)
 }
 
-fn escape_xml(s: &str) -> String {
+pub fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

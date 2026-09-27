@@ -7,6 +7,8 @@ mod clock_icon;
 mod combo;
 mod combo_action;
 mod format;
+mod heatmap;
+mod heatmap_action;
 mod hub;
 mod level;
 mod metric;
@@ -25,12 +27,14 @@ use action::UsageGaugeAction;
 use burn_action::BurnRateAction;
 use clock_action::PeakClockAction;
 use combo_action::ComboAction;
+use heatmap_action::HeatmapAction;
 use hub::UsageHub;
 use metric_action::MetricTileAction;
 use openaction::{OpenActionResult, register_action, run};
 use source::api::ApiUsageSource;
 use source::cached::{CachePolicy, CachedUsageSource};
 use source::logs::LogUsageSource;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[tokio::main]
@@ -65,14 +69,21 @@ async fn main() -> OpenActionResult<()> {
     let ticker = clock.clone();
     tokio::spawn(async move { ticker.tick_loop().await });
 
-    let metric_tile = MetricTileAction::new(LogUsageSource::default(), usage);
+    // One log scanner (and mtime cache) shared by every log-reading action.
+    let logs = Arc::new(LogUsageSource::default());
+    let metric_tile = MetricTileAction::new(logs.clone(), usage);
     let metric_ticker = metric_tile.clone();
     tokio::spawn(async move { metric_ticker.tick_loop().await });
+
+    let heatmap = HeatmapAction::new(logs);
+    let heatmap_ticker = heatmap.clone();
+    tokio::spawn(async move { heatmap_ticker.tick_loop().await });
 
     register_action(action).await;
     register_action(clock).await;
     register_action(metric_tile).await;
     register_action(burn_rate).await;
     register_action(combo).await;
+    register_action(heatmap).await;
     run(std::env::args().collect()).await
 }

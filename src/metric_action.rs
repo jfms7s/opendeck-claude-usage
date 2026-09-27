@@ -39,9 +39,12 @@ pub struct MetricTileAction {
 }
 
 impl MetricTileAction {
-    pub fn new(log_source: LogUsageSource, session_source: impl UsageSource + 'static) -> Self {
+    pub fn new(
+        log_source: Arc<LogUsageSource>,
+        session_source: impl UsageSource + 'static,
+    ) -> Self {
         Self {
-            log_source: Arc::new(log_source),
+            log_source,
             session_source: Arc::new(session_source),
             registry: Arc::new(DashMap::new()),
         }
@@ -232,7 +235,10 @@ mod tests {
 
     #[test]
     fn track_then_untrack_round_trips_through_the_registry() {
-        let action = MetricTileAction::new(LogUsageSource::default(), ApiUsageSource::default());
+        let action = MetricTileAction::new(
+            Arc::new(LogUsageSource::default()),
+            ApiUsageSource::default(),
+        );
         action.track("ctx1", MetricTileSettings::default());
         assert!(action.registry.contains_key("ctx1"));
 
@@ -242,7 +248,10 @@ mod tests {
 
     #[test]
     fn tracking_the_same_instance_twice_overwrites_its_settings() {
-        let action = MetricTileAction::new(LogUsageSource::default(), ApiUsageSource::default());
+        let action = MetricTileAction::new(
+            Arc::new(LogUsageSource::default()),
+            ApiUsageSource::default(),
+        );
         action.track(
             "ctx1",
             MetricTileSettings {
