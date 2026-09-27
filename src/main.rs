@@ -9,6 +9,7 @@ mod combo_action;
 mod format;
 mod heatmap;
 mod heatmap_action;
+mod history;
 mod hub;
 mod level;
 mod metric;
