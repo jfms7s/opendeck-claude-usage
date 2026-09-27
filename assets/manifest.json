@@ -82,7 +82,7 @@
 			"UUID": "com.jfms7s.claudeusage.sparkline",
 			"Name": "Usage Sparkline",
 			"Icon": "icons/sparkline",
-			"Tooltip": "Shows a trend line of your Claude session or weekly usage: usage trend, increase per poll, today's increase, or pace vs even burn",
+			"Tooltip": "Shows a trend line of your Claude session, weekly or monthly extra usage: usage trend, increase per poll, today's increase, or pace vs even burn",
 			"Controllers": ["Encoder", "Keypad"],
 			"PropertyInspectorPath": "propertyInspector/sparkline.html",
 			"States": [{ "Image": "icons/sparkline" }],

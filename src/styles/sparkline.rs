@@ -64,7 +64,7 @@ pub fn render_key(display: &SparkDisplay) -> String {
     let caption = tile::text_line(14.0, 11.0, true, MUTED_TEXT_COLOR, &display.caption);
     let headline = tile::text_line(46.0, 26.0, true, &display.color, &display.headline);
     let body = if display.points.is_empty() {
-        tile::text_line(78.0, 11.0, false, MUTED_TEXT_COLOR, "collecting\u{2026}")
+        tile::text_line(78.0, 11.0, false, MUTED_TEXT_COLOR, &display.note)
     } else {
         chart(&display.points, &KEY_AREA, &display.color)
     };
@@ -79,8 +79,9 @@ pub fn render_strip(display: &SparkDisplay) -> String {
     let color = &display.color;
     let headline_size = strip_headline_size(&display.caption, &display.headline);
     let body = if display.points.is_empty() {
+        let note = tile::escape_xml(&display.note);
         format!(
-            r#"<text x="100" y="70" text-anchor="middle" font-family="sans-serif" font-size="14" font-weight="500" fill="{MUTED_TEXT_COLOR}">collecting&#8230;</text>"#
+            r#"<text x="100" y="70" text-anchor="middle" font-family="sans-serif" font-size="14" font-weight="500" fill="{MUTED_TEXT_COLOR}">{note}</text>"#
         )
     } else {
         chart(&display.points, &STRIP_AREA, color)
@@ -119,6 +120,7 @@ mod tests {
             headline: "40%".to_string(),
             points,
             color: "#d97757".to_string(),
+            note: "collecting\u{2026}".to_string(),
         }
     }
 
@@ -148,6 +150,14 @@ mod tests {
         let s = render_key(&display(vec![(0.0, 0.0), (1.0, 0.0)]));
         assert!(s.contains(r#"points="8.00,90.00 92.00,90.00""#), "got: {s}");
         assert!(!s.contains("NaN"));
+    }
+
+    #[test]
+    fn an_empty_chart_shows_its_note() {
+        let mut d = display(Vec::new());
+        d.note = "not enabled".to_string();
+        assert!(render_key(&d).contains(">not enabled</text>"));
+        assert!(render_strip(&d).contains(">not enabled</text>"));
     }
 
     #[test]

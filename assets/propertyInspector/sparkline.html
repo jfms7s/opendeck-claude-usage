@@ -18,8 +18,9 @@
 	<select id="window">
 		<option value="session">Session (5 hour)</option>
 		<option value="weekly">Weekly (7 day)</option>
+		<option value="monthly">Monthly (extra usage)</option>
 	</select>
-	<p class="hint">Short press (key or dial) cycles Trend → Per poll → Today → Vs even. Hold to refresh. History builds up as the plugin runs and is kept for 8 days.</p>
+	<p class="hint">Short press (key or dial) cycles Trend → Per poll → Today → Vs even. Hold to refresh. History builds up as the plugin runs and is kept for 8 days, so Monthly shows at most the last 8 days, and Vs even needs a reset time Monthly doesn't have.</p>
 
 	<div id="colors"></div>
 	<script src="colors.js"></script>
@@ -64,7 +65,8 @@
 
 		function applySettings(settings) {
 			storedSeries = settings.series;
-			document.getElementById("window").value = settings.window === "weekly" ? "weekly" : "session";
+			document.getElementById("window").value =
+				settings.window === "weekly" || settings.window === "monthly" ? settings.window : "session";
 			applyColorSettings(settings);
 		}
 

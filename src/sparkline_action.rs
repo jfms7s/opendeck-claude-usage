@@ -244,13 +244,16 @@ mod tests {
         assert_eq!(s.colors, ColorSettings::default());
     }
 
-    /// The PI must load the shared colors section, offer both windows, and
-    /// pass the stored series through, or saving it would reset the series.
+    /// The PI must load the shared colors section, offer every window
+    /// (and keep a stored Monthly), and pass the stored series through, or
+    /// saving it would reset the series.
     #[test]
     fn property_inspector_offers_windows_and_keeps_series() {
         let html = include_str!("../assets/propertyInspector/sparkline.html");
         assert!(html.contains(r#"<script src="colors.js"></script>"#));
         assert!(html.contains(r#"<option value="weekly">"#));
+        assert!(html.contains(r#"<option value="monthly">"#));
+        assert!(!html.contains(r#"settings.window === "weekly" ? "weekly" : "session""#));
         assert!(html.contains("storedSeries"));
         assert!(html.contains("key or dial"));
     }
