@@ -18,7 +18,7 @@ pub const MUTED_TEXT_COLOR: &str = "#d1d5db";
 /// size. Only used to decide when a line needs squeezing to fit, so a
 /// slight overestimate is the safe side.
 const REGULAR_CHAR_WIDTH: f64 = 0.58;
-const BOLD_CHAR_WIDTH: f64 = 0.64;
+pub const BOLD_CHAR_WIDTH: f64 = 0.64;
 
 /// Full-bleed dark card, so the tile never depends on the key's configured
 /// background color for contrast.

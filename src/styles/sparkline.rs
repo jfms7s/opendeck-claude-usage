@@ -77,6 +77,7 @@ pub fn render_strip(display: &SparkDisplay) -> String {
     let caption = tile::escape_xml(&display.caption);
     let headline = tile::escape_xml(&display.headline);
     let color = &display.color;
+    let headline_size = strip_headline_size(&display.caption, &display.headline);
     let body = if display.points.is_empty() {
         format!(
             r#"<text x="100" y="70" text-anchor="middle" font-family="sans-serif" font-size="14" font-weight="500" fill="{MUTED_TEXT_COLOR}">collecting&#8230;</text>"#
@@ -85,8 +86,22 @@ pub fn render_strip(display: &SparkDisplay) -> String {
         chart(&display.points, &STRIP_AREA, color)
     };
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"><rect x="0" y="0" width="200" height="100" fill="{CARD_COLOR}" /><text x="10" y="18" text-anchor="start" font-family="sans-serif" font-size="14" font-weight="700" fill="{TEXT_COLOR}">{caption}</text><text x="190" y="20" text-anchor="end" font-family="sans-serif" font-size="20" font-weight="700" fill="{color}">{headline}</text>{body}</svg>"#
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"><rect x="0" y="0" width="200" height="100" fill="{CARD_COLOR}" /><text x="10" y="18" text-anchor="start" font-family="sans-serif" font-size="14" font-weight="700" fill="{TEXT_COLOR}">{caption}</text><text x="190" y="20" text-anchor="end" font-family="sans-serif" font-size="{headline_size}" font-weight="700" fill="{color}">{headline}</text>{body}</svg>"#
     )
+}
+
+/// The strip headline's font size: 20, shrunk (down to 10) so it ends
+/// before the caption does, using the same bold-width estimate as
+/// `tile::text_at`.
+fn strip_headline_size(caption: &str, headline: &str) -> f64 {
+    const CAPTION_SIZE: f64 = 14.0;
+    const GAP: f64 = 6.0;
+    let caption_width = caption.chars().count() as f64 * CAPTION_SIZE * tile::BOLD_CHAR_WIDTH;
+    let room = 180.0 - caption_width - GAP;
+    let chars = headline.chars().count().max(1) as f64;
+    (room / (chars * tile::BOLD_CHAR_WIDTH))
+        .clamp(10.0, 20.0)
+        .floor()
 }
 
 /// Dial payload for the shared `layouts/chart.json`.
@@ -155,6 +170,25 @@ mod tests {
             "got: {s}"
         );
         assert!(!s.contains("textLength"));
+    }
+
+    /// KI-01: a long caption and headline must not overlap on the strip.
+    #[test]
+    fn strip_headline_shrinks_to_clear_a_long_caption() {
+        let mut d = display(rising());
+        d.caption = "PER POLL \u{b7} 5H".to_string();
+        d.headline = "+12.3pp".to_string();
+        let s = render_strip(&d);
+        let size: f64 = s
+            .split(r#"x="190" y="20" text-anchor="end" font-family="sans-serif" font-size=""#)
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("no headline in {s}"));
+        let caption_right = 10.0 + 13.0 * 14.0 * 0.64;
+        let headline_left = 190.0 - 7.0 * size * 0.64;
+        assert!(caption_right < headline_left, "size {size} overlaps: {s}");
+        assert!(size >= 10.0, "size {size} too small");
     }
 
     #[test]

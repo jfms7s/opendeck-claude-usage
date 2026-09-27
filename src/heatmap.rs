@@ -180,13 +180,23 @@ pub fn build_heatmap<Tz: TimeZone>(
     let sum: f64 = totals.iter().sum();
     let total_text = match settings.metric {
         MetricKind::Tokens => format_tokens(sum.round() as u64),
-        MetricKind::Cost => format_cost(sum),
+        MetricKind::Cost => caption_cost(sum),
     };
     HeatmapDisplay {
         caption: format!("{} \u{b7} {total_text}", settings.view.caption()),
         cells,
         weekday_letters,
         color: settings.color.clone(),
+    }
+}
+
+/// Cost for the caption: cents only below $1000, so a big month still
+/// fits on a key without being squeezed.
+fn caption_cost(total: f64) -> String {
+    if total >= 1000.0 {
+        format!("${total:.0}")
+    } else {
+        format_cost(total)
     }
 }
 
@@ -247,6 +257,16 @@ mod tests {
         let t = daily_totals(&entries, MetricKind::Tokens, now(), 7);
         assert_eq!(t.iter().sum::<f64>(), 5.0);
         assert_eq!(t[0], 5.0);
+    }
+
+    /// KI-02: "4 WEEKS · $5177.06" gets squeezed on a key; cents don't
+    /// matter at that size.
+    #[test]
+    fn caption_cost_drops_cents_from_1000() {
+        assert_eq!(caption_cost(38.2), "$38.20");
+        assert_eq!(caption_cost(999.99), "$999.99");
+        assert_eq!(caption_cost(1000.0), "$1000");
+        assert_eq!(caption_cost(5177.06), "$5177");
     }
 
     #[test]

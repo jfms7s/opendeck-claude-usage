@@ -62,7 +62,10 @@
 
 		function applySettings(settings) {
 			document.getElementById("window").value = settings.window === "weekly" ? "weekly" : "session";
-			document.getElementById("metric").value = settings.metric || "pace";
+			// An unknown stored metric would leave the select empty and the
+			// next edit would send "" - show the default instead.
+			const knownMetric = ["pace", "evenBurn", "runway"].includes(settings.metric);
+			document.getElementById("metric").value = knownMetric ? settings.metric : "pace";
 			applyColorSettings(settings);
 		}
 
