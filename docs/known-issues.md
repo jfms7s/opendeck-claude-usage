@@ -25,10 +25,10 @@ fix planned)
 
 | ID | Issue | Where | Status |
 |---|---|---|---|
-| KI-06 | A short press that lands during a poll can show the old gauge style for up to ~20 s (the saved setting is correct). Fix: re-read the registry per instance in `refresh_all`. | `src/hub.rs` | open |
-| KI-07 | A press during the Heatmap's once-a-minute tick can redraw the old view for up to 60 s. Same fix, in the tick loop. | `src/heatmap_action.rs` | open |
-| KI-08 | Two very fast short presses can both start from OpenDeck's not-yet-updated settings and land on the same style. | gauge / sparkline / heatmap actions | open |
-| KI-09 | History readings can be stored out of order if two refreshes race or the clock jumps (`record` pushes without sorting). | `src/history.rs` `record` | open |
+| KI-06 | A short press that lands during a poll can show the old gauge style for up to ~20 s (the saved setting is correct). Fix: re-read the registry per instance in `refresh_all`. | `src/hub.rs` | fixed in v0.12.1 |
+| KI-07 | A press during the Heatmap's once-a-minute tick can redraw the old view for up to 60 s. Same fix, in the tick loop. | `src/heatmap_action.rs` | fixed in v0.12.1 |
+| KI-08 | Two very fast short presses can both start from OpenDeck's not-yet-updated settings and land on the same style. | gauge / sparkline / heatmap actions | fixed in v0.12.1 |
+| KI-09 | History readings can be stored out of order if two refreshes race or the clock jumps (`record` pushes without sorting). | `src/history.rs` `record` | fixed in v0.12.1 |
 
 ## Settings page (property inspector)
 

@@ -5,6 +5,7 @@
 //! records each successful read into the `HistoryStore` the sparkline
 //! draws from.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -25,6 +26,7 @@ use crate::style::GaugeStyle;
 use crate::styles::build_styled_icon;
 use crate::styles::combo::render as combo_key;
 use crate::styles::sparkline::{render_key as sparkline_key, sparkline_feedback};
+use crate::surface::{Surface, for_each_tracked};
 use crate::tile;
 
 /// The wire value OpenDeck sends as `Instance::controller` for a keypad
@@ -163,23 +165,6 @@ impl UsageHub {
         self.registry.remove(instance_id);
     }
 
-    /// Pushes a frame via whichever surface the instance's controller
-    /// has. Keypad text is drawn inside the icon (see tile.rs), so the
-    /// native title is cleared to stop OpenDeck painting a second copy.
-    async fn push(instance: &Instance, output: Output) -> OpenActionResult<()> {
-        match output {
-            Output::Image(image) => {
-                instance.set_title(Some(String::new()), None).await?;
-                instance.set_image(Some(image), None).await
-            }
-            Output::Feedback(feedback) => instance.set_feedback(&feedback).await,
-        }
-    }
-
-    fn is_keypad(instance: &Instance) -> bool {
-        instance.controller == KEYPAD_CONTROLLER
-    }
-
     /// Renders from the last cached snapshot (no fresh read) - used when an
     /// instance appears or its settings change, so it shows *something*
     /// immediately rather than waiting for the next poll tick.
@@ -189,10 +174,10 @@ impl UsageHub {
             view,
             snapshot.as_ref(),
             &self.history.readings(),
-            Self::is_keypad(instance),
+            instance.is_keypad(),
             Utc::now(),
         );
-        Self::push(instance, output).await
+        instance.push(output).await
     }
 
     /// Reads the source and caches it on success - shared by `refresh_one`
@@ -217,21 +202,10 @@ impl UsageHub {
             view,
             result.as_ref().ok(),
             &self.history.readings(),
-            Self::is_keypad(instance),
+            instance.is_keypad(),
             Utc::now(),
         );
-        Self::push(instance, output).await
-    }
-
-    /// Every tracked instance and its view. Collected, so the DashMap
-    /// shard lock is released before the caller awaits per instance -
-    /// holding an iterator guard across an await would keep that shard
-    /// locked for the whole loop.
-    fn tracked(&self) -> Vec<(String, View)> {
-        self.registry
-            .iter()
-            .map(|e| (e.key().clone(), e.value().clone()))
-            .collect()
+        instance.push(output).await
     }
 
     fn log_poll_read_transition(&self, read_ok: bool, error: Option<&UsageSourceError>) {
@@ -258,20 +232,53 @@ impl UsageHub {
         let read_result = self.read_and_cache().await;
         self.log_poll_read_transition(read_result.is_ok(), read_result.as_ref().err());
 
-        for (instance_id, view) in self.tracked() {
-            let Some(instance) = openaction::get_instance(instance_id).await else {
-                continue; // disappeared between the snapshot and now
-            };
-            let output = output_for(
-                &view,
-                read_result.as_ref().ok(),
-                &self.history.readings(),
-                Self::is_keypad(&instance),
-                Utc::now(),
-            );
-            if let Err(e) = Self::push(&instance, output).await {
-                log::warn!("render failed: {e}");
-            }
+        self.render_tracked(read_result.as_ref().ok(), openaction::get_instance)
+            .await;
+    }
+
+    /// Re-renders every tracked instance from `snapshot`, reading each
+    /// one's view only once its instance has been looked up (see
+    /// `for_each_tracked`).
+    async fn render_tracked<S, L, LF>(&self, snapshot: Option<&UsageSnapshot>, lookup: L)
+    where
+        S: Surface,
+        L: FnMut(String) -> LF,
+        LF: Future<Output = Option<S>>,
+    {
+        let ids = self.registry.iter().map(|e| e.key().clone()).collect();
+        for_each_tracked(
+            ids,
+            |id| self.registry.get(id).map(|v| v.clone()),
+            lookup,
+            |instance, view| async move {
+                let output = output_for(
+                    &view,
+                    snapshot,
+                    &self.history.readings(),
+                    instance.is_keypad(),
+                    Utc::now(),
+                );
+                if let Err(e) = instance.push(output).await {
+                    log::warn!("render failed: {e}");
+                }
+            },
+        )
+        .await;
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use async_trait::async_trait;
+
+    /// A source for tests that never read usage.
+    pub struct NeverCalled;
+
+    #[async_trait]
+    impl UsageSource for NeverCalled {
+        async fn read(&self) -> Result<UsageSnapshot, UsageSourceError> {
+            unreachable!("this test never triggers a read")
         }
     }
 }
@@ -284,14 +291,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::TimeZone;
 
-    struct NeverCalled;
-
-    #[async_trait]
-    impl UsageSource for NeverCalled {
-        async fn read(&self) -> Result<UsageSnapshot, UsageSourceError> {
-            unreachable!("this test never triggers a read")
-        }
-    }
+    use test_support::NeverCalled;
 
     fn snapshot() -> UsageSnapshot {
         UsageSnapshot {
@@ -384,20 +384,15 @@ mod tests {
         hub.track("burn", burn());
         let snapshot = hub.read_and_cache().await.unwrap();
 
-        let mut frames: Vec<(String, Output)> = hub
-            .tracked()
-            .into_iter()
-            .map(|(id, view)| {
-                let out = output_for(
-                    &view,
-                    Some(&snapshot),
-                    &hub.history.readings(),
-                    false,
-                    now(),
-                );
-                (id, out)
-            })
-            .collect();
+        let pushed = Arc::default();
+        hub.render_tracked(Some(&snapshot), |id| {
+            std::future::ready(Some(FakeSurface {
+                id,
+                pushed: Arc::clone(&pushed),
+            }))
+        })
+        .await;
+        let mut frames = pushed.lock().unwrap().clone();
         frames.sort_by(|a, b| a.0.cmp(&b.0));
 
         let [
@@ -560,5 +555,57 @@ mod tests {
                 .unwrap()
                 .starts_with("data:image/svg+xml;base64,")
         );
+    }
+
+    /// Stands in for an OpenDeck instance (a dial): records what it's sent.
+    #[derive(Clone, Default)]
+    struct FakeSurface {
+        id: String,
+        pushed: Arc<std::sync::Mutex<Vec<(String, Output)>>>,
+    }
+
+    #[async_trait]
+    impl Surface for FakeSurface {
+        fn is_keypad(&self) -> bool {
+            false
+        }
+
+        async fn push(&self, output: Output) -> OpenActionResult<()> {
+            self.pushed.lock().unwrap().push((self.id.clone(), output));
+            Ok(())
+        }
+    }
+
+    /// KI-06: a short press re-tracks the view while the poll is awaiting
+    /// the instance lookup - the poll must draw the new view, not the one
+    /// it saw before the await.
+    #[tokio::test]
+    async fn a_view_changed_during_the_lookup_is_the_one_drawn() {
+        let hub = UsageHub::new(NeverCalled, HistoryStore::in_memory());
+        hub.track("ctx1", gauge());
+        let surface = FakeSurface::default();
+        hub.render_tracked(Some(&snapshot()), |id| {
+            hub.track(&id, sparkline_view()); // the press lands here
+            std::future::ready(Some(surface.clone()))
+        })
+        .await;
+        let pushed = surface.pushed.lock().unwrap();
+        let [(_, Output::Feedback(f))] = pushed.as_slice() else {
+            panic!("expected one feedback, got {pushed:?}");
+        };
+        assert!(f.get("chart").is_some(), "drew the old gauge: {f}");
+    }
+
+    #[tokio::test]
+    async fn an_instance_untracked_during_the_lookup_is_not_drawn() {
+        let hub = UsageHub::new(NeverCalled, HistoryStore::in_memory());
+        hub.track("ctx1", gauge());
+        let surface = FakeSurface::default();
+        hub.render_tracked(Some(&snapshot()), |id| {
+            hub.untrack(&id);
+            std::future::ready(Some(surface.clone()))
+        })
+        .await;
+        assert!(surface.pushed.lock().unwrap().is_empty());
     }
 }

@@ -1,6 +1,6 @@
 use crate::hub::{UsageHub, View};
 use crate::level::ColorSettings;
-use crate::press::{Press, PressTimer, Release, on_release};
+use crate::press::{LatestSettings, Press, PressTimer, Release, on_release};
 use crate::source::WindowKind;
 use crate::style::{StyleSettings, next_style};
 use async_trait::async_trait;
@@ -53,6 +53,8 @@ pub struct UsageGaugeAction {
     hub: Arc<UsageHub>,
     /// Tells a short press (cycle style) from a long one (refresh).
     presses: Arc<PressTimer>,
+    /// What each key was last set to, so a press starts from it.
+    latest: Arc<LatestSettings<UsageGaugeSettings>>,
 }
 
 impl UsageGaugeAction {
@@ -60,22 +62,41 @@ impl UsageGaugeAction {
         Self {
             hub,
             presses: Arc::new(PressTimer::default()),
+            latest: Arc::new(LatestSettings::default()),
         }
     }
 
-    /// Switches to the next ticked style: persists it (so it survives an
-    /// OpenDeck restart), re-tracks the view for the poll loop, and redraws
+    /// What a release does, decided from the last-set settings rather than
+    /// the event's, and kept when it switches (see `LatestSettings`).
+    fn release(
+        &self,
+        instance_id: &str,
+        settings: &UsageGaugeSettings,
+        press: Press,
+    ) -> Release<UsageGaugeSettings> {
+        self.latest
+            .release(instance_id, settings, |s| s.release(press))
+    }
+
+    /// The view a refresh draws - from the last-set settings too.
+    fn current_view(&self, instance_id: &str, settings: &UsageGaugeSettings) -> View {
+        self.latest.current(instance_id, settings).view()
+    }
+
+    /// Switches to the next ticked style: re-tracks the view for the poll
+    /// loop, persists it (so it survives an OpenDeck restart), and redraws
     /// from the cached snapshot - instant, no API call.
     async fn show_style(
         &self,
         instance: &Instance,
         updated: UsageGaugeSettings,
     ) -> OpenActionResult<()> {
+        // Tracked before the await, so a poll meanwhile draws the new view.
+        let view = updated.view();
+        self.hub.track(&instance.instance_id, view.clone());
         if let Err(e) = instance.set_settings(&updated).await {
             log::warn!("could not persist gauge style: {e}");
         }
-        let view = updated.view();
-        self.hub.track(&instance.instance_id, view.clone());
         self.hub.render_cached(instance, &view).await
     }
 }
@@ -90,6 +111,7 @@ impl Action for UsageGaugeAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
+        self.latest.set(&instance.instance_id, settings);
         let view = settings.view();
         self.hub.track(&instance.instance_id, view.clone());
         self.hub.render_cached(instance, &view).await
@@ -100,6 +122,7 @@ impl Action for UsageGaugeAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
+        self.latest.set(&instance.instance_id, settings);
         let view = settings.view();
         self.hub.track(&instance.instance_id, view.clone());
         self.hub.render_cached(instance, &view).await
@@ -111,6 +134,7 @@ impl Action for UsageGaugeAction {
         _settings: &Self::Settings,
     ) -> OpenActionResult<()> {
         self.presses.forget(&instance.instance_id);
+        self.latest.forget(&instance.instance_id);
         self.hub.untrack(&instance.instance_id);
         Ok(())
     }
@@ -133,8 +157,12 @@ impl Action for UsageGaugeAction {
     }
 
     async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-        match settings.release(self.presses.up(&instance.instance_id)) {
-            Release::Refresh => self.hub.refresh_one(instance, &settings.view()).await,
+        let press = self.presses.up(&instance.instance_id);
+        match self.release(&instance.instance_id, settings, press) {
+            Release::Refresh => {
+                let view = self.current_view(&instance.instance_id, settings);
+                self.hub.refresh_one(instance, &view).await
+            }
             Release::Switch(updated) => self.show_style(instance, updated).await,
             Release::Stay => Ok(()),
         }
@@ -295,5 +323,52 @@ mod tests {
         let html = include_str!("../assets/propertyInspector/index.html");
         assert!(html.contains(r#"event: "getSettings""#));
         assert!(html.contains("pendingSave"));
+    }
+
+    fn action() -> UsageGaugeAction {
+        UsageGaugeAction::new(UsageHub::new(
+            crate::hub::test_support::NeverCalled,
+            crate::history::HistoryStore::in_memory(),
+        ))
+    }
+
+    fn switched(r: Release<UsageGaugeSettings>) -> GaugeStyle {
+        let Release::Switch(s) = r else {
+            panic!("expected a switch");
+        };
+        s.styles.style
+    }
+
+    /// KI-08: OpenDeck hands the second of two fast presses the settings
+    /// from before the first, so the press must start from the plugin's own
+    /// last-set ones.
+    #[test]
+    fn two_fast_presses_advance_two_styles() {
+        let a = action();
+        let stale: UsageGaugeSettings =
+            serde_json::from_str(r#"{"style":"bar","cycleStyles":["bar","openDonut","thinRing"]}"#)
+                .unwrap();
+        let first = switched(a.release("ctx1", &stale, Press::Short));
+        let second = switched(a.release("ctx1", &stale, Press::Short));
+        assert_eq!(first, GaugeStyle::OpenDonut);
+        assert_eq!(second, GaugeStyle::ThinRing);
+    }
+
+    #[test]
+    fn a_press_after_new_settings_starts_from_them() {
+        let a = action();
+        let old: UsageGaugeSettings =
+            serde_json::from_str(r#"{"style":"bar","cycleStyles":["bar","openDonut","thinRing"]}"#)
+                .unwrap();
+        a.release("ctx1", &old, Press::Short);
+        let pi: UsageGaugeSettings = serde_json::from_str(
+            r#"{"style":"thinRing","cycleStyles":["bar","openDonut","thinRing"]}"#,
+        )
+        .unwrap();
+        a.latest.set("ctx1", &pi);
+        assert_eq!(
+            switched(a.release("ctx1", &pi, Press::Short)),
+            GaugeStyle::Bar
+        );
     }
 }

@@ -71,6 +71,67 @@ impl PressTimer {
     }
 }
 
+/// The settings each instance was last given, by OpenDeck or by a press.
+/// A press starts from these rather than from its event's: OpenDeck can
+/// hand the second of two fast presses the settings from before the
+/// first, so both would land on the same choice (KI-08).
+pub struct LatestSettings<S> {
+    by_instance: DashMap<String, S>,
+}
+
+impl<S> Default for LatestSettings<S> {
+    fn default() -> Self {
+        Self {
+            by_instance: DashMap::new(),
+        }
+    }
+}
+
+impl<S: Clone> LatestSettings<S> {
+    pub fn set(&self, instance_id: &str, settings: &S) {
+        self.by_instance
+            .insert(instance_id.to_string(), settings.clone());
+    }
+
+    pub fn get(&self, instance_id: &str) -> Option<S> {
+        self.by_instance.get(instance_id).map(|s| s.clone())
+    }
+
+    /// The kept settings, or `fallback` (the event's) when none are kept.
+    pub fn current(&self, instance_id: &str, fallback: &S) -> S {
+        self.get(instance_id).unwrap_or_else(|| fallback.clone())
+    }
+
+    pub fn ids(&self) -> Vec<String> {
+        self.by_instance.iter().map(|e| e.key().clone()).collect()
+    }
+
+    pub fn forget(&self, instance_id: &str) {
+        self.by_instance.remove(instance_id);
+    }
+
+    /// Decides a release from the kept settings (`fallback` when none are
+    /// kept) and keeps what it switches to, all under one entry lock - so
+    /// two presses handled at once can't both start from the same
+    /// settings.
+    pub fn release(
+        &self,
+        instance_id: &str,
+        fallback: &S,
+        decide: impl FnOnce(&S) -> Release<S>,
+    ) -> Release<S> {
+        let mut entry = self
+            .by_instance
+            .entry(instance_id.to_string())
+            .or_insert_with(|| fallback.clone());
+        let release = decide(&entry);
+        if let Release::Switch(updated) = &release {
+            *entry = updated.clone();
+        }
+        release
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +192,40 @@ mod tests {
         t.down("a");
         t.forget("a");
         assert!(t.pressed_at.is_empty());
+    }
+
+    fn inc(n: &i32) -> Release<i32> {
+        Release::Switch(n + 1)
+    }
+
+    #[test]
+    fn release_starts_from_the_fallback_then_from_the_kept_settings() {
+        let latest = LatestSettings::default();
+        assert_eq!(latest.release("a", &1, inc), Release::Switch(2));
+        assert_eq!(latest.release("a", &1, inc), Release::Switch(3));
+        assert_eq!(latest.get("a"), Some(3));
+    }
+
+    #[test]
+    fn a_release_that_does_not_switch_keeps_the_settings() {
+        let latest = LatestSettings::default();
+        latest.set("a", &5);
+        assert_eq!(
+            latest.release("a", &1, |_| Release::Refresh),
+            Release::Refresh
+        );
+        assert_eq!(latest.release("a", &1, |_| Release::Stay), Release::Stay);
+        assert_eq!(latest.current("a", &1), 5);
+    }
+
+    #[test]
+    fn set_overrides_and_forget_falls_back_to_the_event() {
+        let latest = LatestSettings::default();
+        latest.release("a", &1, inc);
+        latest.set("a", &10);
+        assert_eq!(latest.current("a", &1), 10);
+        latest.forget("a");
+        assert_eq!(latest.current("a", &1), 1);
+        assert!(latest.ids().is_empty());
     }
 }
