@@ -4,9 +4,26 @@
 
 pub mod bar;
 pub mod donut;
+pub mod ring;
 pub mod speedometer;
 
+use crate::format::UsageDisplay;
+use crate::style::GaugeStyle;
 use crate::tile::{self, TEXT_COLOR};
+
+/// The keypad image for a Usage Gauge in `style`, as the data URI
+/// OpenDeck's `setImage` expects.
+pub fn build_styled_icon(display: &UsageDisplay, style: GaugeStyle) -> String {
+    let svg = match style {
+        GaugeStyle::Speedometer => speedometer::render(display),
+        GaugeStyle::Bar => bar::render(display, false),
+        GaugeStyle::SoftPill => bar::render(display, true),
+        GaugeStyle::OpenDonut => donut::render(display, false),
+        GaugeStyle::TrackedDonut => donut::render(display, true),
+        GaugeStyle::ThinRing => ring::render(display),
+    };
+    tile::data_uri(&svg)
+}
 
 /// Unfilled part of every bar/arc - dark enough to read as "empty" on the
 /// card, light enough to show the track's extent.
@@ -106,6 +123,28 @@ mod tests {
         assert!(
             t.contains(r#"x1="71.00" y1="47.00" x2="85.00" y2="47.00""#),
             "got: {t}"
+        );
+    }
+
+    #[test]
+    fn every_style_builds_a_data_uri() {
+        use crate::style::ALL_STYLES;
+        let d = crate::styles::bar::tests::display(42.0);
+        for style in ALL_STYLES {
+            assert!(
+                build_styled_icon(&d, style).starts_with("data:image/svg+xml;base64,"),
+                "{style:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn styles_render_differently() {
+        use crate::style::GaugeStyle;
+        let d = crate::styles::bar::tests::display(42.0);
+        assert_ne!(
+            build_styled_icon(&d, GaugeStyle::Bar),
+            build_styled_icon(&d, GaugeStyle::ThinRing)
         );
     }
 }

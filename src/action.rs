@@ -22,6 +22,7 @@ impl UsageGaugeSettings {
         View::Gauge {
             window: self.window,
             colors: self.colors.clone(),
+            style: crate::style::GaugeStyle::default(),
         }
     }
 }
