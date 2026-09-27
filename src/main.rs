@@ -68,7 +68,12 @@ async fn main() -> OpenActionResult<()> {
     // in this one hub, so a single poll loop serves them all.
     // Recorded %-of-limit readings for Usage Sparkline, kept in a small
     // file under ~/.local/state so trends survive restarts.
-    let history = HistoryStore::load(HistoryStore::default_path(), chrono::Utc::now());
+    // Loading reads and rewrites the file - keep that off the async threads.
+    let history = tokio::task::spawn_blocking(|| {
+        HistoryStore::load(HistoryStore::default_path(), chrono::Utc::now())
+    })
+    .await
+    .expect("loading usage history panicked");
     let hub = UsageHub::new(usage.clone(), history);
     tokio::spawn(hub.clone().poll_loop());
 

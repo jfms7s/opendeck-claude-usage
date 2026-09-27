@@ -193,7 +193,15 @@ impl UsageHub {
     async fn read_and_cache(&self) -> Result<UsageSnapshot, UsageSourceError> {
         let result = self.source.read().await;
         if let Ok(snapshot) = &result {
-            self.history.record(snapshot, Utc::now());
+            // Recording can touch the history file - off the async threads,
+            // so a slow disk can't stall every key's rendering.
+            let (history, recorded) = (self.history.clone(), snapshot.clone());
+            let now = Utc::now();
+            if let Err(e) =
+                tokio::task::spawn_blocking(move || history.record(&recorded, now)).await
+            {
+                log::warn!("recording usage history failed: {e}");
+            }
             *self.latest.write().await = Some(snapshot.clone());
         }
         result
@@ -535,6 +543,46 @@ mod tests {
         hub.read_and_cache().await.unwrap();
         assert_eq!(history.readings().len(), 1);
         assert_eq!(history.readings()[0].session, 33.0);
+    }
+
+    /// A slow disk must not stall the runtime every key renders on. The
+    /// history file here is a FIFO, so writing to it blocks until a reader
+    /// opens it - and the reader is a task on the same single-threaded
+    /// runtime, which only gets to run if the write happens off-thread.
+    #[test]
+    fn recording_history_does_not_block_the_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let history = HistoryStore::load(path.clone(), Utc::now());
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let written = runtime.block_on(async {
+                let reader = tokio::spawn(async move { tokio::fs::read(&path).await });
+                UsageHub::new(AlwaysOk, history)
+                    .read_and_cache()
+                    .await
+                    .unwrap();
+                reader.await.unwrap().unwrap()
+            });
+            done.send(written).unwrap();
+        });
+        let written = finished
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the runtime stalled on history file I/O");
+        assert!(
+            String::from_utf8(written)
+                .unwrap()
+                .contains("\"session\":33.0")
+        );
     }
 
     #[tokio::test]

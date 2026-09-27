@@ -72,6 +72,6 @@ fix planned)
 |---|---|---|
 | KI-26 | The history file uses the default umask permissions. | fixed in v0.12.4 |
 | KI-27 | The rewrite's temp file has a theoretical symlink risk. | fixed in v0.12.4 |
-| KI-28 | History file I/O blocks briefly inside async code. | accepted |
+| KI-28 | History file I/O blocks briefly inside async code. | fixed in v0.12.4 |
 | KI-29 | The Sparkline's "Today" baseline is an approximation (the last reading before midnight). | accepted |
 | KI-30 | A saved Monthly window on a Sparkline falls back to Session. | accepted |
