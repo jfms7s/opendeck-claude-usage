@@ -122,18 +122,12 @@ mod tests {
 
     #[test]
     fn feedback_keys_match_the_shipped_layout() {
-        let layout: serde_json::Value =
-            serde_json::from_str(include_str!("../assets/layouts/usage.json")).unwrap();
-        let keys: Vec<&str> = layout["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|i| i["key"].as_str().unwrap())
-            .collect();
         let feedback = burn_feedback(&burn_error_display(BurnMetric::Pace));
-        for k in feedback.as_object().unwrap().keys() {
-            assert!(keys.contains(&k.as_str()), "layout has no item keyed {k}");
-        }
+        crate::test_support::assert_feedback_matches_layout(
+            include_str!("../assets/layouts/usage.json"),
+            &feedback,
+            &[],
+        );
     }
 
     #[test]

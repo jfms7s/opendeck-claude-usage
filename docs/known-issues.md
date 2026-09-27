@@ -7,8 +7,9 @@ point back here. Remove the entry, or mark it fixed, when it lands.
 ⭐ = something a user can actually notice. Starred items are the first to
 fix.
 
-**Status:** `open` · `in progress` · `fixed in vX.Y.Z` · `accepted` (by
-design; no fix planned)
+**Status:** `open` · `in progress` · `fixed in vX.Y.Z` · `fixed (internal)`
+(code or tests only, so no release carries it) · `accepted` (by design; no
+fix planned)
 
 ## On the device
 
@@ -58,12 +59,12 @@ design; no fix planned)
 
 | ID | Issue | Where | Status |
 |---|---|---|---|
-| KI-20 | Fully qualified `crate::` paths are used where imports already exist. | `src/hub.rs` | open |
-| KI-21 | The feedback-keys vs layout test only checks one direction. | `*_action.rs` tests | open |
-| KI-22 | The mixed Gauge + Burn Rate hub test only checks registration, not that both render in one poll. | `src/hub.rs` tests | open |
-| KI-23 | `key_down`/`key_up` handlers aren't tested directly (they need an `Instance`); the README smoke items cover them. | actions | open |
-| KI-24 | There's no daylight-saving-time test for the Heatmap's local days. | `src/heatmap.rs` tests | open |
-| KI-25 | There's no test for the `7 DAYS · 0` caption when every entry falls outside the window. | `src/heatmap.rs` tests | open |
+| KI-20 | Fully qualified `crate::` paths are used where imports already exist. | `src/hub.rs` | fixed (internal) |
+| KI-21 | The feedback-keys vs layout test only checks one direction. | `*_action.rs` tests | fixed (internal) |
+| KI-22 | The mixed Gauge + Burn Rate hub test only checks registration, not that both render in one poll. | `src/hub.rs` tests | fixed (internal) |
+| KI-23 | `key_down`/`key_up` handlers aren't tested directly (they need an `Instance`); the README smoke items cover them. | actions | fixed (internal) |
+| KI-24 | There's no daylight-saving-time test for the Heatmap's local days. | `src/heatmap.rs` tests | fixed (internal) |
+| KI-25 | There's no test for the `7 DAYS · 0` caption when every entry falls outside the window. | `src/heatmap.rs` tests | fixed (internal) |
 
 ## Accepted by design
 

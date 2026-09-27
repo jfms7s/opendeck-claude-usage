@@ -1,6 +1,6 @@
 use crate::heatmap::{HeatmapDisplay, HeatmapSettings, build_heatmap};
 use crate::hub::KEYPAD_CONTROLLER;
-use crate::press::{Press, PressTimer};
+use crate::press::{Press, PressTimer, Release, on_release};
 use crate::source::logs::LogUsageSource;
 use crate::styles::heatmap::{render_key, render_strip};
 use crate::tile;
@@ -30,17 +30,8 @@ fn flipped(settings: &HeatmapSettings) -> HeatmapSettings {
 /// What a key or dial release does. Both controllers share one gesture:
 /// the view is otherwise only reachable by pressing, so a dial that only
 /// refreshed would be stuck on 7 days.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Release {
-    Flip,
-    Refresh,
-}
-
-fn on_release(press: Press) -> Release {
-    match press {
-        Press::Short => Release::Flip,
-        Press::Long => Release::Refresh,
-    }
+fn release(press: Press, settings: &HeatmapSettings) -> Release<HeatmapSettings> {
+    on_release(press, || Some(flipped(settings)))
 }
 
 #[derive(Clone)]
@@ -111,18 +102,18 @@ impl HeatmapAction {
         instance: &Instance,
         settings: &HeatmapSettings,
     ) -> OpenActionResult<()> {
-        match on_release(self.presses.up(&instance.instance_id)) {
+        match release(self.presses.up(&instance.instance_id), settings) {
             Release::Refresh => self.render(instance, settings).await,
-            Release::Flip => self.flip_view(instance, settings).await,
+            Release::Switch(updated) => self.show_view(instance, updated).await,
+            Release::Stay => Ok(()),
         }
     }
 
-    async fn flip_view(
+    async fn show_view(
         &self,
         instance: &Instance,
-        settings: &HeatmapSettings,
+        updated: HeatmapSettings,
     ) -> OpenActionResult<()> {
-        let updated = flipped(settings);
         if let Err(e) = instance.set_settings(&updated).await {
             log::warn!("could not persist heatmap view: {e}");
         }
@@ -217,18 +208,12 @@ mod tests {
 
     #[test]
     fn feedback_keys_match_the_shipped_layout() {
-        let layout: Value =
-            serde_json::from_str(include_str!("../assets/layouts/chart.json")).unwrap();
-        let keys: Vec<&str> = layout["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|i| i["key"].as_str().unwrap())
-            .collect();
         let d = build_heatmap(&[], &HeatmapSettings::default(), chrono::Utc::now());
-        for k in heatmap_feedback(&d).as_object().unwrap().keys() {
-            assert!(keys.contains(&k.as_str()), "layout has no item keyed {k}");
-        }
+        crate::test_support::assert_feedback_matches_layout(
+            include_str!("../assets/layouts/chart.json"),
+            &heatmap_feedback(&d),
+            &[],
+        );
     }
 
     #[test]
@@ -269,8 +254,9 @@ mod tests {
     /// a dial could never reach the 4-week view.
     #[test]
     fn a_release_flips_when_short_and_refreshes_when_long() {
-        assert_eq!(on_release(Press::Short), Release::Flip);
-        assert_eq!(on_release(Press::Long), Release::Refresh);
+        let s = HeatmapSettings::default();
+        assert_eq!(release(Press::Short, &s), Release::Switch(flipped(&s)));
+        assert_eq!(release(Press::Long, &s), Release::Refresh);
     }
 
     #[test]

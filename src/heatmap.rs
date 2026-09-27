@@ -247,6 +247,37 @@ mod tests {
         assert_eq!(t[5], 40.0);
     }
 
+    /// KI-24: local days follow the zone's own offset on each date, not
+    /// today's. UK clocks go back at 02:00 BST on Sunday 2026-10-25, so a
+    /// single fixed offset (+1 or +0) would misfile one of these.
+    #[test]
+    fn buckets_by_local_day_across_a_dst_change() {
+        use chrono_tz::Europe::London;
+        let now = London.with_ymd_and_hms(2026, 10, 26, 12, 0, 0).unwrap();
+        let entries = [
+            entry("2026-10-24T22:30:00Z", 1),    // 23:30 BST Sat 24
+            entry("2026-10-24T23:30:00Z", 10),   // 00:30 BST Sun 25
+            entry("2026-10-25T23:30:00Z", 100),  // 23:30 GMT Sun 25
+            entry("2026-10-26T00:30:00Z", 1000), // 00:30 GMT Mon 26
+        ];
+        let t = daily_totals(&entries, MetricKind::Tokens, now, 7);
+        assert_eq!(&t[4..], &[1.0, 110.0, 1000.0]);
+    }
+
+    /// The spring change: the 23-hour Sunday is still one cell.
+    #[test]
+    fn a_short_dst_day_is_still_one_cell() {
+        use chrono_tz::Europe::London;
+        let now = London.with_ymd_and_hms(2026, 3, 30, 12, 0, 0).unwrap();
+        let entries = [
+            entry("2026-03-29T00:30:00Z", 1),   // 00:30 GMT Sun 29
+            entry("2026-03-29T22:30:00Z", 10),  // 23:30 BST Sun 29
+            entry("2026-03-29T23:30:00Z", 100), // 00:30 BST Mon 30
+        ];
+        let t = daily_totals(&entries, MetricKind::Tokens, now, 7);
+        assert_eq!(&t[5..], &[11.0, 100.0]);
+    }
+
     #[test]
     fn entries_outside_the_window_are_dropped() {
         let entries = [
@@ -326,6 +357,19 @@ mod tests {
         assert_eq!(d.caption, "no data");
         assert!(d.cells.iter().all(Option::is_none));
         assert_eq!(d.cells.len(), 7);
+    }
+
+    /// KI-25: entries exist, just none in view - a zero total, not
+    /// "no data" (that means no logs at all).
+    #[test]
+    fn entries_all_outside_the_window_caption_zero() {
+        let d = build_heatmap(
+            &[entry("2026-09-20T12:00:00Z", 999)],
+            &HeatmapSettings::default(),
+            now(),
+        );
+        assert_eq!(d.caption, "7 DAYS \u{b7} 0");
+        assert_eq!(d.cells, vec![None; 7]);
     }
 
     #[test]
