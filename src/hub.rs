@@ -5,10 +5,11 @@
 //! records each successful read into the `HistoryStore` the sparkline
 //! draws from.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use dashmap::DashMap;
 use openaction::{Instance, OpenActionResult};
 use tokio::sync::RwLock;
@@ -23,7 +24,9 @@ use crate::source::{UsageSnapshot, UsageSource, UsageSourceError, WindowKind};
 use crate::sparkline::{SparkSettings, build_sparkline};
 use crate::style::GaugeStyle;
 use crate::styles::build_styled_icon;
+use crate::styles::combo::render as combo_key;
 use crate::styles::sparkline::{render_key as sparkline_key, sparkline_feedback};
+use crate::surface::{Surface, for_each_tracked};
 use crate::tile;
 
 /// The wire value OpenDeck sends as `Instance::controller` for a keypad
@@ -112,16 +115,13 @@ pub fn output_for(
                 None => (error_display(), error_display()),
             };
             if keypad {
-                Output::Image(tile::data_uri(&crate::styles::combo::render(
-                    &session, &weekly, *layout,
-                )))
+                Output::Image(tile::data_uri(&combo_key(&session, &weekly, *layout)))
             } else {
                 Output::Feedback(combo_feedback(&session, &weekly))
             }
         }
         View::Sparkline { settings, colors } => {
-            let display =
-                build_sparkline(history, settings, colors, now.with_timezone(&chrono::Local));
+            let display = build_sparkline(history, settings, colors, now.with_timezone(&Local));
             if keypad {
                 Output::Image(tile::data_uri(&sparkline_key(&display)))
             } else {
@@ -165,23 +165,6 @@ impl UsageHub {
         self.registry.remove(instance_id);
     }
 
-    /// Pushes a frame via whichever surface the instance's controller
-    /// has. Keypad text is drawn inside the icon (see tile.rs), so the
-    /// native title is cleared to stop OpenDeck painting a second copy.
-    async fn push(instance: &Instance, output: Output) -> OpenActionResult<()> {
-        match output {
-            Output::Image(image) => {
-                instance.set_title(Some(String::new()), None).await?;
-                instance.set_image(Some(image), None).await
-            }
-            Output::Feedback(feedback) => instance.set_feedback(&feedback).await,
-        }
-    }
-
-    fn is_keypad(instance: &Instance) -> bool {
-        instance.controller == KEYPAD_CONTROLLER
-    }
-
     /// Renders from the last cached snapshot (no fresh read) - used when an
     /// instance appears or its settings change, so it shows *something*
     /// immediately rather than waiting for the next poll tick.
@@ -191,10 +174,10 @@ impl UsageHub {
             view,
             snapshot.as_ref(),
             &self.history_for(view),
-            Self::is_keypad(instance),
+            instance.is_keypad(),
             Utc::now(),
         );
-        Self::push(instance, output).await
+        instance.push(output).await
     }
 
     /// The recorded readings, copied only for the one view that plots them.
@@ -227,10 +210,10 @@ impl UsageHub {
             view,
             result.as_ref().ok(),
             &self.history_for(view),
-            Self::is_keypad(instance),
+            instance.is_keypad(),
             Utc::now(),
         );
-        Self::push(instance, output).await
+        instance.push(output).await
     }
 
     fn log_poll_read_transition(&self, read_ok: bool, error: Option<&UsageSourceError>) {
@@ -257,43 +240,48 @@ impl UsageHub {
         let read_result = self.read_and_cache().await;
         self.log_poll_read_transition(read_result.is_ok(), read_result.as_ref().err());
 
-        // Collect first, releasing the DashMap shard lock before awaiting
-        // per instance - holding an iterator guard across an await would
-        // keep that shard locked for the whole loop.
-        let entries: Vec<(String, View)> = self
-            .registry
-            .iter()
-            .map(|e| (e.key().clone(), e.value().clone()))
-            .collect();
+        self.render_tracked(read_result.as_ref().ok(), openaction::get_instance)
+            .await;
+    }
 
-        for (instance_id, view) in entries {
-            let Some(instance) = openaction::get_instance(instance_id).await else {
-                continue; // disappeared between the snapshot and now
-            };
-            let output = output_for(
-                &view,
-                read_result.as_ref().ok(),
-                &self.history_for(&view),
-                Self::is_keypad(&instance),
-                Utc::now(),
-            );
-            if let Err(e) = Self::push(&instance, output).await {
-                log::warn!("render failed: {e}");
-            }
-        }
+    /// Re-renders every tracked instance from `snapshot`, reading each
+    /// one's view only once its instance has been looked up (see
+    /// `for_each_tracked`).
+    async fn render_tracked<S, L, LF>(&self, snapshot: Option<&UsageSnapshot>, lookup: L)
+    where
+        S: Surface,
+        L: FnMut(String) -> LF,
+        LF: Future<Output = Option<S>>,
+    {
+        let ids = self.registry.iter().map(|e| e.key().clone()).collect();
+        for_each_tracked(
+            ids,
+            |id| self.registry.get(id).map(|v| v.clone()),
+            lookup,
+            |instance, view| async move {
+                let output = output_for(
+                    &view,
+                    snapshot,
+                    &self.history_for(&view),
+                    instance.is_keypad(),
+                    Utc::now(),
+                );
+                if let Err(e) = instance.push(output).await {
+                    log::warn!("render failed: {e}");
+                }
+            },
+        )
+        .await;
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
-    use crate::history::HistoryStore;
-    use crate::source::{MonthlyUsage, WindowUsage};
-    use crate::style::GaugeStyle;
     use async_trait::async_trait;
-    use chrono::TimeZone;
 
-    struct NeverCalled;
+    /// A source for tests that never read usage.
+    pub struct NeverCalled;
 
     #[async_trait]
     impl UsageSource for NeverCalled {
@@ -301,6 +289,17 @@ mod tests {
             unreachable!("this test never triggers a read")
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::{MonthlyUsage, WindowUsage};
+    use crate::style::ALL_STYLES;
+    use async_trait::async_trait;
+    use chrono::TimeZone;
+
+    use test_support::NeverCalled;
 
     fn snapshot() -> UsageSnapshot {
         UsageSnapshot {
@@ -384,6 +383,39 @@ mod tests {
         assert_eq!(hub.registry.len(), 2);
     }
 
+    /// KI-22: one poll renders every tracked instance from the same read,
+    /// so a Gauge and a Burn Rate side by side both show real data.
+    #[tokio::test]
+    async fn one_poll_renders_both_gauge_and_burn() {
+        let hub = UsageHub::new(AlwaysOk, HistoryStore::in_memory());
+        hub.track("gauge", gauge());
+        hub.track("burn", burn());
+        let snapshot = hub.read_and_cache().await.unwrap();
+
+        let pushed = Arc::default();
+        hub.render_tracked(Some(&snapshot), |id| {
+            std::future::ready(Some(FakeSurface {
+                id,
+                pushed: Arc::clone(&pushed),
+            }))
+        })
+        .await;
+        let mut frames = pushed.lock().unwrap().clone();
+        frames.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let [
+            (burn_id, Output::Feedback(b)),
+            (gauge_id, Output::Feedback(g)),
+        ] = &frames[..]
+        else {
+            panic!("expected two feedback frames, got {frames:?}");
+        };
+        assert_eq!((burn_id.as_str(), gauge_id.as_str()), ("burn", "gauge"));
+        assert_eq!(g["percent"], "33%");
+        assert!(b["detail"].as_str().unwrap().ends_with("session"));
+        assert_ne!(b["detail"], "no data");
+    }
+
     #[test]
     fn gauge_on_a_keypad_is_an_image() {
         let out = output_for(&gauge(), Some(&snapshot()), &[], true, now());
@@ -427,7 +459,7 @@ mod tests {
     #[test]
     fn every_gauge_style_is_an_image_on_a_keypad_and_unchanged_on_a_dial() {
         let dial = output_for(&gauge(), Some(&snapshot()), &[], false, now());
-        for style in crate::style::ALL_STYLES {
+        for style in ALL_STYLES {
             let view = View::Gauge {
                 window: WindowKind::Session,
                 colors: ColorSettings::default(),
@@ -444,7 +476,7 @@ mod tests {
         }
     }
 
-    fn combo(layout: crate::combo::ComboLayout) -> View {
+    fn combo(layout: ComboLayout) -> View {
         View::Combo {
             colors: ColorSettings::default(),
             layout,
@@ -453,7 +485,6 @@ mod tests {
 
     #[test]
     fn combo_on_a_keypad_is_an_image_per_layout() {
-        use crate::combo::ComboLayout;
         let h = output_for(
             &combo(ComboLayout::Horizontal),
             Some(&snapshot()),
@@ -475,7 +506,7 @@ mod tests {
     #[test]
     fn combo_on_a_dial_is_two_bar_feedback() {
         let Output::Feedback(f) = output_for(
-            &combo(crate::combo::ComboLayout::Horizontal),
+            &combo(ComboLayout::Horizontal),
             Some(&snapshot()),
             &[],
             false,
@@ -489,13 +520,9 @@ mod tests {
 
     #[test]
     fn combo_without_data_is_dashes() {
-        let Output::Feedback(f) = output_for(
-            &combo(crate::combo::ComboLayout::Vertical),
-            None,
-            &[],
-            false,
-            now(),
-        ) else {
+        let Output::Feedback(f) =
+            output_for(&combo(ComboLayout::Vertical), None, &[], false, now())
+        else {
             panic!("expected feedback");
         };
         assert_eq!(f["s_value"], "\u{2014}");
@@ -523,7 +550,7 @@ mod tests {
 
     fn sparkline_view() -> View {
         View::Sparkline {
-            settings: crate::sparkline::SparkSettings::default(),
+            settings: SparkSettings::default(),
             colors: ColorSettings::default(),
         }
     }
@@ -547,5 +574,57 @@ mod tests {
                 .unwrap()
                 .starts_with("data:image/svg+xml;base64,")
         );
+    }
+
+    /// Stands in for an OpenDeck instance (a dial): records what it's sent.
+    #[derive(Clone, Default)]
+    struct FakeSurface {
+        id: String,
+        pushed: Arc<std::sync::Mutex<Vec<(String, Output)>>>,
+    }
+
+    #[async_trait]
+    impl Surface for FakeSurface {
+        fn is_keypad(&self) -> bool {
+            false
+        }
+
+        async fn push(&self, output: Output) -> OpenActionResult<()> {
+            self.pushed.lock().unwrap().push((self.id.clone(), output));
+            Ok(())
+        }
+    }
+
+    /// KI-06: a short press re-tracks the view while the poll is awaiting
+    /// the instance lookup - the poll must draw the new view, not the one
+    /// it saw before the await.
+    #[tokio::test]
+    async fn a_view_changed_during_the_lookup_is_the_one_drawn() {
+        let hub = UsageHub::new(NeverCalled, HistoryStore::in_memory());
+        hub.track("ctx1", gauge());
+        let surface = FakeSurface::default();
+        hub.render_tracked(Some(&snapshot()), |id| {
+            hub.track(&id, sparkline_view()); // the press lands here
+            std::future::ready(Some(surface.clone()))
+        })
+        .await;
+        let pushed = surface.pushed.lock().unwrap();
+        let [(_, Output::Feedback(f))] = pushed.as_slice() else {
+            panic!("expected one feedback, got {pushed:?}");
+        };
+        assert!(f.get("chart").is_some(), "drew the old gauge: {f}");
+    }
+
+    #[tokio::test]
+    async fn an_instance_untracked_during_the_lookup_is_not_drawn() {
+        let hub = UsageHub::new(NeverCalled, HistoryStore::in_memory());
+        hub.track("ctx1", gauge());
+        let surface = FakeSurface::default();
+        hub.render_tracked(Some(&snapshot()), |id| {
+            hub.untrack(&id);
+            std::future::ready(Some(surface.clone()))
+        })
+        .await;
+        assert!(surface.pushed.lock().unwrap().is_empty());
     }
 }

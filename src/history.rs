@@ -169,13 +169,17 @@ impl HistoryStore {
     pub fn record(&self, snapshot: &UsageSnapshot, now: DateTime<Utc>) {
         let reading = Reading::from_snapshot(snapshot, now);
         let mut readings = self.readings.lock().unwrap();
-        if readings
-            .last()
-            .is_some_and(|last| last.same_values(&reading))
+        // Inserted in time order: two racing refreshes or a clock jump
+        // can hand us a reading older than the last one kept. The file
+        // is still appended to; `load` sorts it.
+        let index = readings.partition_point(|r| r.at <= reading.at);
+        if index
+            .checked_sub(1)
+            .is_some_and(|before| readings[before].same_values(&reading))
         {
             return;
         }
-        readings.push(reading.clone());
+        readings.insert(index, reading.clone());
         let before = readings.len();
         let cutoff = now - retention();
         readings.retain(|r| r.at >= cutoff);
@@ -341,6 +345,29 @@ mod tests {
         store.record(&snapshot(40.0, 20.0), at(10));
         assert_eq!(store.readings().len(), 1);
         store.record(&snapshot(41.0, 20.0), at(11));
+        assert_eq!(store.readings().len(), 2);
+    }
+
+    /// Two refreshes racing, or the clock jumping back, can hand `record`
+    /// an older reading than the last one kept.
+    #[test]
+    fn an_out_of_order_reading_is_kept_in_time_order() {
+        let store = HistoryStore::in_memory();
+        store.record(&snapshot(10.0, 1.0), at(8));
+        store.record(&snapshot(30.0, 1.0), at(10));
+        store.record(&snapshot(20.0, 1.0), at(9));
+        let times: Vec<_> = store.readings().iter().map(|r| r.at).collect();
+        assert_eq!(times, vec![at(8), at(9), at(10)]);
+    }
+
+    /// Dedup compares with the reading just before the new one in time,
+    /// not with the last one pushed.
+    #[test]
+    fn an_out_of_order_reading_equal_to_its_predecessor_is_not_recorded() {
+        let store = HistoryStore::in_memory();
+        store.record(&snapshot(10.0, 1.0), at(8));
+        store.record(&snapshot(30.0, 1.0), at(10));
+        store.record(&snapshot(10.0, 1.0), at(9));
         assert_eq!(store.readings().len(), 2);
     }
 
