@@ -93,10 +93,10 @@ impl From<StyleSettingsWire> for StyleSettings {
     fn from(w: StyleSettingsWire) -> Self {
         let mut cycle: Vec<GaugeStyle> = Vec::new();
         for entry in w.cycle_styles.as_array().into_iter().flatten() {
-            if let Ok(style) = serde_json::from_value::<GaugeStyle>(entry.clone()) {
-                if !cycle.contains(&style) {
-                    cycle.push(style);
-                }
+            if let Ok(style) = serde_json::from_value::<GaugeStyle>(entry.clone())
+                && !cycle.contains(&style)
+            {
+                cycle.push(style);
             }
         }
         if cycle.is_empty() {
