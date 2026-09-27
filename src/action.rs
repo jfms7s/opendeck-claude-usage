@@ -1,6 +1,6 @@
 use crate::hub::{UsageHub, View};
 use crate::level::ColorSettings;
-use crate::press::{Press, PressTimer};
+use crate::press::{LatestSettings, Press, PressTimer};
 use crate::source::WindowKind;
 use crate::style::{StyleSettings, next_style};
 use async_trait::async_trait;
@@ -46,6 +46,8 @@ pub struct UsageGaugeAction {
     hub: Arc<UsageHub>,
     /// Tells a short press (cycle style) from a long one (refresh).
     presses: Arc<PressTimer>,
+    /// What each key was last set to, so a press starts from it.
+    latest: Arc<LatestSettings<UsageGaugeSettings>>,
 }
 
 impl UsageGaugeAction {
@@ -53,25 +55,49 @@ impl UsageGaugeAction {
         Self {
             hub,
             presses: Arc::new(PressTimer::default()),
+            latest: Arc::new(LatestSettings::default()),
         }
     }
 
-    /// Switches to the next ticked style: persists it (so it survives an
-    /// OpenDeck restart), re-tracks the view for the poll loop, and redraws
+    /// Keeps the settings OpenDeck just sent, for the next press.
+    fn remember(&self, instance_id: &str, settings: &UsageGaugeSettings) {
+        self.latest.set(instance_id, settings);
+    }
+
+    /// The settings a short press switches to, or `None` when fewer than
+    /// two styles are ticked. Starts from the last-set settings, not the
+    /// event's (see `LatestSettings`).
+    fn next_settings(
+        &self,
+        instance_id: &str,
+        settings: &UsageGaugeSettings,
+    ) -> Option<UsageGaugeSettings> {
+        self.latest
+            .update(instance_id, settings, UsageGaugeSettings::cycled)
+    }
+
+    /// The view a refresh draws - from the last-set settings too.
+    fn current_view(&self, instance_id: &str, settings: &UsageGaugeSettings) -> View {
+        self.latest.current(instance_id, settings).view()
+    }
+
+    /// Switches to the next ticked style: re-tracks the view for the poll
+    /// loop, persists it (so it survives an OpenDeck restart), and redraws
     /// from the cached snapshot - instant, no API call.
     async fn cycle_style(
         &self,
         instance: &Instance,
         settings: &UsageGaugeSettings,
     ) -> OpenActionResult<()> {
-        let Some(updated) = settings.cycled() else {
+        let Some(updated) = self.next_settings(&instance.instance_id, settings) else {
             return Ok(());
         };
+        // Tracked before the await, so a poll meanwhile draws the new view.
+        let view = updated.view();
+        self.hub.track(&instance.instance_id, view.clone());
         if let Err(e) = instance.set_settings(&updated).await {
             log::warn!("could not persist gauge style: {e}");
         }
-        let view = updated.view();
-        self.hub.track(&instance.instance_id, view.clone());
         self.hub.render_cached(instance, &view).await
     }
 }
@@ -86,6 +112,7 @@ impl Action for UsageGaugeAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
+        self.remember(&instance.instance_id, settings);
         let view = settings.view();
         self.hub.track(&instance.instance_id, view.clone());
         self.hub.render_cached(instance, &view).await
@@ -96,6 +123,7 @@ impl Action for UsageGaugeAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
+        self.remember(&instance.instance_id, settings);
         let view = settings.view();
         self.hub.track(&instance.instance_id, view.clone());
         self.hub.render_cached(instance, &view).await
@@ -107,6 +135,7 @@ impl Action for UsageGaugeAction {
         _settings: &Self::Settings,
     ) -> OpenActionResult<()> {
         self.presses.forget(&instance.instance_id);
+        self.latest.forget(&instance.instance_id);
         self.hub.untrack(&instance.instance_id);
         Ok(())
     }
@@ -116,7 +145,8 @@ impl Action for UsageGaugeAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        self.hub.refresh_one(instance, &settings.view()).await
+        let view = self.current_view(&instance.instance_id, settings);
+        self.hub.refresh_one(instance, &view).await
     }
 
     async fn key_down(
@@ -132,7 +162,10 @@ impl Action for UsageGaugeAction {
     /// forces a refresh, which is what a tap did before styles existed.
     async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
         match self.presses.up(&instance.instance_id) {
-            Press::Long => self.hub.refresh_one(instance, &settings.view()).await,
+            Press::Long => {
+                let view = self.current_view(&instance.instance_id, settings);
+                self.hub.refresh_one(instance, &view).await
+            }
             Press::Short => self.cycle_style(instance, settings).await,
         }
     }
@@ -267,5 +300,43 @@ mod tests {
         let back: UsageGaugeSettings = serde_json::from_value(v).unwrap();
         assert_eq!(back.styles, s.styles);
         assert_eq!(back.colors, s.colors);
+    }
+
+    fn action() -> UsageGaugeAction {
+        UsageGaugeAction::new(UsageHub::new(
+            crate::hub::test_support::NeverCalled,
+            crate::history::HistoryStore::in_memory(),
+        ))
+    }
+
+    /// KI-08: OpenDeck hands the second of two fast presses the settings
+    /// from before the first, so the press must start from the plugin's own
+    /// last-set ones.
+    #[test]
+    fn two_fast_presses_advance_two_styles() {
+        let a = action();
+        let stale: UsageGaugeSettings =
+            serde_json::from_str(r#"{"style":"bar","cycleStyles":["bar","openDonut","thinRing"]}"#)
+                .unwrap();
+        let first = a.next_settings("ctx1", &stale).unwrap();
+        let second = a.next_settings("ctx1", &stale).unwrap();
+        assert_eq!(first.styles.style, GaugeStyle::OpenDonut);
+        assert_eq!(second.styles.style, GaugeStyle::ThinRing);
+    }
+
+    #[test]
+    fn a_press_after_new_settings_starts_from_them() {
+        let a = action();
+        let old: UsageGaugeSettings =
+            serde_json::from_str(r#"{"style":"bar","cycleStyles":["bar","openDonut","thinRing"]}"#)
+                .unwrap();
+        a.next_settings("ctx1", &old);
+        let pi: UsageGaugeSettings = serde_json::from_str(
+            r#"{"style":"thinRing","cycleStyles":["bar","openDonut","thinRing"]}"#,
+        )
+        .unwrap();
+        a.remember("ctx1", &pi);
+        let next = a.next_settings("ctx1", &pi).unwrap();
+        assert_eq!(next.styles.style, GaugeStyle::Bar);
     }
 }

@@ -1,6 +1,6 @@
 use crate::hub::{UsageHub, View};
 use crate::level::ColorSettings;
-use crate::press::{Press, PressTimer};
+use crate::press::{LatestSettings, Press, PressTimer};
 use crate::sparkline::SparkSettings;
 use async_trait::async_trait;
 use openaction::{Action, Instance, OpenActionResult};
@@ -39,6 +39,8 @@ pub struct SparklineAction {
     /// Tells a short press (next series) from a long one (refresh), on
     /// keys and dials alike.
     presses: Arc<PressTimer>,
+    /// What each instance was last set to, so a press starts from it.
+    latest: Arc<LatestSettings<SparklineSettings>>,
 }
 
 impl SparklineAction {
@@ -46,7 +48,21 @@ impl SparklineAction {
         Self {
             hub,
             presses: Arc::new(PressTimer::default()),
+            latest: Arc::new(LatestSettings::default()),
         }
+    }
+
+    /// Keeps the settings OpenDeck just sent, for the next press.
+    fn remember(&self, instance_id: &str, settings: &SparklineSettings) {
+        self.latest.set(instance_id, settings);
+    }
+
+    /// The settings a short press switches to. Starts from the last-set
+    /// settings, not the event's (see `LatestSettings`).
+    fn next_settings(&self, instance_id: &str, settings: &SparklineSettings) -> SparklineSettings {
+        self.latest
+            .update(instance_id, settings, |s| Some(s.cycled()))
+            .unwrap_or_else(|| settings.cycled())
     }
 
     async fn released(
@@ -55,14 +71,18 @@ impl SparklineAction {
         settings: &SparklineSettings,
     ) -> OpenActionResult<()> {
         match self.presses.up(&instance.instance_id) {
-            Press::Long => self.hub.refresh_one(instance, &settings.view()).await,
+            Press::Long => {
+                let view = self.latest.current(&instance.instance_id, settings).view();
+                self.hub.refresh_one(instance, &view).await
+            }
             Press::Short => {
-                let updated = settings.cycled();
+                let updated = self.next_settings(&instance.instance_id, settings);
+                // Tracked before the await, so a poll meanwhile draws it.
+                let view = updated.view();
+                self.hub.track(&instance.instance_id, view.clone());
                 if let Err(e) = instance.set_settings(&updated).await {
                     log::warn!("could not persist sparkline series: {e}");
                 }
-                let view = updated.view();
-                self.hub.track(&instance.instance_id, view.clone());
                 self.hub.render_cached(instance, &view).await
             }
         }
@@ -79,6 +99,7 @@ impl Action for SparklineAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
+        self.remember(&instance.instance_id, settings);
         let view = settings.view();
         self.hub.track(&instance.instance_id, view.clone());
         self.hub.render_cached(instance, &view).await
@@ -89,6 +110,7 @@ impl Action for SparklineAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
+        self.remember(&instance.instance_id, settings);
         let view = settings.view();
         self.hub.track(&instance.instance_id, view.clone());
         self.hub.render_cached(instance, &view).await
@@ -100,6 +122,7 @@ impl Action for SparklineAction {
         _settings: &Self::Settings,
     ) -> OpenActionResult<()> {
         self.presses.forget(&instance.instance_id);
+        self.latest.forget(&instance.instance_id);
         self.hub.untrack(&instance.instance_id);
         Ok(())
     }
@@ -200,5 +223,40 @@ mod tests {
         assert!(html.contains(r#"<option value="weekly">"#));
         assert!(html.contains("storedSeries"));
         assert!(html.contains("key or dial"));
+    }
+
+    fn action() -> SparklineAction {
+        SparklineAction::new(crate::hub::UsageHub::new(
+            crate::hub::test_support::NeverCalled,
+            crate::history::HistoryStore::in_memory(),
+        ))
+    }
+
+    /// KI-08: the second of two fast presses gets OpenDeck's settings from
+    /// before the first.
+    #[test]
+    fn two_fast_presses_advance_two_series() {
+        let a = action();
+        let stale = SparklineSettings::default();
+        assert_eq!(
+            a.next_settings("ctx1", &stale).spark.series,
+            SparkSeries::BetweenPolls
+        );
+        assert_eq!(
+            a.next_settings("ctx1", &stale).spark.series,
+            SparkSeries::Today
+        );
+    }
+
+    #[test]
+    fn a_press_after_new_settings_starts_from_them() {
+        let a = action();
+        a.next_settings("ctx1", &SparklineSettings::default());
+        let pi: SparklineSettings = serde_json::from_str(r#"{"series":"evenBurn"}"#).unwrap();
+        a.remember("ctx1", &pi);
+        assert_eq!(
+            a.next_settings("ctx1", &pi).spark.series,
+            SparkSeries::Trend
+        );
     }
 }
