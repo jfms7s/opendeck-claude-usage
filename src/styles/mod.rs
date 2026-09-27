@@ -25,6 +25,9 @@ pub fn build_styled_icon(display: &UsageDisplay, style: GaugeStyle) -> String {
     tile::data_uri(&svg)
 }
 
+/// Sweeps at least this large are drawn as a whole circle.
+const FULL_TURN: f64 = 359.9;
+
 /// Unfilled part of every bar/arc - dark enough to read as "empty" on the
 /// card, light enough to show the track's extent.
 pub const TRACK_COLOR: &str = "#374151";
@@ -44,8 +47,8 @@ pub fn polar(cx: f64, cy: f64, r: f64, deg: f64) -> (f64, f64) {
 }
 
 /// A stroked arc sweeping clockwise from `start_deg` to `end_deg`. Nothing
-/// for a zero/negative sweep; a `<circle>` for a full turn (an SVG arc
-/// whose endpoints coincide draws nothing).
+/// for a zero/negative sweep; a `<circle>` for a (near-)full turn (an SVG
+/// arc whose endpoints coincide draws nothing).
 // Geometry plus stroke: a params struct would only rename these eight values.
 #[allow(clippy::too_many_arguments)]
 pub fn arc(
@@ -62,7 +65,10 @@ pub fn arc(
     if sweep <= 0.0 {
         return String::new();
     }
-    if sweep >= 360.0 {
+    // Within a tenth of a degree of a full turn, the path's endpoints round
+    // to the same printed point and SVG draws nothing at all - so treat it
+    // as full (0.1deg is invisible on a key).
+    if sweep >= FULL_TURN {
         return format!(
             r#"<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{color}" stroke-width="{width}" />"#
         );

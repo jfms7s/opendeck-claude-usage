@@ -79,4 +79,15 @@ mod tests {
         assert!(!render(&display(0.0)).contains(r##"stroke="#d97757""##));
         assert!(render(&display(100.0)).contains(r##"r="30" fill="none" stroke="#d97757""##));
     }
+
+    #[test]
+    fn nearly_full_still_draws_the_whole_ring() {
+        // $499.99 of $500 is 99.998%: a path whose endpoints round to the
+        // same point draws nothing, so this must become a circle.
+        let s = render(&display(99.999));
+        assert!(
+            s.contains(r##"r="30" fill="none" stroke="#d97757""##),
+            "got: {s}"
+        );
+    }
 }

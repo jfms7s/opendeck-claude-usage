@@ -60,8 +60,10 @@ pub fn classify_press(held: Option<std::time::Duration>) -> Press;
   `Value`s, so a bad value never makes openaction reset the whole settings
   struct. An unknown or missing `style` becomes Speedometer. Unknown names
   in `cycleStyles` are dropped and duplicates are removed, keeping the first
-  occurrence and the list order. A missing, non-array, or empty-after-
-  filtering list becomes all six.
+  occurrence and the list order. A missing or non-array value becomes all
+  six. An explicit array that ends up empty (every box unticked) stays
+  empty, meaning a short press does nothing. (Amended after final review:
+  falling back to all six there did the opposite of what unticking asks.)
 - **`next_style`**: `None` when `cycle` has fewer than 2 entries. Otherwise,
   if `current` is in `cycle`, it returns the entry after it (wrapping); if
   not, it returns `cycle[0]`.

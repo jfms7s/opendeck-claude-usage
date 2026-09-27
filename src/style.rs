@@ -91,17 +91,24 @@ pub fn classify_press(held: Option<Duration>) -> Press {
 
 impl From<StyleSettingsWire> for StyleSettings {
     fn from(w: StyleSettingsWire) -> Self {
-        let mut cycle: Vec<GaugeStyle> = Vec::new();
-        for entry in w.cycle_styles.as_array().into_iter().flatten() {
-            if let Ok(style) = serde_json::from_value::<GaugeStyle>(entry.clone())
-                && !cycle.contains(&style)
-            {
-                cycle.push(style);
+        // A missing or non-array value means "never configured": cycle
+        // everything. An array - even one that filters down to nothing - is
+        // the user's explicit choice, and unticking every box means "don't
+        // cycle", not "cycle all six".
+        let cycle = match w.cycle_styles.as_array() {
+            None => ALL_STYLES.to_vec(),
+            Some(entries) => {
+                let mut cycle: Vec<GaugeStyle> = Vec::new();
+                for entry in entries {
+                    if let Ok(style) = serde_json::from_value::<GaugeStyle>(entry.clone())
+                        && !cycle.contains(&style)
+                    {
+                        cycle.push(style);
+                    }
+                }
+                cycle
             }
-        }
-        if cycle.is_empty() {
-            cycle = ALL_STYLES.to_vec();
-        }
+        };
         Self {
             style: serde_json::from_value(w.style).unwrap_or_default(),
             cycle,
@@ -187,14 +194,24 @@ mod tests {
     }
 
     #[test]
-    fn garbage_cycle_falls_back_to_all() {
+    fn missing_or_non_array_cycle_falls_back_to_all() {
         for json in [
-            r#"{"cycleStyles":[]}"#,
+            r#"{}"#,
             r#"{"cycleStyles":"bar"}"#,
-            r#"{"cycleStyles":["x"]}"#,
+            r#"{"cycleStyles":null}"#,
         ] {
             let s: StyleSettings = serde_json::from_str(json).unwrap();
             assert_eq!(s.cycle, ALL_STYLES.to_vec(), "for {json}");
+        }
+    }
+
+    #[test]
+    fn explicitly_empty_cycle_means_no_cycling() {
+        // Unticking every box must stop cycling, not turn on all six.
+        for json in [r#"{"cycleStyles":[]}"#, r#"{"cycleStyles":["x"]}"#] {
+            let s: StyleSettings = serde_json::from_str(json).unwrap();
+            assert!(s.cycle.is_empty(), "for {json}");
+            assert_eq!(next_style(s.style, &s.cycle), None);
         }
     }
 

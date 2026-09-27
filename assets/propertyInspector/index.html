@@ -74,7 +74,9 @@
 			document.getElementById("window").value = settings.window || "session";
 			applyColorSettings(settings);
 			storedStyle = settings.style;
-			const cycle = Array.isArray(settings.cycleStyles) && settings.cycleStyles.length
+			// Mirrors the plugin: no list yet means all ticked; an explicit
+			// (even empty) list is shown as saved.
+			const cycle = Array.isArray(settings.cycleStyles)
 				? settings.cycleStyles
 				: styleBoxes().map((box) => box.value);
 			styleBoxes().forEach((box) => { box.checked = cycle.includes(box.value); });
