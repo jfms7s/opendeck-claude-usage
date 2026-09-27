@@ -338,4 +338,24 @@ mod tests {
         let c: ColorSettings = serde_json::from_str(r#"{"watch":""}"#).unwrap();
         assert_eq!(c.marks.watch, 50.0);
     }
+
+    /// colors.js duplicates the defaults for the Property Inspector - fail
+    /// if the two ever disagree.
+    #[test]
+    fn property_inspector_defaults_match() {
+        let js = include_str!("../assets/propertyInspector/colors.js");
+        let m = Marks::default();
+        for needle in [
+            format!("watch: {}", m.watch),
+            format!("risk: {}", m.risk),
+            format!("critical: {}", m.critical),
+            format!("colorNormal: \"{DEFAULT_NORMAL}\""),
+            format!("colorWatch: \"{DEFAULT_WATCH}\""),
+            format!("colorRisk: \"{DEFAULT_RISK}\""),
+            format!("colorCritical: \"{DEFAULT_CRITICAL}\""),
+            "colorMode: \"fixed\"".to_string(),
+        ] {
+            assert!(js.contains(&needle), "colors.js is missing `{needle}`");
+        }
+    }
 }
