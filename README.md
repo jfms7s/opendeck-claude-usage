@@ -1,8 +1,8 @@
 # OpenDeck Claude Usage
 
-An [OpenDeck](https://github.com/nekename/OpenDeck) plugin with six actions
+An [OpenDeck](https://github.com/nekename/OpenDeck) plugin with seven actions
 - **Usage Gauge**, **Session + Weekly**, **Burn Rate**, **Usage Heatmap**,
-**Peak Clock**, and **Metric Tile**. Usage Gauge is
+**Usage Sparkline**, **Peak Clock**, and **Metric Tile**. Usage Gauge is
 assignable to a Stream Deck dial or a keypad tile and shows percent used and
 time until reset for one of Claude's usage windows - **Session** (5 hour),
 **Weekly** (7 day), or **Monthly** (pay-as-you-go extra usage spend, if
@@ -26,8 +26,9 @@ usage readout.
 The plugin asks Anthropic directly: it calls
 `https://api.anthropic.com/api/oauth/usage` (the same endpoint Claude Code's
 `/usage` reads) with the OAuth login Claude Code stores in
-`~/.claude/.credentials.json`, and keeps the answer in memory only - nothing
-is written to disk. It works the same whether you use Claude Code from the
+`~/.claude/.credentials.json`, and keeps the answer in memory. The only file
+the plugin writes is the usage history for **Usage Sparkline** (see below).
+It works the same whether you use Claude Code from the
 CLI, the desktop app, or an IDE extension, as long as one of them has logged
 in on this machine.
 
@@ -169,6 +170,27 @@ touch-strip bar.
    Hold half a second to refresh. On a dial the same chart fills the touch
    strip.
 
+## Using Usage Sparkline
+
+1. Add a **Usage Sparkline** key on a dial or a keypad tile and pick the
+   window: **Session** or **Weekly**.
+2. A short press (key or dial) cycles the series; hold to refresh:
+   - **Trend** — % of limit over the current window.
+   - **Per poll** — how much each reading added (e.g. `+2.1pp`).
+   - **Today** — running increase since local midnight (e.g. `8.4pp`).
+   - **Vs even** — pace vs an even burn over the window (`1.0x` = on track).
+3. The line takes the key's level color (**Colors & thresholds**). A new key
+   says "collecting…" until at least two readings exist.
+
+Anthropic's usage endpoint only reports the current percentages, so the
+plugin records them itself: each successful poll whose numbers changed is
+appended to `~/.local/state/opendeck-claude-usage/history.jsonl` (or under
+`$XDG_STATE_HOME`). It holds only session/weekly percentages and reset
+times - no tokens, credentials or account data - and anything older than 8
+days is dropped when OpenDeck starts. Delete the file any time to reset the
+history. If the folder can't be written, the plugin logs one warning and
+keeps the history in memory until OpenDeck restarts.
+
 ## Manual smoke-test checklist
 
 Run this against a live OpenDeck + Stream Deck XL+ session before cutting a
@@ -224,6 +246,14 @@ development environment, which has no OpenDeck/Stream Deck to test against:
 - [ ] On a dial the heatmap image fills the touch strip, including the
       caption text (confirms OpenDeck renders an SVG image with text in a
       pixmap item), and a dial press flips the view. *(not yet verified)*
+- [ ] Usage Sparkline says "collecting…" at first, then draws a line after
+      a few polls; a short press on the key or dial cycles all four series.
+      *(not yet verified)*
+- [ ] `~/.local/state/opendeck-claude-usage/history.jsonl` is created, only
+      grows when usage changes, and survives an OpenDeck restart (the line
+      is still there). *(not yet verified)*
+- [ ] On a dial the sparkline image fills the touch strip, headline and
+      caption visible. *(not yet verified)*
 
 ## Development
 

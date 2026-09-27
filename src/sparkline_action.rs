@@ -190,4 +190,15 @@ mod tests {
         assert_eq!(s.spark, SparkSettings::default());
         assert_eq!(s.colors, ColorSettings::default());
     }
+
+    /// The PI must load the shared colors section, offer both windows, and
+    /// pass the stored series through, or saving it would reset the series.
+    #[test]
+    fn property_inspector_offers_windows_and_keeps_series() {
+        let html = include_str!("../assets/propertyInspector/sparkline.html");
+        assert!(html.contains(r#"<script src="colors.js"></script>"#));
+        assert!(html.contains(r#"<option value="weekly">"#));
+        assert!(html.contains("storedSeries"));
+        assert!(html.contains("key or dial"));
+    }
 }
