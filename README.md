@@ -164,9 +164,10 @@ touch-strip bar.
    local Claude Code logs as Metric Tile — and a color.
 3. Each cell is one local calendar day, shaded relative to the busiest day
    shown; days with no usage stay grey. The caption shows the total.
-4. A short press flips between **7 days** (today on the right) and a
-   **4-week** grid (oldest week on top); the key remembers it. Hold half a
-   second to refresh. On a dial the same chart fills the touch strip.
+4. A short press (key or dial) flips between **7 days** (today on the
+   right) and a **4-week** grid (oldest week on top), and it's remembered.
+   Hold half a second to refresh. On a dial the same chart fills the touch
+   strip.
 
 ## Manual smoke-test checklist
 
@@ -220,8 +221,9 @@ development environment, which has no OpenDeck/Stream Deck to test against:
       the right and the correct weekday letters. *(not yet verified)*
 - [ ] A short press flips the view and it survives an OpenDeck restart.
       *(not yet verified)*
-- [ ] On a dial the heatmap image fills the touch strip (confirms OpenDeck
-      renders an SVG image in a pixmap item). *(not yet verified)*
+- [ ] On a dial the heatmap image fills the touch strip, including the
+      caption text (confirms OpenDeck renders an SVG image with text in a
+      pixmap item), and a dial press flips the view. *(not yet verified)*
 
 ## Development
 

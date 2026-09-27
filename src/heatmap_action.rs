@@ -27,6 +27,22 @@ fn flipped(settings: &HeatmapSettings) -> HeatmapSettings {
     updated
 }
 
+/// What a key or dial release does. Both controllers share one gesture:
+/// the view is otherwise only reachable by pressing, so a dial that only
+/// refreshed would be stuck on 7 days.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Release {
+    Flip,
+    Refresh,
+}
+
+fn on_release(press: Press) -> Release {
+    match press {
+        Press::Short => Release::Flip,
+        Press::Long => Release::Refresh,
+    }
+}
+
 #[derive(Clone)]
 pub struct HeatmapAction {
     logs: Arc<LogUsageSource>,
@@ -88,6 +104,19 @@ impl HeatmapAction {
         }
     }
 
+    /// Short press (key or dial) flips 7 days / 4 weeks; a long press
+    /// re-reads the logs.
+    async fn released(
+        &self,
+        instance: &Instance,
+        settings: &HeatmapSettings,
+    ) -> OpenActionResult<()> {
+        match on_release(self.presses.up(&instance.instance_id)) {
+            Release::Refresh => self.render(instance, settings).await,
+            Release::Flip => self.flip_view(instance, settings).await,
+        }
+    }
+
     async fn flip_view(
         &self,
         instance: &Instance,
@@ -135,12 +164,21 @@ impl Action for HeatmapAction {
         Ok(())
     }
 
+    async fn dial_down(
+        &self,
+        instance: &Instance,
+        _settings: &Self::Settings,
+    ) -> OpenActionResult<()> {
+        self.presses.down(&instance.instance_id);
+        Ok(())
+    }
+
     async fn dial_up(
         &self,
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        self.render(instance, settings).await
+        self.released(instance, settings).await
     }
 
     async fn key_down(
@@ -152,12 +190,8 @@ impl Action for HeatmapAction {
         Ok(())
     }
 
-    /// Short press flips 7 days / 4 weeks; a long press re-reads the logs.
     async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-        match self.presses.up(&instance.instance_id) {
-            Press::Long => self.render(instance, settings).await,
-            Press::Short => self.flip_view(instance, settings).await,
-        }
+        self.released(instance, settings).await
     }
 }
 
@@ -229,5 +263,22 @@ mod tests {
         assert!(html.contains(r#"<option value="cost">"#));
         assert!(html.contains(r#"type="color""#));
         assert!(html.contains("storedView"));
+    }
+
+    /// Keys and dials share one gesture - a dial used to only refresh, so
+    /// a dial could never reach the 4-week view.
+    #[test]
+    fn a_release_flips_when_short_and_refreshes_when_long() {
+        assert_eq!(on_release(Press::Short), Release::Flip);
+        assert_eq!(on_release(Press::Long), Release::Refresh);
+    }
+
+    #[test]
+    fn property_inspector_hint_covers_dials() {
+        let html = include_str!("../assets/propertyInspector/heatmap.html");
+        assert!(
+            html.contains("Short press (key or dial)"),
+            "hint must mention dials"
+        );
     }
 }

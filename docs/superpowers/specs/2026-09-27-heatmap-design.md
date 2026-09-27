@@ -156,7 +156,9 @@ tried on hardware; the README smoke list covers it.
 - **Lifecycle:**
   - `will_appear` / `did_receive_settings`: track, then render.
   - `will_disappear`: forget the press, then untrack.
-  - `dial_up`: render.
+  - `dial_down` / `dial_up`: the same press gesture as the key (amended
+    after final review: a dial that only refreshed could never reach the
+    4-week view).
 - **Presses:**
   - `key_down`: `timer.down`.
   - `key_up`: `timer.up`.
