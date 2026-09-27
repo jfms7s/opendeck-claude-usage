@@ -1,7 +1,9 @@
-//! Shared state behind every usage-driven action (Usage Gauge, Burn Rate):
-//! one snapshot cache, one registry of visible instances, one 20s poll
-//! loop - so adding an action never adds another poller, and a single
-//! read serves every key and dial.
+//! Shared state behind every usage-driven action (Usage Gauge, Burn Rate,
+//! Session + Weekly, Usage Sparkline): one snapshot cache, one registry of
+//! visible instances, one 20s poll loop - so adding an action never adds
+//! another poller, and a single read serves every key and dial. It also
+//! records each successful read into the `HistoryStore` the sparkline
+//! draws from.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,10 +17,13 @@ use crate::burn::{BurnMetric, build_burn_display, burn_error_display, burn_feedb
 use crate::burn_icon::build_burn_icon;
 use crate::combo::{ComboLayout, combo_feedback};
 use crate::format::{build_display, error_display, feedback_for_display};
+use crate::history::{HistoryStore, Reading};
 use crate::level::ColorSettings;
 use crate::source::{UsageSnapshot, UsageSource, UsageSourceError, WindowKind};
+use crate::sparkline::{SparkSettings, build_sparkline};
 use crate::style::GaugeStyle;
 use crate::styles::build_styled_icon;
+use crate::styles::sparkline::{render_key as sparkline_key, sparkline_feedback};
 use crate::tile;
 
 /// The wire value OpenDeck sends as `Instance::controller` for a keypad
@@ -43,6 +48,10 @@ pub enum View {
         colors: ColorSettings,
         layout: ComboLayout,
     },
+    Sparkline {
+        settings: SparkSettings,
+        colors: ColorSettings,
+    },
 }
 
 /// A rendered frame for one surface: a keypad tile's icon, or a dial's
@@ -54,10 +63,12 @@ pub enum Output {
 }
 
 /// Renders one instance's frame. Pure, so every view × surface × data
-/// state is unit-testable without an OpenDeck connection.
+/// state is unit-testable without an OpenDeck connection. `history` is the
+/// recorded readings; only `View::Sparkline` uses it.
 pub fn output_for(
     view: &View,
     snapshot: Option<&UsageSnapshot>,
+    history: &[Reading],
     keypad: bool,
     now: DateTime<Utc>,
 ) -> Output {
@@ -108,6 +119,15 @@ pub fn output_for(
                 Output::Feedback(combo_feedback(&session, &weekly))
             }
         }
+        View::Sparkline { settings, colors } => {
+            let display =
+                build_sparkline(history, settings, colors, now.with_timezone(&chrono::Local));
+            if keypad {
+                Output::Image(tile::data_uri(&sparkline_key(&display)))
+            } else {
+                Output::Feedback(sparkline_feedback(&display))
+            }
+        }
     }
 }
 
@@ -122,15 +142,18 @@ pub struct UsageHub {
     /// `refresh_one` - a single manual press failing isn't part of that
     /// noise pattern.
     poll_last_read_ok: AtomicBool,
+    /// Every successful read is recorded here for the sparkline.
+    history: Arc<HistoryStore>,
 }
 
 impl UsageHub {
-    pub fn new(source: impl UsageSource + 'static) -> Arc<Self> {
+    pub fn new(source: impl UsageSource + 'static, history: Arc<HistoryStore>) -> Arc<Self> {
         Arc::new(Self {
             source: Box::new(source),
             latest: RwLock::new(None),
             registry: DashMap::new(),
             poll_last_read_ok: AtomicBool::new(true),
+            history,
         })
     }
 
@@ -167,6 +190,7 @@ impl UsageHub {
         let output = output_for(
             view,
             snapshot.as_ref(),
+            &self.history.readings(),
             Self::is_keypad(instance),
             Utc::now(),
         );
@@ -178,6 +202,7 @@ impl UsageHub {
     async fn read_and_cache(&self) -> Result<UsageSnapshot, UsageSourceError> {
         let result = self.source.read().await;
         if let Ok(snapshot) = &result {
+            self.history.record(snapshot, Utc::now());
             *self.latest.write().await = Some(snapshot.clone());
         }
         result
@@ -193,6 +218,7 @@ impl UsageHub {
         let output = output_for(
             view,
             result.as_ref().ok(),
+            &self.history.readings(),
             Self::is_keypad(instance),
             Utc::now(),
         );
@@ -239,6 +265,7 @@ impl UsageHub {
             let output = output_for(
                 &view,
                 read_result.as_ref().ok(),
+                &self.history.readings(),
                 Self::is_keypad(&instance),
                 Utc::now(),
             );
@@ -252,6 +279,7 @@ impl UsageHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::HistoryStore;
     use crate::source::{MonthlyUsage, WindowUsage};
     use crate::style::GaugeStyle;
     use async_trait::async_trait;
@@ -318,14 +346,14 @@ mod tests {
 
     #[tokio::test]
     async fn read_and_cache_populates_the_cached_snapshot() {
-        let hub = UsageHub::new(AlwaysOk);
+        let hub = UsageHub::new(AlwaysOk, HistoryStore::in_memory());
         hub.read_and_cache().await.unwrap();
         assert!(hub.latest.read().await.is_some());
     }
 
     #[test]
     fn track_then_untrack_round_trips_through_the_registry() {
-        let hub = UsageHub::new(NeverCalled);
+        let hub = UsageHub::new(NeverCalled, HistoryStore::in_memory());
         hub.track("ctx1", gauge());
         assert_eq!(*hub.registry.get("ctx1").unwrap(), gauge());
         hub.untrack("ctx1");
@@ -334,7 +362,7 @@ mod tests {
 
     #[test]
     fn tracking_the_same_instance_twice_overwrites_its_view() {
-        let hub = UsageHub::new(NeverCalled);
+        let hub = UsageHub::new(NeverCalled, HistoryStore::in_memory());
         hub.track("ctx1", gauge());
         hub.track("ctx1", burn());
         assert_eq!(*hub.registry.get("ctx1").unwrap(), burn());
@@ -342,7 +370,7 @@ mod tests {
 
     #[test]
     fn gauge_and_burn_instances_share_one_registry() {
-        let hub = UsageHub::new(NeverCalled);
+        let hub = UsageHub::new(NeverCalled, HistoryStore::in_memory());
         hub.track("gauge", gauge());
         hub.track("burn", burn());
         assert_eq!(hub.registry.len(), 2);
@@ -350,13 +378,13 @@ mod tests {
 
     #[test]
     fn gauge_on_a_keypad_is_an_image() {
-        let out = output_for(&gauge(), Some(&snapshot()), true, now());
+        let out = output_for(&gauge(), Some(&snapshot()), &[], true, now());
         assert!(matches!(out, Output::Image(ref s) if s.starts_with("data:image/svg+xml;base64,")));
     }
 
     #[test]
     fn gauge_on_a_dial_is_feedback() {
-        let Output::Feedback(f) = output_for(&gauge(), Some(&snapshot()), false, now()) else {
+        let Output::Feedback(f) = output_for(&gauge(), Some(&snapshot()), &[], false, now()) else {
             panic!("expected feedback");
         };
         assert_eq!(f["percent"], "33%");
@@ -364,7 +392,7 @@ mod tests {
 
     #[test]
     fn burn_on_a_dial_is_feedback() {
-        let Output::Feedback(f) = output_for(&burn(), Some(&snapshot()), false, now()) else {
+        let Output::Feedback(f) = output_for(&burn(), Some(&snapshot()), &[], false, now()) else {
             panic!("expected feedback");
         };
         assert!(f["detail"].as_str().unwrap().ends_with("session"));
@@ -373,7 +401,7 @@ mod tests {
     #[test]
     fn burn_on_a_keypad_is_an_image() {
         assert!(matches!(
-            output_for(&burn(), Some(&snapshot()), true, now()),
+            output_for(&burn(), Some(&snapshot()), &[], true, now()),
             Output::Image(_)
         ));
     }
@@ -381,7 +409,7 @@ mod tests {
     #[test]
     fn no_snapshot_renders_no_data_for_both_views() {
         for view in [gauge(), burn()] {
-            let Output::Feedback(f) = output_for(&view, None, false, now()) else {
+            let Output::Feedback(f) = output_for(&view, None, &[], false, now()) else {
                 panic!("expected feedback");
             };
             assert_eq!(f["detail"], "no data");
@@ -390,7 +418,7 @@ mod tests {
 
     #[test]
     fn every_gauge_style_is_an_image_on_a_keypad_and_unchanged_on_a_dial() {
-        let dial = output_for(&gauge(), Some(&snapshot()), false, now());
+        let dial = output_for(&gauge(), Some(&snapshot()), &[], false, now());
         for style in crate::style::ALL_STYLES {
             let view = View::Gauge {
                 window: WindowKind::Session,
@@ -398,10 +426,13 @@ mod tests {
                 style,
             };
             assert!(matches!(
-                output_for(&view, Some(&snapshot()), true, now()),
+                output_for(&view, Some(&snapshot()), &[], true, now()),
                 Output::Image(_)
             ));
-            assert_eq!(output_for(&view, Some(&snapshot()), false, now()), dial);
+            assert_eq!(
+                output_for(&view, Some(&snapshot()), &[], false, now()),
+                dial
+            );
         }
     }
 
@@ -418,12 +449,14 @@ mod tests {
         let h = output_for(
             &combo(ComboLayout::Horizontal),
             Some(&snapshot()),
+            &[],
             true,
             now(),
         );
         let v = output_for(
             &combo(ComboLayout::Vertical),
             Some(&snapshot()),
+            &[],
             true,
             now(),
         );
@@ -436,6 +469,7 @@ mod tests {
         let Output::Feedback(f) = output_for(
             &combo(crate::combo::ComboLayout::Horizontal),
             Some(&snapshot()),
+            &[],
             false,
             now(),
         ) else {
@@ -450,11 +484,49 @@ mod tests {
         let Output::Feedback(f) = output_for(
             &combo(crate::combo::ComboLayout::Vertical),
             None,
+            &[],
             false,
             now(),
         ) else {
             panic!("expected feedback");
         };
         assert_eq!(f["s_value"], "\u{2014}");
+    }
+
+    #[tokio::test]
+    async fn read_and_cache_records_history() {
+        let history = HistoryStore::in_memory();
+        let hub = UsageHub::new(AlwaysOk, history.clone());
+        hub.read_and_cache().await.unwrap();
+        assert_eq!(history.readings().len(), 1);
+        assert_eq!(history.readings()[0].session, 33.0);
+    }
+
+    fn sparkline_view() -> View {
+        View::Sparkline {
+            settings: crate::sparkline::SparkSettings::default(),
+            colors: ColorSettings::default(),
+        }
+    }
+
+    #[test]
+    fn sparkline_on_a_keypad_is_an_image() {
+        assert!(matches!(
+            output_for(&sparkline_view(), Some(&snapshot()), &[], true, now()),
+            Output::Image(_)
+        ));
+    }
+
+    #[test]
+    fn sparkline_on_a_dial_is_chart_feedback() {
+        let Output::Feedback(f) = output_for(&sparkline_view(), None, &[], false, now()) else {
+            panic!("expected feedback");
+        };
+        assert!(
+            f["chart"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/svg+xml;base64,")
+        );
     }
 }
