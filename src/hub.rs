@@ -13,11 +13,13 @@ use tokio::sync::RwLock;
 
 use crate::burn::{BurnMetric, build_burn_display, burn_error_display, burn_feedback};
 use crate::burn_icon::build_burn_icon;
+use crate::combo::{ComboLayout, combo_feedback};
 use crate::format::{build_display, error_display, feedback_for_display};
 use crate::level::ColorSettings;
 use crate::source::{UsageSnapshot, UsageSource, UsageSourceError, WindowKind};
 use crate::style::GaugeStyle;
 use crate::styles::build_styled_icon;
+use crate::tile;
 
 /// The wire value OpenDeck sends as `Instance::controller` for a keypad
 /// tile (vs. `"Encoder"` for a dial) - confirmed against openaction 2.7's
@@ -36,6 +38,10 @@ pub enum View {
         window: WindowKind,
         metric: BurnMetric,
         colors: ColorSettings,
+    },
+    Combo {
+        colors: ColorSettings,
+        layout: ComboLayout,
     },
 }
 
@@ -84,6 +90,22 @@ pub fn output_for(
                 Output::Image(build_burn_icon(&display))
             } else {
                 Output::Feedback(burn_feedback(&display))
+            }
+        }
+        View::Combo { colors, layout } => {
+            let (session, weekly) = match snapshot {
+                Some(s) => (
+                    build_display(s, WindowKind::Session, colors, now),
+                    build_display(s, WindowKind::Weekly, colors, now),
+                ),
+                None => (error_display(), error_display()),
+            };
+            if keypad {
+                Output::Image(tile::data_uri(&crate::styles::combo::render(
+                    &session, &weekly, *layout,
+                )))
+            } else {
+                Output::Feedback(combo_feedback(&session, &weekly))
             }
         }
     }
@@ -381,5 +403,58 @@ mod tests {
             ));
             assert_eq!(output_for(&view, Some(&snapshot()), false, now()), dial);
         }
+    }
+
+    fn combo(layout: crate::combo::ComboLayout) -> View {
+        View::Combo {
+            colors: ColorSettings::default(),
+            layout,
+        }
+    }
+
+    #[test]
+    fn combo_on_a_keypad_is_an_image_per_layout() {
+        use crate::combo::ComboLayout;
+        let h = output_for(
+            &combo(ComboLayout::Horizontal),
+            Some(&snapshot()),
+            true,
+            now(),
+        );
+        let v = output_for(
+            &combo(ComboLayout::Vertical),
+            Some(&snapshot()),
+            true,
+            now(),
+        );
+        assert!(matches!(h, Output::Image(_)));
+        assert_ne!(h, v);
+    }
+
+    #[test]
+    fn combo_on_a_dial_is_two_bar_feedback() {
+        let Output::Feedback(f) = output_for(
+            &combo(crate::combo::ComboLayout::Horizontal),
+            Some(&snapshot()),
+            false,
+            now(),
+        ) else {
+            panic!("expected feedback");
+        };
+        assert_eq!(f["s_bar"]["value"], 33.0);
+        assert_eq!(f["w_bar"]["value"], 29.0);
+    }
+
+    #[test]
+    fn combo_without_data_is_dashes() {
+        let Output::Feedback(f) = output_for(
+            &combo(crate::combo::ComboLayout::Vertical),
+            None,
+            false,
+            now(),
+        ) else {
+            panic!("expected feedback");
+        };
+        assert_eq!(f["s_value"], "\u{2014}");
     }
 }

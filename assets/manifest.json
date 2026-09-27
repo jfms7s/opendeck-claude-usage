@@ -52,6 +52,18 @@
 			"Encoder": {
 				"layout": "layouts/usage.json"
 			}
+		},
+		{
+			"UUID": "com.jfms7s.claudeusage.combo",
+			"Name": "Session + Weekly",
+			"Icon": "icons/icon",
+			"Tooltip": "Shows Claude's 5-hour session and 7-day weekly usage together, as two bars",
+			"Controllers": ["Encoder", "Keypad"],
+			"PropertyInspectorPath": "propertyInspector/combo.html",
+			"States": [{ "Image": "icons/actionDefaultImage" }],
+			"Encoder": {
+				"layout": "layouts/combo.json"
+			}
 		}
 	]
 }
