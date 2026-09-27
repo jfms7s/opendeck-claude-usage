@@ -102,11 +102,13 @@ fn render_svg(display: &UsageDisplay) -> String {
     let tip_y = CENTER_Y - NEEDLE_LENGTH;
 
     let card = tile::card();
+    // The percent carries the level color - on a keypad it's the only
+    // place a pace-based warning shows, since the zones follow actual %.
     let percent = tile::text_line(
         PERCENT_BASELINE,
         PERCENT_SIZE,
         true,
-        TEXT_COLOR,
+        &display.color,
         &display.percent_text,
     );
     let detail = tile::text_line(
@@ -265,5 +267,18 @@ mod tests {
         };
         let svg = decode(&build_icon(&d));
         assert!(svg.contains("rotate(-90.00 50 48)"), "got: {svg}");
+    }
+
+    #[test]
+    fn percent_text_is_drawn_in_the_level_color() {
+        // A Pace-mode Risk level must be visible on a keypad tile, not
+        // only on a dial's bar.
+        let mut d = display(20.0);
+        d.color = DEFAULT_RISK.to_string();
+        let svg = decode(&build_icon(&d));
+        assert!(
+            svg.contains(&format!(r#"fill="{DEFAULT_RISK}">20%</text>"#)),
+            "got: {svg}"
+        );
     }
 }

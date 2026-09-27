@@ -53,11 +53,12 @@ pub fn pace(window: &WindowUsage, kind: WindowKind, now: DateTime<Utc>) -> Optio
     } else if rate_per_hour <= 0.0 {
         Runway::LastsToReset
     } else {
-        let until = Duration::seconds(((100.0 - used) / rate_per_hour * 3600.0).round() as i64);
-        if until >= remaining {
-            Runway::LastsToReset
-        } else {
-            Runway::Until(until)
+        // `try_seconds`: a vanishing rate overflows chrono's range, and a
+        // panic here would kill the shared poll loop for every key.
+        let secs = ((100.0 - used) / rate_per_hour * 3600.0).round() as i64;
+        match Duration::try_seconds(secs) {
+            Some(until) if until < remaining => Runway::Until(until),
+            _ => Runway::LastsToReset,
         }
     };
     Some(Pace {
@@ -155,6 +156,14 @@ mod tests {
         let p = pace(&session(40.0), WindowKind::Session, at(23, 30)).unwrap();
         assert_eq!(p.elapsed_fraction, 1.0);
         assert!((p.projected - 40.0).abs() < 1e-9);
+        assert_eq!(p.runway, Runway::LastsToReset);
+    }
+
+    #[test]
+    fn vanishing_rate_does_not_panic() {
+        // 1e-13% used at 50% elapsed: the runway overflows chrono's
+        // Duration range; it must read LastsToReset, not panic the poller.
+        let p = pace(&session(1e-13), WindowKind::Session, at(20, 10)).unwrap();
         assert_eq!(p.runway, Runway::LastsToReset);
     }
 }
