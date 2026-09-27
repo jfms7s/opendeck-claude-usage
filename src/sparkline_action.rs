@@ -1,6 +1,6 @@
 use crate::hub::{UsageHub, View};
 use crate::level::ColorSettings;
-use crate::press::{Press, PressTimer};
+use crate::press::{Press, PressTimer, Release, on_release};
 use crate::sparkline::SparkSettings;
 use async_trait::async_trait;
 use openaction::{Action, Instance, OpenActionResult};
@@ -31,6 +31,11 @@ impl SparklineSettings {
         updated.spark.series = self.spark.series.next();
         updated
     }
+
+    /// Short press (key or dial) cycles the series; a long one refreshes.
+    fn release(&self, press: Press) -> Release<SparklineSettings> {
+        on_release(press, || Some(self.cycled()))
+    }
 }
 
 #[derive(Clone)]
@@ -54,10 +59,10 @@ impl SparklineAction {
         instance: &Instance,
         settings: &SparklineSettings,
     ) -> OpenActionResult<()> {
-        match self.presses.up(&instance.instance_id) {
-            Press::Long => self.hub.refresh_one(instance, &settings.view()).await,
-            Press::Short => {
-                let updated = settings.cycled();
+        match settings.release(self.presses.up(&instance.instance_id)) {
+            Release::Refresh => self.hub.refresh_one(instance, &settings.view()).await,
+            Release::Stay => Ok(()),
+            Release::Switch(updated) => {
                 if let Err(e) = instance.set_settings(&updated).await {
                     log::warn!("could not persist sparkline series: {e}");
                 }
@@ -161,6 +166,21 @@ mod tests {
     }
 
     #[test]
+    fn feedback_keys_match_the_shipped_layout() {
+        let d = crate::sparkline::build_sparkline(
+            &[],
+            &SparkSettings::default(),
+            &ColorSettings::default(),
+            chrono::Local::now(),
+        );
+        crate::test_support::assert_feedback_matches_layout(
+            include_str!("../assets/layouts/chart.json"),
+            &crate::styles::sparkline::sparkline_feedback(&d),
+            &[],
+        );
+    }
+
+    #[test]
     fn cycled_moves_to_the_next_series_and_keeps_the_rest() {
         let s: SparklineSettings =
             serde_json::from_str(r#"{"window":"weekly","series":"today","critical":95}"#).unwrap();
@@ -169,6 +189,16 @@ mod tests {
         assert_eq!(c.spark.window, WindowKind::Weekly);
         assert_eq!(c.colors, s.colors);
         assert!(matches!(c.view(), View::Sparkline { .. }));
+    }
+
+    #[test]
+    fn a_release_cycles_when_short_and_refreshes_when_long() {
+        let s = SparklineSettings::default();
+        let Release::Switch(next) = s.release(Press::Short) else {
+            panic!("expected a switch");
+        };
+        assert_eq!(next.spark.series, s.spark.series.next());
+        assert!(matches!(s.release(Press::Long), Release::Refresh));
     }
 
     #[test]
