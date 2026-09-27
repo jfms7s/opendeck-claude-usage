@@ -13,7 +13,10 @@ pub const MIN_ELAPSED_FRACTION: f64 = 0.10;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Runway {
     Empty,
-    LastsToReset,
+    /// Projected time until empty, when it outlasts the reset. `None` when
+    /// nothing is burning (or the time overflows chrono's range).
+    LastsToReset(Option<Duration>),
+    /// Runs out this long from now, before the reset.
     Until(Duration),
 }
 
@@ -51,14 +54,14 @@ pub fn pace(window: &WindowUsage, kind: WindowKind, now: DateTime<Utc>) -> Optio
     let runway = if used >= 100.0 {
         Runway::Empty
     } else if rate_per_hour <= 0.0 {
-        Runway::LastsToReset
+        Runway::LastsToReset(None)
     } else {
         // `try_seconds`: a vanishing rate overflows chrono's range, and a
         // panic here would kill the shared poll loop for every key.
         let secs = ((100.0 - used) / rate_per_hour * 3600.0).round() as i64;
         match Duration::try_seconds(secs) {
             Some(until) if until < remaining => Runway::Until(until),
-            _ => Runway::LastsToReset,
+            until => Runway::LastsToReset(until),
         }
     };
     Some(Pace {
@@ -121,13 +124,16 @@ mod tests {
     fn slow_burn_lasts_to_reset() {
         // 50% elapsed, 10% used: 4%/h needs 22.5h for the remaining 90%.
         let p = pace(&session(10.0), WindowKind::Session, at(20, 10)).unwrap();
-        assert_eq!(p.runway, Runway::LastsToReset);
+        assert_eq!(
+            p.runway,
+            Runway::LastsToReset(Some(Duration::minutes(22 * 60 + 30)))
+        );
     }
 
     #[test]
     fn zero_usage_lasts_to_reset() {
         let p = pace(&session(0.0), WindowKind::Session, at(20, 10)).unwrap();
-        assert_eq!(p.runway, Runway::LastsToReset);
+        assert_eq!(p.runway, Runway::LastsToReset(None));
         assert_eq!(p.projected, 0.0);
     }
 
@@ -156,7 +162,7 @@ mod tests {
         let p = pace(&session(40.0), WindowKind::Session, at(23, 30)).unwrap();
         assert_eq!(p.elapsed_fraction, 1.0);
         assert!((p.projected - 40.0).abs() < 1e-9);
-        assert_eq!(p.runway, Runway::LastsToReset);
+        assert!(matches!(p.runway, Runway::LastsToReset(Some(_))));
     }
 
     #[test]
@@ -164,6 +170,6 @@ mod tests {
         // 1e-13% used at 50% elapsed: the runway overflows chrono's
         // Duration range; it must read LastsToReset, not panic the poller.
         let p = pace(&session(1e-13), WindowKind::Session, at(20, 10)).unwrap();
-        assert_eq!(p.runway, Runway::LastsToReset);
+        assert_eq!(p.runway, Runway::LastsToReset(None));
     }
 }
