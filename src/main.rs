@@ -4,6 +4,7 @@ mod burn_action;
 mod burn_icon;
 mod clock_action;
 mod clock_icon;
+mod combo;
 mod format;
 mod hub;
 mod level;
