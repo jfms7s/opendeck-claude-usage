@@ -14,7 +14,7 @@
 	</style>
 </head>
 <body>
-	<p class="hint">Shows the 5-hour session and 7-day weekly windows together. On a key, a short press flips between horizontal and vertical; hold to refresh.</p>
+	<p class="hint">Short press flips between horizontal and vertical. Hold to refresh.</p>
 
 	<div id="colors"></div>
 	<script src="colors.js"></script>
@@ -44,7 +44,15 @@
 			websocket.onmessage = (event) => {
 				const message = JSON.parse(event.data);
 				if (message.event === "didReceiveSettings") {
-					applySettings(message.payload.settings || {});
+					const settings = message.payload.settings || {};
+					if (pendingSave) {
+						// The reply to our getSettings: only the pass-through
+						// value is refreshed, so the edit being saved is kept.
+						storedLayout = settings.layout;
+						saveSettings();
+					} else {
+						applySettings(settings);
+					}
 				}
 			};
 		});
@@ -54,7 +62,21 @@
 			applyColorSettings(settings);
 		}
 
+		// OpenDeck may not forward the plugin's own setSettings (a press
+		// changing the layout) to an open PI, so the layout held here can be
+		// stale. Re-read the stored settings before saving; if no reply
+		// comes, save with what we have.
+		let pendingSave = null;
+
 		function sendSettings() {
+			if (pendingSave) return; // the pending save reads the form when it sends
+			pendingSave = setTimeout(saveSettings, 500);
+			websocket.send(JSON.stringify({ event: "getSettings", context: uuid }));
+		}
+
+		function saveSettings() {
+			clearTimeout(pendingSave);
+			pendingSave = null;
 			websocket.send(JSON.stringify({
 				event: "setSettings",
 				context: uuid,

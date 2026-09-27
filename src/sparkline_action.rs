@@ -201,4 +201,13 @@ mod tests {
         assert!(html.contains("storedSeries"));
         assert!(html.contains("key or dial"));
     }
+
+    /// KI-14: the PI re-reads the stored settings before saving, in case
+    /// OpenDeck didn't forward the plugin's press-driven `setSettings`.
+    #[test]
+    fn property_inspector_refreshes_before_saving() {
+        let html = include_str!("../assets/propertyInspector/sparkline.html");
+        assert!(html.contains(r#"event: "getSettings""#));
+        assert!(html.contains("pendingSave"));
+    }
 }
