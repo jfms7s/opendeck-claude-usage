@@ -1,7 +1,7 @@
 //! Recorded %-of-limit history. The usage API only ever returns the
 //! current session/weekly percentages, so trends need readings kept over
 //! time: an in-memory list mirrored to a small append-only JSONL file.
-//! It holds percentages and reset times only - no tokens, credentials or
+//! It holds percentages (session, weekly and extra usage) and reset times only - no tokens, credentials or
 //! account data - and anything older than `retention()` is dropped. Still,
 //! it's nobody else's business how much someone uses Claude, so the file
 //! and any directory created for it are owner-only.
@@ -24,6 +24,10 @@ pub struct Reading {
     pub session_resets_at: Option<DateTime<Utc>>,
     pub weekly: f64,
     pub weekly_resets_at: Option<DateTime<Utc>>,
+    /// Extra usage (% of the monthly cap); `None` when it isn't enabled,
+    /// or in lines saved before it was recorded.
+    #[serde(default)]
+    pub monthly: Option<f64>,
 }
 
 /// A weekly window is 7 days; one extra day lets "today" and the whole
@@ -62,6 +66,11 @@ impl Reading {
             session_resets_at: snapshot.session.resets_at,
             weekly: snapshot.weekly.percent,
             weekly_resets_at: snapshot.weekly.resets_at,
+            monthly: snapshot
+                .monthly
+                .enabled
+                .then_some(snapshot.monthly.percent)
+                .flatten(),
         }
     }
 
@@ -72,6 +81,7 @@ impl Reading {
             && same_reset(self.session_resets_at, other.session_resets_at)
             && self.weekly == other.weekly
             && same_reset(self.weekly_resets_at, other.weekly_resets_at)
+            && self.monthly == other.monthly
     }
 }
 
@@ -314,6 +324,7 @@ mod tests {
             session_resets_at: None,
             weekly: 1.0,
             weekly_resets_at: None,
+            monthly: None,
         }
     }
 
@@ -422,6 +433,46 @@ mod tests {
         utc.record(&snapshot(40.0, 20.0), at(21));
         utc.record(&snapshot(40.0, 20.0), after_midnight);
         assert_eq!(utc.readings().len(), 1);
+    }
+
+    #[test]
+    fn a_reading_keeps_the_monthly_percent_only_when_enabled() {
+        let mut s = snapshot(40.0, 20.0);
+        s.monthly = MonthlyUsage {
+            enabled: true,
+            percent: Some(12.5),
+            used_dollars: Some(6.25),
+            limit_dollars: Some(50.0),
+        };
+        assert_eq!(Reading::from_snapshot(&s, at(10)).monthly, Some(12.5));
+        let off = snapshot(40.0, 20.0);
+        assert_eq!(Reading::from_snapshot(&off, at(10)).monthly, None);
+    }
+
+    #[test]
+    fn a_monthly_only_change_is_recorded() {
+        let store = HistoryStore::in_memory();
+        let mut s = snapshot(40.0, 20.0);
+        s.monthly.enabled = true;
+        s.monthly.percent = Some(10.0);
+        store.record(&s, at(9));
+        s.monthly.percent = Some(11.0);
+        store.record(&s, at(10));
+        assert_eq!(store.readings().len(), 2);
+    }
+
+    #[test]
+    fn a_line_saved_before_monthly_was_recorded_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        std::fs::write(
+            &path,
+            "{\"at\":\"2026-09-30T09:00:00Z\",\"session\":20.0,\"session_resets_at\":null,\
+             \"weekly\":1.0,\"weekly_resets_at\":null}\n",
+        )
+        .unwrap();
+        let store = HistoryStore::load(path, at(10));
+        assert_eq!(store.readings(), vec![reading(at(9), 20.0)]);
     }
 
     #[test]

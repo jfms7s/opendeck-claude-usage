@@ -74,4 +74,4 @@ fix planned)
 | KI-27 | The rewrite's temp file has a theoretical symlink risk. | fixed in v0.12.4 |
 | KI-28 | History file I/O blocks briefly inside async code. | fixed in v0.12.4 |
 | KI-29 | The Sparkline's "Today" baseline is an approximation (the last reading before midnight). | fixed in v0.12.4 |
-| KI-30 | A saved Monthly window on a Sparkline falls back to Session. | accepted |
+| KI-30 | A saved Monthly window on a Sparkline falls back to Session. | fixed in v0.12.4 (Monthly is supported) |
