@@ -1,5 +1,6 @@
 mod action;
 mod burn;
+mod burn_action;
 mod burn_icon;
 mod clock_action;
 mod clock_icon;
@@ -17,6 +18,7 @@ mod source;
 mod tile;
 
 use action::UsageGaugeAction;
+use burn_action::BurnRateAction;
 use clock_action::PeakClockAction;
 use hub::UsageHub;
 use metric_action::MetricTileAction;
@@ -51,6 +53,7 @@ async fn main() -> OpenActionResult<()> {
     tokio::spawn(hub.clone().poll_loop());
 
     let action = UsageGaugeAction::new(hub.clone());
+    let burn_rate = BurnRateAction::new(hub.clone());
 
     let clock = PeakClockAction::new();
     let ticker = clock.clone();
@@ -63,5 +66,6 @@ async fn main() -> OpenActionResult<()> {
     register_action(action).await;
     register_action(clock).await;
     register_action(metric_tile).await;
+    register_action(burn_rate).await;
     run(std::env::args().collect()).await
 }

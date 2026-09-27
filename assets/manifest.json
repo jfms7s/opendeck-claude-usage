@@ -40,6 +40,18 @@
 			"Controllers": ["Keypad"],
 			"PropertyInspectorPath": "propertyInspector/metrictile.html",
 			"States": [{ "Image": "icons/actionDefaultImage" }]
+		},
+		{
+			"UUID": "com.jfms7s.claudeusage.burnrate",
+			"Name": "Burn Rate",
+			"Icon": "icons/icon",
+			"Tooltip": "Shows how fast a Claude usage window is burning: pace per hour/day, even-burn ratio, or runway until empty",
+			"Controllers": ["Encoder", "Keypad"],
+			"PropertyInspectorPath": "propertyInspector/burnrate.html",
+			"States": [{ "Image": "icons/actionDefaultImage" }],
+			"Encoder": {
+				"layout": "layouts/usage.json"
+			}
 		}
 	]
 }
