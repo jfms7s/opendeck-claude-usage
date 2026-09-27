@@ -3,6 +3,7 @@
 //! wraps the chosen one as the data URI OpenDeck's `setImage` expects.
 
 pub mod bar;
+pub mod donut;
 pub mod speedometer;
 
 use crate::tile::{self, TEXT_COLOR};
