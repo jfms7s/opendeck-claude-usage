@@ -108,8 +108,10 @@ colors, now)`, so each carries its own level color, `bar_value`, marks,
 - **Fill:** only when `v > 0`. Width `max(84·v/100, 6)`, rx 3, level color.
 - **Ticks:** at `x = 8 + 84·mark/100`, from `y0+15` to `y0+25`, stroke
   `TEXT_COLOR` 1.
-- **Detail:** `detail_text` ("resets in 6h 12m" / "no reset info" /
-  "no data") at `text_at(8, y0+35, Start, 10, regular, MUTED_TEXT_COLOR)`.
+- **Detail:** `detail_text` with "resets in " shortened to "resets "
+  ("resets 6h 12m" / "no reset info" / "no data") at `text_at(8, y0+35,
+  Start, 10, regular, MUTED_TEXT_COLOR)`. (Amended after a render check:
+  "resets in 3h 54m" overflowed the width estimate and was stretched.)
 
 **Vertical.** Two columns centered at `cx` = 32 (Session) and 68 (Weekly).
 For each column:

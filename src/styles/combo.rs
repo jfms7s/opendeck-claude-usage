@@ -66,6 +66,9 @@ fn row(display: &UsageDisplay, name: &str, y0: f64) -> String {
             format!(r#"<line x1="{x:.2}" y1="{y1}" x2="{x:.2}" y2="{y2}" stroke="{TEXT_COLOR}" stroke-width="1" />"#)
         })
         .collect();
+    // "resets 3h 54m" rather than "resets in 3h 54m": the longer form
+    // overflows the row's width estimate and gets stretched to fill it.
+    let detail_text = display.detail_text.replacen("resets in ", "resets ", 1);
     let detail = tile::text_at(
         8.0,
         y0 + 35.0,
@@ -73,7 +76,7 @@ fn row(display: &UsageDisplay, name: &str, y0: f64) -> String {
         10.0,
         false,
         MUTED_TEXT_COLOR,
-        &display.detail_text,
+        &detail_text,
     );
     format!("{name}{percent}{track}{fill}{ticks}{detail}")
 }
@@ -147,7 +150,7 @@ mod tests {
         );
         assert!(svg.contains(r##"fill="#d97757">46%</text>"##), "got: {svg}");
         assert!(svg.contains(r##"fill="#f97316">82%</text>"##), "got: {svg}");
-        assert!(svg.contains(">resets in 3d 2h</text>"), "got: {svg}");
+        assert!(svg.contains(">resets 3d 2h</text>"), "got: {svg}");
     }
 
     #[test]
@@ -254,5 +257,19 @@ mod tests {
                 "{layout:?}: card + 2 tracks in {svg}"
             );
         }
+    }
+
+    #[test]
+    fn long_countdowns_fit_without_squeezing() {
+        // "resets in 3h 54m" overflows the row's width estimate and got
+        // stretched to the full row; the shorter form fits naturally.
+        let mut s = display(46.0);
+        s.detail_text = "resets in 3h 54m".to_string();
+        let svg = render(&s, &s, ComboLayout::Horizontal);
+        assert!(
+            svg.contains(r##"fill="#d1d5db">resets 3h 54m</text>"##),
+            "got: {svg}"
+        );
+        assert!(!svg.contains("textLength"), "got: {svg}");
     }
 }
