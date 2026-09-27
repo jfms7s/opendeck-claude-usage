@@ -1,9 +1,7 @@
 use crate::format::UsageDisplay;
+use crate::level::{Level, Marks};
 use crate::tile::{self, MUTED_TEXT_COLOR, TEXT_COLOR};
 
-const ZONE_GREEN: &str = "#22c55e";
-const ZONE_YELLOW: &str = "#eab308";
-const ZONE_RED: &str = "#ef4444";
 /// Light, so the needle stands out against the dark card.
 const NEEDLE_COLOR: &str = TEXT_COLOR;
 
@@ -33,14 +31,43 @@ fn polar_point(theta_deg: f64) -> (f64, f64) {
 }
 
 /// One rounded-cap arc segment from `theta_start` down to `theta_end`
-/// (degrees, `theta_start` > `theta_end`, both spans here are <= 90deg so a
-/// single-arc SVG path with `large-arc-flag=0` is always correct).
+/// (degrees, `theta_start` > `theta_end`). Every span is <= 90deg (see
+/// `zone_segments`), so `large-arc-flag=0` is always correct.
 fn arc_path(theta_start: f64, theta_end: f64, color: &str) -> String {
     let (sx, sy) = polar_point(theta_start);
     let (ex, ey) = polar_point(theta_end);
     format!(
         r#"<path d="M {sx:.2} {sy:.2} A {RADIUS} {RADIUS} 0 0 1 {ex:.2} {ey:.2}" fill="none" stroke="{color}" stroke-width="{STROKE_WIDTH}" stroke-linecap="round" />"#
     )
+}
+
+/// 0% -> 180deg (left), 100% -> 0deg (right) - the same mapping as
+/// `needle_rotation_deg`, so zones and needle can never disagree.
+fn percent_to_theta(percent: f64) -> f64 {
+    180.0 - percent.clamp(0.0, 100.0) * 1.8
+}
+
+/// The colored zones as `(from %, to %, level)`: normal up to Watch, then
+/// Watch, Risk, Critical up to 100. Zero-length zones are dropped, and any
+/// zone crossing 50% is split there so no arc spans more than 90deg
+/// (`arc_path` always uses `large-arc-flag=0`).
+fn zone_segments(marks: &Marks) -> Vec<(f64, f64, Level)> {
+    let bounds = [0.0, marks.watch, marks.risk, marks.critical, 100.0];
+    let levels = [Level::Normal, Level::Watch, Level::Risk, Level::Critical];
+    let mut zones = Vec::new();
+    for (i, level) in levels.into_iter().enumerate() {
+        let (from, to) = (bounds[i], bounds[i + 1]);
+        if to <= from {
+            continue;
+        }
+        if from < 50.0 && to > 50.0 {
+            zones.push((from, 50.0, level));
+            zones.push((50.0, to, level));
+        } else {
+            zones.push((from, to, level));
+        }
+    }
+    zones
 }
 
 /// 0% -> needle full left (180deg), 100% -> full right (0deg), sweeping
@@ -51,22 +78,24 @@ fn needle_rotation_deg(bar_value: f64) -> f64 {
     bar_value.clamp(0.0, 100.0) * 1.8 - 90.0
 }
 
-/// Renders the tile as an SVG string: a dark card, a fixed three-zone
-/// semicircular speedometer (zone boundaries match `bar_color`'s own
-/// 50%/80% thresholds), a needle rotated to `display.bar_value`, and the
+/// Renders the tile as an SVG string: a dark card, a four-zone
+/// semicircular speedometer drawn from the key's own marks and palette,
+/// a needle rotated to `display.bar_value`, and the
 /// percent + compact countdown as two text lines underneath (see `tile.rs`
 /// for why the text lives in the image rather than the native title).
 fn render_svg(display: &UsageDisplay) -> String {
     let rotation = needle_rotation_deg(display.bar_value);
 
-    let arcs: String = [
-        (180.0, 90.0, ZONE_GREEN),
-        (90.0, 36.0, ZONE_YELLOW),
-        (36.0, 0.0, ZONE_RED),
-    ]
-    .iter()
-    .map(|(start, end, color)| arc_path(*start, *end, color))
-    .collect();
+    let arcs: String = zone_segments(&display.marks)
+        .into_iter()
+        .map(|(from, to, level)| {
+            arc_path(
+                percent_to_theta(from),
+                percent_to_theta(to),
+                display.palette.color(level),
+            )
+        })
+        .collect();
 
     let nx1 = CENTER_X - NEEDLE_HALF_WIDTH;
     let nx2 = CENTER_X + NEEDLE_HALF_WIDTH;
@@ -102,13 +131,19 @@ pub fn build_icon(display: &UsageDisplay) -> String {
 mod tests {
     use super::*;
 
+    use crate::level::{
+        DEFAULT_CRITICAL, DEFAULT_NORMAL, DEFAULT_RISK, DEFAULT_WATCH, Level, Marks, Palette,
+    };
+
     fn display(bar_value: f64) -> UsageDisplay {
         UsageDisplay {
             percent_text: format!("{bar_value}%"),
-            color: ZONE_GREEN,
+            color: DEFAULT_NORMAL.to_string(),
             detail_text: "resets in 1h".to_string(),
             tile_detail: "1h".to_string(),
             bar_value,
+            marks: Marks::default(),
+            palette: Palette::default(),
         }
     }
 
@@ -126,9 +161,61 @@ mod tests {
     fn builds_a_valid_svg_data_uri() {
         let svg = decode(&build_icon(&display(50.0)));
         assert!(svg.starts_with("<svg"), "got: {svg}");
-        assert!(svg.contains(ZONE_GREEN));
-        assert!(svg.contains(ZONE_YELLOW));
-        assert!(svg.contains(ZONE_RED));
+        for color in [
+            DEFAULT_NORMAL,
+            DEFAULT_WATCH,
+            DEFAULT_RISK,
+            DEFAULT_CRITICAL,
+        ] {
+            assert!(svg.contains(color), "missing {color} in {svg}");
+        }
+    }
+
+    #[test]
+    fn default_marks_make_four_zones() {
+        assert_eq!(
+            zone_segments(&Marks::default()),
+            vec![
+                (0.0, 50.0, Level::Normal),
+                (50.0, 75.0, Level::Watch),
+                (75.0, 90.0, Level::Risk),
+                (90.0, 100.0, Level::Critical),
+            ]
+        );
+    }
+
+    #[test]
+    fn zero_length_zone_is_skipped() {
+        let marks = Marks {
+            watch: 0.0,
+            risk: 60.0,
+            critical: 100.0,
+        };
+        let levels: Vec<Level> = zone_segments(&marks).iter().map(|z| z.2).collect();
+        assert!(!levels.contains(&Level::Normal));
+        assert!(!levels.contains(&Level::Critical));
+    }
+
+    #[test]
+    fn zones_crossing_half_are_split_so_no_arc_exceeds_90_degrees() {
+        let marks = Marks {
+            watch: 20.0,
+            risk: 80.0,
+            critical: 95.0,
+        };
+        let zones = zone_segments(&marks);
+        assert!(zones.contains(&(20.0, 50.0, Level::Watch)));
+        assert!(zones.contains(&(50.0, 80.0, Level::Watch)));
+        for (from, to, _) in zones {
+            assert!(to > from && to - from <= 50.0, "zone {from}..{to}");
+        }
+    }
+
+    #[test]
+    fn custom_palette_colors_the_zones() {
+        let mut d = display(10.0);
+        d.palette.critical = "#abcdef".to_string();
+        assert!(decode(&build_icon(&d)).contains("#abcdef"));
     }
 
     #[test]
@@ -169,10 +256,12 @@ mod tests {
     fn disabled_color_still_renders_a_valid_icon() {
         let d = UsageDisplay {
             percent_text: "\u{2014}".to_string(),
-            color: "#6b7280",
+            color: "#6b7280".to_string(),
             detail_text: "not enabled".to_string(),
             tile_detail: "not enabled".to_string(),
             bar_value: 0.0,
+            marks: Marks::default(),
+            palette: Palette::default(),
         };
         let svg = decode(&build_icon(&d));
         assert!(svg.contains("rotate(-90.00 50 48)"), "got: {svg}");

@@ -1,5 +1,6 @@
 use crate::format::{UsageDisplay, build_display, error_display, feedback_for_display};
 use crate::icon::build_icon;
+use crate::level::ColorSettings;
 use crate::source::{UsageSnapshot, UsageSource, WindowKind};
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -65,7 +66,7 @@ impl UsageGaugeAction {
     async fn render_cached(&self, instance: &Instance, window: WindowKind) -> OpenActionResult<()> {
         let snapshot = self.shared.latest.read().await.clone();
         let display = match snapshot {
-            Some(s) => build_display(&s, window, chrono::Utc::now()),
+            Some(s) => build_display(&s, window, &ColorSettings::default(), chrono::Utc::now()),
             None => error_display(),
         };
         Self::render(instance, &display).await
@@ -104,7 +105,12 @@ impl UsageGaugeAction {
     /// for the next scheduled tick.
     async fn refresh_one(&self, instance: &Instance, window: WindowKind) -> OpenActionResult<()> {
         let display = match self.read_and_cache().await {
-            Ok(snapshot) => build_display(&snapshot, window, chrono::Utc::now()),
+            Ok(snapshot) => build_display(
+                &snapshot,
+                window,
+                &ColorSettings::default(),
+                chrono::Utc::now(),
+            ),
             Err(e) => {
                 log::warn!("usage source read failed: {e}");
                 error_display()
@@ -165,7 +171,12 @@ impl UsageGaugeAction {
                 continue; // instance disappeared between the registry snapshot and now
             };
             let display = match &read_result {
-                Ok(snapshot) => build_display(snapshot, window, chrono::Utc::now()),
+                Ok(snapshot) => build_display(
+                    snapshot,
+                    window,
+                    &ColorSettings::default(),
+                    chrono::Utc::now(),
+                ),
                 Err(_) => error_display(),
             };
             if let Err(e) = Self::render(&instance, &display).await {
