@@ -7,6 +7,7 @@ pub mod combo;
 pub mod donut;
 pub mod heatmap;
 pub mod ring;
+pub mod sparkline;
 pub mod speedometer;
 
 use crate::format::UsageDisplay;
