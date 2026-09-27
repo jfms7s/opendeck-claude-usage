@@ -21,6 +21,7 @@ mod press;
 mod pricing;
 mod source;
 mod sparkline;
+mod sparkline_action;
 mod style;
 mod styles;
 mod tile;
@@ -37,6 +38,7 @@ use openaction::{OpenActionResult, register_action, run};
 use source::api::ApiUsageSource;
 use source::cached::{CachePolicy, CachedUsageSource};
 use source::logs::LogUsageSource;
+use sparkline_action::SparklineAction;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -59,7 +61,7 @@ async fn main() -> OpenActionResult<()> {
         },
     );
 
-    // Every usage-driven action (gauge, burn rate, combo) registers its instances
+    // Every usage-driven action (gauge, burn rate, combo, sparkline) registers its instances
     // in this one hub, so a single poll loop serves them all.
     // Recorded %-of-limit readings for Usage Sparkline, kept in a small
     // file under ~/.local/state so trends survive restarts.
@@ -70,6 +72,7 @@ async fn main() -> OpenActionResult<()> {
     let action = UsageGaugeAction::new(hub.clone());
     let burn_rate = BurnRateAction::new(hub.clone());
     let combo = ComboAction::new(hub.clone());
+    let sparkline = SparklineAction::new(hub.clone());
 
     let clock = PeakClockAction::new();
     let ticker = clock.clone();
@@ -91,5 +94,6 @@ async fn main() -> OpenActionResult<()> {
     register_action(burn_rate).await;
     register_action(combo).await;
     register_action(heatmap).await;
+    register_action(sparkline).await;
     run(std::env::args().collect()).await
 }
