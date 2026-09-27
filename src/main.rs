@@ -7,6 +7,7 @@ mod level;
 mod metric;
 mod metric_action;
 mod metric_icon;
+mod pace;
 mod peak;
 mod pricing;
 mod source;

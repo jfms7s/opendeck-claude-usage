@@ -34,18 +34,24 @@ pub fn format_countdown(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> String 
 }
 
 /// The bare remaining time - "Xd Yh" / "Xh Ym" / "Ym" / "<1m" - or `None`
-/// once `resets_at` has passed. Days kick in at 24h so a weekly window
-/// reads "6d 10h" rather than "154h 34m".
+/// once `resets_at` has passed.
 fn format_remaining(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> Option<String> {
     let remaining = resets_at - now;
     if remaining <= chrono::Duration::zero() {
         return None;
     }
-    let total_minutes = remaining.num_minutes();
+    Some(format_duration_compact(remaining))
+}
+
+/// "Xd Yh" / "Xh Ym" / "Ym" / "<1m". Days kick in at 24h so a weekly
+/// window reads "6d 10h" rather than "154h 34m". Shared by the reset
+/// countdown and Burn Rate's runway.
+pub fn format_duration_compact(d: chrono::Duration) -> String {
+    let total_minutes = d.num_minutes();
     let days = total_minutes / (24 * 60);
     let hours = total_minutes / 60 % 24;
     let minutes = total_minutes % 60;
-    Some(if days > 0 {
+    if days > 0 {
         format!("{days}d {hours}h")
     } else if hours > 0 {
         format!("{hours}h {minutes:02}m")
@@ -53,7 +59,7 @@ fn format_remaining(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> Option<Stri
         format!("{minutes}m")
     } else {
         "<1m".to_string()
-    })
+    }
 }
 
 /// Keypad-tile variant of `format_countdown`: the tile has room for about
@@ -242,6 +248,30 @@ mod tests {
             "2h 10m"
         );
         assert_eq!(format_countdown_short(dt(20, 0, 0), dt(20, 30, 0)), "now");
+    }
+
+    #[test]
+    fn compact_duration_formats() {
+        assert_eq!(
+            format_duration_compact(chrono::Duration::minutes(175)),
+            "2h 55m"
+        );
+        assert_eq!(
+            format_duration_compact(chrono::Duration::hours(22)),
+            "22h 00m"
+        );
+        assert_eq!(
+            format_duration_compact(chrono::Duration::minutes(3 * 24 * 60 + 4 * 60)),
+            "3d 4h"
+        );
+        assert_eq!(
+            format_duration_compact(chrono::Duration::minutes(45)),
+            "45m"
+        );
+        assert_eq!(
+            format_duration_compact(chrono::Duration::seconds(20)),
+            "<1m"
+        );
     }
 
     #[test]
