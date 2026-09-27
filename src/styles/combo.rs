@@ -23,8 +23,13 @@ pub fn render(session: &UsageDisplay, weekly: &UsageDisplay, layout: ComboLayout
     svg(&body)
 }
 
-fn marks(display: &UsageDisplay) -> [f64; 3] {
-    [
+/// The threshold ticks to draw: none for a window without data, where
+/// there's no bar for them to measure.
+fn marks(display: &UsageDisplay) -> Vec<f64> {
+    if display.percent_text == "\u{2014}" {
+        return Vec::new();
+    }
+    vec![
         display.marks.watch,
         display.marks.risk,
         display.marks.critical,
@@ -238,6 +243,26 @@ mod tests {
             render(&tiny, &tiny, ComboLayout::Horizontal).contains(r#"width="6.00" height="6""#)
         );
         assert!(render(&tiny, &tiny, ComboLayout::Vertical).contains(r#"height="8.00" rx="4""#));
+    }
+
+    /// KI-03: ticks mark thresholds on a bar; with no data there's no bar,
+    /// so bright ticks on an empty grey track are just noise.
+    #[test]
+    fn a_window_without_data_draws_no_ticks() {
+        let e = error_display();
+        let (session, _) = pair();
+        for layout in [ComboLayout::Horizontal, ComboLayout::Vertical] {
+            assert_eq!(
+                render(&e, &e, layout).matches("<line").count(),
+                0,
+                "{layout:?}"
+            );
+            assert_eq!(
+                render(&session, &e, layout).matches("<line").count(),
+                3,
+                "{layout:?}"
+            );
+        }
     }
 
     #[test]
