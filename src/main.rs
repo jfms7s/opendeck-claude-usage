@@ -15,6 +15,7 @@ mod pace;
 mod peak;
 mod pricing;
 mod source;
+mod style;
 mod tile;
 
 use action::UsageGaugeAction;
