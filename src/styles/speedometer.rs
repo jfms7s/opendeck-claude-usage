@@ -83,7 +83,7 @@ fn needle_rotation_deg(bar_value: f64) -> f64 {
 /// a needle rotated to `display.bar_value`, and the
 /// percent + compact countdown as two text lines underneath (see `tile.rs`
 /// for why the text lives in the image rather than the native title).
-fn render_svg(display: &UsageDisplay) -> String {
+pub(super) fn render(display: &UsageDisplay) -> String {
     let rotation = needle_rotation_deg(display.bar_value);
 
     let arcs: String = zone_segments(&display.marks)
@@ -124,14 +124,13 @@ fn render_svg(display: &UsageDisplay) -> String {
     )
 }
 
-/// Builds the `image` string OpenDeck's `setImage` event expects.
-pub fn build_icon(display: &UsageDisplay) -> String {
-    tile::data_uri(&render_svg(display))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn build_icon(display: &UsageDisplay) -> String {
+        crate::tile::data_uri(&render(display))
+    }
 
     use crate::level::{
         DEFAULT_CRITICAL, DEFAULT_NORMAL, DEFAULT_RISK, DEFAULT_WATCH, Level, Marks, Palette,
@@ -143,6 +142,8 @@ mod tests {
             color: DEFAULT_NORMAL.to_string(),
             detail_text: "resets in 1h".to_string(),
             tile_detail: "1h".to_string(),
+            label: "SESSION",
+            number_text: format!("{bar_value}"),
             bar_value,
             marks: Marks::default(),
             palette: Palette::default(),
@@ -261,6 +262,8 @@ mod tests {
             color: "#6b7280".to_string(),
             detail_text: "not enabled".to_string(),
             tile_detail: "not enabled".to_string(),
+            label: "MONTHLY",
+            number_text: "\u{2014}".to_string(),
             bar_value: 0.0,
             marks: Marks::default(),
             palette: Palette::default(),

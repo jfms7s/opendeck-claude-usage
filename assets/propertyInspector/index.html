@@ -11,6 +11,8 @@
 		summary { cursor: pointer; font-size: 11px; opacity: 0.8; }
 		.hint { font-size: 10px; opacity: 0.6; }
 		button { margin-top: 8px; }
+		.check { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 12px; opacity: 1; }
+		.check input { width: auto; margin: 0; }
 	</style>
 </head>
 <body>
@@ -20,6 +22,17 @@
 		<option value="weekly">Weekly (7 day)</option>
 		<option value="monthly">Monthly (extra usage)</option>
 	</select>
+
+	<label>Cycle styles</label>
+	<div id="cycleStyles">
+		<label class="check"><input type="checkbox" value="speedometer" /> Speedometer</label>
+		<label class="check"><input type="checkbox" value="bar" /> Bar</label>
+		<label class="check"><input type="checkbox" value="softPill" /> Soft pill</label>
+		<label class="check"><input type="checkbox" value="openDonut" /> Open donut</label>
+		<label class="check"><input type="checkbox" value="trackedDonut" /> Tracked donut</label>
+		<label class="check"><input type="checkbox" value="thinRing" /> Thin ring</label>
+	</div>
+	<p class="hint">Short press cycles the checked styles (need at least two). Hold to refresh.</p>
 
 	<div id="colors"></div>
 	<script src="colors.js"></script>
@@ -32,6 +45,10 @@
 
 		let websocket;
 		let uuid;
+		let storedStyle;
+
+		const styleBoxes = () => [...document.querySelectorAll("#cycleStyles input")];
+		styleBoxes().forEach((box) => box.addEventListener("change", sendSettings));
 
 		mountColorSection(document.getElementById("colors"), { showMode: true, onChange: sendSettings });
 
@@ -56,13 +73,27 @@
 		function applySettings(settings) {
 			document.getElementById("window").value = settings.window || "session";
 			applyColorSettings(settings);
+			storedStyle = settings.style;
+			// Mirrors the plugin: no list yet means all ticked; an explicit
+			// (even empty) list is shown as saved.
+			const cycle = Array.isArray(settings.cycleStyles)
+				? settings.cycleStyles
+				: styleBoxes().map((box) => box.value);
+			styleBoxes().forEach((box) => { box.checked = cycle.includes(box.value); });
 		}
 
 		function sendSettings() {
 			websocket.send(JSON.stringify({
 				event: "setSettings",
 				context: uuid,
-				payload: { window: document.getElementById("window").value, ...readColorSettings() },
+				payload: {
+					window: document.getElementById("window").value,
+					...readColorSettings(),
+					// The current style changes only by pressing the key; pass
+					// it through untouched so saving here doesn't reset it.
+					...(storedStyle ? { style: storedStyle } : {}),
+					cycleStyles: styleBoxes().filter((box) => box.checked).map((box) => box.value),
+				},
 			}));
 		}
 

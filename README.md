@@ -99,8 +99,9 @@ green/yellow/red at 50/80% to copper with Watch 50, Risk 75 and Critical
 
 1. Add a **Usage Gauge** key on a dial or a keypad tile.
 2. Pick which window to show: Session, Weekly, or Monthly (extra usage).
-3. It updates automatically roughly every 20 seconds; press the dial or tap
-   the tile for an immediate refresh.
+3. It updates automatically roughly every 20 seconds. On a dial, press for
+   an immediate refresh. On a keypad tile, a short press switches to the
+   next style (see below) and holding for half a second refreshes.
 
 ## Using a Metric Tile
 
@@ -123,6 +124,16 @@ whichever level is worse, current usage or the usage you'd reach at reset
 if you keep burning at the current rate. Pace is only computed after 10%
 of the window has passed (earlier projections are noise), and never for
 Monthly.
+
+## Styles (keypad)
+
+A Usage Gauge key can be drawn as a **Speedometer**, **Bar**, **Soft pill**,
+**Open donut**, **Tracked donut**, or **Thin ring**; every style except the
+speedometer shows your Watch/Risk/Critical marks as tick marks. Tick the
+styles you want under **Cycle styles**; a short press moves to the next
+ticked one (you need at least two) and the key remembers its style across
+restarts. Hold the key for half a second to refresh instead. Dials keep the
+touch-strip bar.
 
 ## Using Burn Rate
 
@@ -167,6 +178,14 @@ development environment, which has no OpenDeck/Stream Deck to test against:
 - [ ] Burn Rate shows Pace / Even burn / Runway on a key and on a dial for
       Session and Weekly. *(not yet verified)*
 - [ ] A key upgraded from 0.6.0 keeps its window setting. *(not yet verified)*
+- [ ] Each of the six styles renders on a keypad tile with tick marks at
+      the key's marks. *(not yet verified)*
+- [ ] A short press cycles only the ticked styles and the chosen style
+      survives an OpenDeck restart. *(not yet verified)*
+- [ ] Holding a key ~0.5s refreshes it without changing its style.
+      *(not yet verified)*
+- [ ] With fewer than two styles ticked, a short press does nothing.
+      *(not yet verified)*
 
 ## Development
 

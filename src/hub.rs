@@ -14,9 +14,10 @@ use tokio::sync::RwLock;
 use crate::burn::{BurnMetric, build_burn_display, burn_error_display, burn_feedback};
 use crate::burn_icon::build_burn_icon;
 use crate::format::{build_display, error_display, feedback_for_display};
-use crate::icon::build_icon;
 use crate::level::ColorSettings;
 use crate::source::{UsageSnapshot, UsageSource, UsageSourceError, WindowKind};
+use crate::style::GaugeStyle;
+use crate::styles::build_styled_icon;
 
 /// The wire value OpenDeck sends as `Instance::controller` for a keypad
 /// tile (vs. `"Encoder"` for a dial) - confirmed against openaction 2.7's
@@ -29,6 +30,7 @@ pub enum View {
     Gauge {
         window: WindowKind,
         colors: ColorSettings,
+        style: GaugeStyle,
     },
     Burn {
         window: WindowKind,
@@ -54,13 +56,17 @@ pub fn output_for(
     now: DateTime<Utc>,
 ) -> Output {
     match view {
-        View::Gauge { window, colors } => {
+        View::Gauge {
+            window,
+            colors,
+            style,
+        } => {
             let display = match snapshot {
                 Some(s) => build_display(s, *window, colors, now),
                 None => error_display(),
             };
             if keypad {
-                Output::Image(build_icon(&display))
+                Output::Image(build_styled_icon(&display, *style))
             } else {
                 Output::Feedback(feedback_for_display(&display))
             }
@@ -225,6 +231,7 @@ impl UsageHub {
 mod tests {
     use super::*;
     use crate::source::{MonthlyUsage, WindowUsage};
+    use crate::style::GaugeStyle;
     use async_trait::async_trait;
     use chrono::TimeZone;
 
@@ -275,6 +282,7 @@ mod tests {
         View::Gauge {
             window: WindowKind::Session,
             colors: ColorSettings::default(),
+            style: GaugeStyle::Speedometer,
         }
     }
 
@@ -355,6 +363,23 @@ mod tests {
                 panic!("expected feedback");
             };
             assert_eq!(f["detail"], "no data");
+        }
+    }
+
+    #[test]
+    fn every_gauge_style_is_an_image_on_a_keypad_and_unchanged_on_a_dial() {
+        let dial = output_for(&gauge(), Some(&snapshot()), false, now());
+        for style in crate::style::ALL_STYLES {
+            let view = View::Gauge {
+                window: WindowKind::Session,
+                colors: ColorSettings::default(),
+                style,
+            };
+            assert!(matches!(
+                output_for(&view, Some(&snapshot()), true, now()),
+                Output::Image(_)
+            ));
+            assert_eq!(output_for(&view, Some(&snapshot()), false, now()), dial);
         }
     }
 }
