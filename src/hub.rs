@@ -9,7 +9,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use dashmap::DashMap;
 use openaction::{Instance, OpenActionResult};
 use tokio::sync::RwLock;
@@ -24,6 +24,7 @@ use crate::source::{UsageSnapshot, UsageSource, UsageSourceError, WindowKind};
 use crate::sparkline::{SparkSettings, build_sparkline};
 use crate::style::GaugeStyle;
 use crate::styles::build_styled_icon;
+use crate::styles::combo::render as combo_key;
 use crate::styles::sparkline::{render_key as sparkline_key, sparkline_feedback};
 use crate::surface::{Surface, for_each_tracked};
 use crate::tile;
@@ -114,16 +115,13 @@ pub fn output_for(
                 None => (error_display(), error_display()),
             };
             if keypad {
-                Output::Image(tile::data_uri(&crate::styles::combo::render(
-                    &session, &weekly, *layout,
-                )))
+                Output::Image(tile::data_uri(&combo_key(&session, &weekly, *layout)))
             } else {
                 Output::Feedback(combo_feedback(&session, &weekly))
             }
         }
         View::Sparkline { settings, colors } => {
-            let display =
-                build_sparkline(history, settings, colors, now.with_timezone(&chrono::Local));
+            let display = build_sparkline(history, settings, colors, now.with_timezone(&Local));
             if keypad {
                 Output::Image(tile::data_uri(&sparkline_key(&display)))
             } else {
@@ -288,9 +286,8 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history::HistoryStore;
     use crate::source::{MonthlyUsage, WindowUsage};
-    use crate::style::GaugeStyle;
+    use crate::style::ALL_STYLES;
     use async_trait::async_trait;
     use chrono::TimeZone;
 
@@ -378,6 +375,39 @@ mod tests {
         assert_eq!(hub.registry.len(), 2);
     }
 
+    /// KI-22: one poll renders every tracked instance from the same read,
+    /// so a Gauge and a Burn Rate side by side both show real data.
+    #[tokio::test]
+    async fn one_poll_renders_both_gauge_and_burn() {
+        let hub = UsageHub::new(AlwaysOk, HistoryStore::in_memory());
+        hub.track("gauge", gauge());
+        hub.track("burn", burn());
+        let snapshot = hub.read_and_cache().await.unwrap();
+
+        let pushed = Arc::default();
+        hub.render_tracked(Some(&snapshot), |id| {
+            std::future::ready(Some(FakeSurface {
+                id,
+                pushed: Arc::clone(&pushed),
+            }))
+        })
+        .await;
+        let mut frames = pushed.lock().unwrap().clone();
+        frames.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let [
+            (burn_id, Output::Feedback(b)),
+            (gauge_id, Output::Feedback(g)),
+        ] = &frames[..]
+        else {
+            panic!("expected two feedback frames, got {frames:?}");
+        };
+        assert_eq!((burn_id.as_str(), gauge_id.as_str()), ("burn", "gauge"));
+        assert_eq!(g["percent"], "33%");
+        assert!(b["detail"].as_str().unwrap().ends_with("session"));
+        assert_ne!(b["detail"], "no data");
+    }
+
     #[test]
     fn gauge_on_a_keypad_is_an_image() {
         let out = output_for(&gauge(), Some(&snapshot()), &[], true, now());
@@ -421,7 +451,7 @@ mod tests {
     #[test]
     fn every_gauge_style_is_an_image_on_a_keypad_and_unchanged_on_a_dial() {
         let dial = output_for(&gauge(), Some(&snapshot()), &[], false, now());
-        for style in crate::style::ALL_STYLES {
+        for style in ALL_STYLES {
             let view = View::Gauge {
                 window: WindowKind::Session,
                 colors: ColorSettings::default(),
@@ -438,7 +468,7 @@ mod tests {
         }
     }
 
-    fn combo(layout: crate::combo::ComboLayout) -> View {
+    fn combo(layout: ComboLayout) -> View {
         View::Combo {
             colors: ColorSettings::default(),
             layout,
@@ -447,7 +477,6 @@ mod tests {
 
     #[test]
     fn combo_on_a_keypad_is_an_image_per_layout() {
-        use crate::combo::ComboLayout;
         let h = output_for(
             &combo(ComboLayout::Horizontal),
             Some(&snapshot()),
@@ -469,7 +498,7 @@ mod tests {
     #[test]
     fn combo_on_a_dial_is_two_bar_feedback() {
         let Output::Feedback(f) = output_for(
-            &combo(crate::combo::ComboLayout::Horizontal),
+            &combo(ComboLayout::Horizontal),
             Some(&snapshot()),
             &[],
             false,
@@ -483,13 +512,9 @@ mod tests {
 
     #[test]
     fn combo_without_data_is_dashes() {
-        let Output::Feedback(f) = output_for(
-            &combo(crate::combo::ComboLayout::Vertical),
-            None,
-            &[],
-            false,
-            now(),
-        ) else {
+        let Output::Feedback(f) =
+            output_for(&combo(ComboLayout::Vertical), None, &[], false, now())
+        else {
             panic!("expected feedback");
         };
         assert_eq!(f["s_value"], "\u{2014}");
@@ -506,7 +531,7 @@ mod tests {
 
     fn sparkline_view() -> View {
         View::Sparkline {
-            settings: crate::sparkline::SparkSettings::default(),
+            settings: SparkSettings::default(),
             colors: ColorSettings::default(),
         }
     }
@@ -532,10 +557,11 @@ mod tests {
         );
     }
 
-    /// Stands in for an OpenDeck instance: records what it's sent.
+    /// Stands in for an OpenDeck instance (a dial): records what it's sent.
     #[derive(Clone, Default)]
     struct FakeSurface {
-        pushed: Arc<std::sync::Mutex<Vec<Output>>>,
+        id: String,
+        pushed: Arc<std::sync::Mutex<Vec<(String, Output)>>>,
     }
 
     #[async_trait]
@@ -545,7 +571,7 @@ mod tests {
         }
 
         async fn push(&self, output: Output) -> OpenActionResult<()> {
-            self.pushed.lock().unwrap().push(output);
+            self.pushed.lock().unwrap().push((self.id.clone(), output));
             Ok(())
         }
     }
@@ -564,7 +590,7 @@ mod tests {
         })
         .await;
         let pushed = surface.pushed.lock().unwrap();
-        let [Output::Feedback(f)] = pushed.as_slice() else {
+        let [(_, Output::Feedback(f))] = pushed.as_slice() else {
             panic!("expected one feedback, got {pushed:?}");
         };
         assert!(f.get("chart").is_some(), "drew the old gauge: {f}");

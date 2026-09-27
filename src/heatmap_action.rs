@@ -1,6 +1,6 @@
 use crate::heatmap::{HeatmapDisplay, HeatmapSettings, build_heatmap};
 use crate::hub::Output;
-use crate::press::{LatestSettings, Press, PressTimer};
+use crate::press::{LatestSettings, Press, PressTimer, Release, on_release};
 use crate::source::logs::{LogEntry, LogUsageSource};
 use crate::styles::heatmap::{render_key, render_strip};
 use crate::surface::{Surface, for_each_tracked};
@@ -42,17 +42,8 @@ fn flipped(settings: &HeatmapSettings) -> HeatmapSettings {
 /// What a key or dial release does. Both controllers share one gesture:
 /// the view is otherwise only reachable by pressing, so a dial that only
 /// refreshed would be stuck on 7 days.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Release {
-    Flip,
-    Refresh,
-}
-
-fn on_release(press: Press) -> Release {
-    match press {
-        Press::Short => Release::Flip,
-        Press::Long => Release::Refresh,
-    }
+fn release(press: Press, settings: &HeatmapSettings) -> Release<HeatmapSettings> {
+    on_release(press, || Some(flipped(settings)))
 }
 
 #[derive(Clone)]
@@ -74,7 +65,7 @@ impl HeatmapAction {
         }
     }
 
-    /// The frame for `settings` on a key or a dial strip, reading the logs.
+    /// The frame for `settings`, reading the logs.
     async fn output(&self, settings: &HeatmapSettings, keypad: bool) -> Output {
         output_from(&self.logs.entries().await, settings, keypad)
     }
@@ -128,6 +119,18 @@ impl HeatmapAction {
         .await;
     }
 
+    /// What a release does, decided from the last-set settings rather than
+    /// the event's, and kept when it flips (see `LatestSettings`).
+    fn release(
+        &self,
+        instance_id: &str,
+        settings: &HeatmapSettings,
+        press: Press,
+    ) -> Release<HeatmapSettings> {
+        self.registry
+            .release(instance_id, settings, |s| release(press, s))
+    }
+
     /// Short press (key or dial) flips 7 days / 4 weeks; a long press
     /// re-reads the logs.
     async fn released(
@@ -135,29 +138,23 @@ impl HeatmapAction {
         instance: &Instance,
         settings: &HeatmapSettings,
     ) -> OpenActionResult<()> {
-        match on_release(self.presses.up(&instance.instance_id)) {
+        let press = self.presses.up(&instance.instance_id);
+        match self.release(&instance.instance_id, settings, press) {
             Release::Refresh => {
                 let current = self.registry.current(&instance.instance_id, settings);
                 self.render(instance, &current).await
             }
-            Release::Flip => self.flip_view(instance, settings).await,
+            Release::Switch(updated) => self.show_view(instance, updated).await,
+            Release::Stay => Ok(()),
         }
     }
 
-    /// The settings a short press switches to, kept as the instance's
-    /// latest. Starts from those, not the event's (see `LatestSettings`).
-    fn next_settings(&self, instance_id: &str, settings: &HeatmapSettings) -> HeatmapSettings {
-        self.registry
-            .update(instance_id, settings, |s| Some(flipped(s)))
-            .unwrap_or_else(|| flipped(settings))
-    }
-
-    async fn flip_view(
+    async fn show_view(
         &self,
         instance: &Instance,
-        settings: &HeatmapSettings,
+        updated: HeatmapSettings,
     ) -> OpenActionResult<()> {
-        let updated = self.next_settings(&instance.instance_id, settings);
+        // Already kept by `release`, so a tick meanwhile draws it.
         if let Err(e) = instance.set_settings(&updated).await {
             log::warn!("could not persist heatmap view: {e}");
         }
@@ -252,18 +249,12 @@ mod tests {
 
     #[test]
     fn feedback_keys_match_the_shipped_layout() {
-        let layout: Value =
-            serde_json::from_str(include_str!("../assets/layouts/chart.json")).unwrap();
-        let keys: Vec<&str> = layout["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|i| i["key"].as_str().unwrap())
-            .collect();
         let d = build_heatmap(&[], &HeatmapSettings::default(), chrono::Utc::now());
-        for k in heatmap_feedback(&d).as_object().unwrap().keys() {
-            assert!(keys.contains(&k.as_str()), "layout has no item keyed {k}");
-        }
+        crate::test_support::assert_feedback_matches_layout(
+            include_str!("../assets/layouts/chart.json"),
+            &heatmap_feedback(&d),
+            &[],
+        );
     }
 
     #[test]
@@ -304,8 +295,9 @@ mod tests {
     /// a dial could never reach the 4-week view.
     #[test]
     fn a_release_flips_when_short_and_refreshes_when_long() {
-        assert_eq!(on_release(Press::Short), Release::Flip);
-        assert_eq!(on_release(Press::Long), Release::Refresh);
+        let s = HeatmapSettings::default();
+        assert_eq!(release(Press::Short, &s), Release::Switch(flipped(&s)));
+        assert_eq!(release(Press::Long, &s), Release::Refresh);
     }
 
     #[test]
@@ -315,6 +307,15 @@ mod tests {
             html.contains("Short press (key or dial)"),
             "hint must mention dials"
         );
+    }
+
+    /// KI-14: the PI re-reads the stored settings before saving, in case
+    /// OpenDeck didn't forward the plugin's press-driven `setSettings`.
+    #[test]
+    fn property_inspector_refreshes_before_saving() {
+        let html = include_str!("../assets/propertyInspector/heatmap.html");
+        assert!(html.contains(r#"event: "getSettings""#));
+        assert!(html.contains("pendingSave"));
     }
 
     #[derive(Clone, Default)]
@@ -334,12 +335,16 @@ mod tests {
         }
     }
 
+    fn action() -> HeatmapAction {
+        let dir = tempfile::tempdir().unwrap();
+        HeatmapAction::new(Arc::new(LogUsageSource::new(dir.path().join("none"))))
+    }
+
     /// KI-07: a flip that lands while the tick awaits the instance lookup
     /// must not be drawn over with the old view.
     #[tokio::test]
     async fn a_view_flipped_during_the_lookup_is_the_one_drawn() {
-        let dir = tempfile::tempdir().unwrap();
-        let action = HeatmapAction::new(Arc::new(LogUsageSource::new(dir.path().to_path_buf())));
+        let action = action();
         let seven = HeatmapSettings::default();
         let four = flipped(&seven);
         action.track("ctx1", &seven);
@@ -361,11 +366,16 @@ mod tests {
     /// before the first - it must flip back, not land on 4 weeks again.
     #[test]
     fn two_fast_presses_flip_twice() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = HeatmapAction::new(Arc::new(LogUsageSource::new(dir.path().to_path_buf())));
+        let a = action();
         let stale = HeatmapSettings::default();
         a.track("ctx1", &stale);
-        assert_eq!(a.next_settings("ctx1", &stale).view, HeatmapView::FourWeeks);
-        assert_eq!(a.next_settings("ctx1", &stale).view, HeatmapView::SevenDays);
+        let Release::Switch(first) = a.release("ctx1", &stale, Press::Short) else {
+            panic!("expected a flip");
+        };
+        let Release::Switch(second) = a.release("ctx1", &stale, Press::Short) else {
+            panic!("expected a flip");
+        };
+        assert_eq!(first.view, HeatmapView::FourWeeks);
+        assert_eq!(second.view, HeatmapView::SevenDays);
     }
 }

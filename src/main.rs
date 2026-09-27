@@ -25,6 +25,8 @@ mod sparkline_action;
 mod style;
 mod styles;
 mod surface;
+#[cfg(test)]
+mod test_support;
 mod tile;
 
 use action::UsageGaugeAction;

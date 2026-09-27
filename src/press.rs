@@ -25,6 +25,25 @@ pub fn classify_press(held: Option<Duration>) -> Press {
     }
 }
 
+/// What a key or dial release does on an action whose short press
+/// switches what it shows: a long press refreshes; a short one switches to
+/// `next`'s settings, or stays put when there is nothing to switch to.
+/// Pure, so each action's press behaviour is testable without an
+/// `Instance`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Release<S> {
+    Refresh,
+    Switch(S),
+    Stay,
+}
+
+pub fn on_release<S>(press: Press, next: impl FnOnce() -> Option<S>) -> Release<S> {
+    match press {
+        Press::Long => Release::Refresh,
+        Press::Short => next().map_or(Release::Stay, Release::Switch),
+    }
+}
+
 /// When each key went down, so `key_up` can classify the press.
 #[derive(Default)]
 pub struct PressTimer {
@@ -91,23 +110,25 @@ impl<S: Clone> LatestSettings<S> {
         self.by_instance.remove(instance_id);
     }
 
-    /// Applies `change` to the kept settings (`fallback` when none are
-    /// kept) and keeps the result, all under one entry lock - so two
-    /// presses handled at once can't both start from the same settings.
-    /// `None` keeps them as they were.
-    pub fn update(
+    /// Decides a release from the kept settings (`fallback` when none are
+    /// kept) and keeps what it switches to, all under one entry lock - so
+    /// two presses handled at once can't both start from the same
+    /// settings.
+    pub fn release(
         &self,
         instance_id: &str,
         fallback: &S,
-        change: impl FnOnce(&S) -> Option<S>,
-    ) -> Option<S> {
+        decide: impl FnOnce(&S) -> Release<S>,
+    ) -> Release<S> {
         let mut entry = self
             .by_instance
             .entry(instance_id.to_string())
             .or_insert_with(|| fallback.clone());
-        let updated = change(&entry)?;
-        *entry = updated.clone();
-        Some(updated)
+        let release = decide(&entry);
+        if let Release::Switch(updated) = &release {
+            *entry = updated.clone();
+        }
+        release
     }
 }
 
@@ -130,6 +151,18 @@ mod tests {
     #[test]
     fn no_key_down_is_short() {
         assert_eq!(classify_press(None), Press::Short);
+    }
+
+    #[test]
+    fn a_long_release_refreshes_without_computing_the_switch() {
+        let r: Release<u8> = on_release(Press::Long, || unreachable!());
+        assert_eq!(r, Release::Refresh);
+    }
+
+    #[test]
+    fn a_short_release_switches_or_stays() {
+        assert_eq!(on_release(Press::Short, || Some(7)), Release::Switch(7));
+        assert_eq!(on_release(Press::Short, || None::<u8>), Release::Stay);
     }
 
     #[test]
@@ -161,26 +194,34 @@ mod tests {
         assert!(t.pressed_at.is_empty());
     }
 
+    fn inc(n: &i32) -> Release<i32> {
+        Release::Switch(n + 1)
+    }
+
     #[test]
-    fn update_starts_from_the_fallback_then_from_the_kept_settings() {
+    fn release_starts_from_the_fallback_then_from_the_kept_settings() {
         let latest = LatestSettings::default();
-        assert_eq!(latest.update("a", &1, |n| Some(n + 1)), Some(2));
-        assert_eq!(latest.update("a", &1, |n| Some(n + 1)), Some(3));
+        assert_eq!(latest.release("a", &1, inc), Release::Switch(2));
+        assert_eq!(latest.release("a", &1, inc), Release::Switch(3));
         assert_eq!(latest.get("a"), Some(3));
     }
 
     #[test]
-    fn a_none_update_keeps_the_settings() {
+    fn a_release_that_does_not_switch_keeps_the_settings() {
         let latest = LatestSettings::default();
         latest.set("a", &5);
-        assert_eq!(latest.update("a", &1, |_| None), None);
+        assert_eq!(
+            latest.release("a", &1, |_| Release::Refresh),
+            Release::Refresh
+        );
+        assert_eq!(latest.release("a", &1, |_| Release::Stay), Release::Stay);
         assert_eq!(latest.current("a", &1), 5);
     }
 
     #[test]
     fn set_overrides_and_forget_falls_back_to_the_event() {
         let latest = LatestSettings::default();
-        latest.update("a", &1, |n| Some(n + 1));
+        latest.release("a", &1, inc);
         latest.set("a", &10);
         assert_eq!(latest.current("a", &1), 10);
         latest.forget("a");

@@ -1,9 +1,10 @@
 {
 	"Name": "Claude Usage",
 	"Author": "jfms7s",
-	"Version": "0.11.1",
+	"Version": "0.12.0",
 	"Category": "Claude",
 	"Icon": "icons/icon",
+	"CategoryIcon": "icons/category",
 	"OS": [{ "Platform": "linux" }],
 	"CodePaths": {
 		"x86_64-unknown-linux-gnu": "opendeck-claude-usage-x86_64-unknown-linux-gnu",
@@ -14,11 +15,11 @@
 		{
 			"UUID": "com.jfms7s.claudeusage.usagegauge",
 			"Name": "Usage Gauge",
-			"Icon": "icons/icon",
+			"Icon": "icons/usagegauge",
 			"Tooltip": "Shows Claude session/weekly/monthly usage and time until reset",
 			"Controllers": ["Encoder", "Keypad"],
 			"PropertyInspectorPath": "propertyInspector/index.html",
-			"States": [{ "Image": "icons/actionDefaultImage" }],
+			"States": [{ "Image": "icons/usagegauge" }],
 			"Encoder": {
 				"layout": "layouts/usage.json"
 			}
@@ -26,29 +27,29 @@
 		{
 			"UUID": "com.jfms7s.claudeusage.peakclock",
 			"Name": "Peak Clock",
-			"Icon": "icons/icon",
+			"Icon": "icons/peakclock",
 			"Tooltip": "Shows a 24h clock with Claude's peak hours marked, whether it's currently peak or off-peak, and time until the next transition",
 			"Controllers": ["Keypad"],
 			"PropertyInspectorPath": "propertyInspector/peakclock.html",
-			"States": [{ "Image": "icons/actionDefaultImage" }]
+			"States": [{ "Image": "icons/peakclock" }]
 		},
 		{
 			"UUID": "com.jfms7s.claudeusage.metrictile",
 			"Name": "Metric Tile",
-			"Icon": "icons/icon",
+			"Icon": "icons/metrictile",
 			"Tooltip": "Shows total Claude Code tokens or estimated cost, parsed from local transcript logs, for today/7 days/the current session",
 			"Controllers": ["Keypad"],
 			"PropertyInspectorPath": "propertyInspector/metrictile.html",
-			"States": [{ "Image": "icons/actionDefaultImage" }]
+			"States": [{ "Image": "icons/metrictile" }]
 		},
 		{
 			"UUID": "com.jfms7s.claudeusage.burnrate",
 			"Name": "Burn Rate",
-			"Icon": "icons/icon",
+			"Icon": "icons/burnrate",
 			"Tooltip": "Shows how fast a Claude usage window is burning: pace per hour/day, even-burn ratio, or runway until empty",
 			"Controllers": ["Encoder", "Keypad"],
 			"PropertyInspectorPath": "propertyInspector/burnrate.html",
-			"States": [{ "Image": "icons/actionDefaultImage" }],
+			"States": [{ "Image": "icons/burnrate" }],
 			"Encoder": {
 				"layout": "layouts/usage.json"
 			}
@@ -56,11 +57,11 @@
 		{
 			"UUID": "com.jfms7s.claudeusage.combo",
 			"Name": "Session + Weekly",
-			"Icon": "icons/icon",
+			"Icon": "icons/combo",
 			"Tooltip": "Shows Claude's 5-hour session and 7-day weekly usage together, as two bars",
 			"Controllers": ["Encoder", "Keypad"],
 			"PropertyInspectorPath": "propertyInspector/combo.html",
-			"States": [{ "Image": "icons/actionDefaultImage" }],
+			"States": [{ "Image": "icons/combo" }],
 			"Encoder": {
 				"layout": "layouts/combo.json"
 			}
@@ -68,11 +69,11 @@
 		{
 			"UUID": "com.jfms7s.claudeusage.heatmap",
 			"Name": "Usage Heatmap",
-			"Icon": "icons/icon",
+			"Icon": "icons/heatmap",
 			"Tooltip": "Shows daily Claude Code tokens or estimated cost over the last 7 days or 4 weeks as heat cells",
 			"Controllers": ["Encoder", "Keypad"],
 			"PropertyInspectorPath": "propertyInspector/heatmap.html",
-			"States": [{ "Image": "icons/actionDefaultImage" }],
+			"States": [{ "Image": "icons/heatmap" }],
 			"Encoder": {
 				"layout": "layouts/chart.json"
 			}
@@ -80,11 +81,11 @@
 		{
 			"UUID": "com.jfms7s.claudeusage.sparkline",
 			"Name": "Usage Sparkline",
-			"Icon": "icons/icon",
+			"Icon": "icons/sparkline",
 			"Tooltip": "Shows a trend line of your Claude session or weekly usage: usage trend, increase per poll, today's increase, or pace vs even burn",
 			"Controllers": ["Encoder", "Keypad"],
 			"PropertyInspectorPath": "propertyInspector/sparkline.html",
-			"States": [{ "Image": "icons/actionDefaultImage" }],
+			"States": [{ "Image": "icons/sparkline" }],
 			"Encoder": {
 				"layout": "layouts/chart.json"
 			}
