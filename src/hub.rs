@@ -24,7 +24,7 @@ use crate::tile;
 /// The wire value OpenDeck sends as `Instance::controller` for a keypad
 /// tile (vs. `"Encoder"` for a dial) - confirmed against openaction 2.7's
 /// own `GenericInstancePayload`, which just forwards this string verbatim.
-const KEYPAD_CONTROLLER: &str = "Keypad";
+pub(crate) const KEYPAD_CONTROLLER: &str = "Keypad";
 
 /// What one instance shows - built from its action's settings.
 #[derive(Debug, Clone, PartialEq)]

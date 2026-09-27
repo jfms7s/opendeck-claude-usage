@@ -64,6 +64,18 @@
 			"Encoder": {
 				"layout": "layouts/combo.json"
 			}
+		},
+		{
+			"UUID": "com.jfms7s.claudeusage.heatmap",
+			"Name": "Usage Heatmap",
+			"Icon": "icons/icon",
+			"Tooltip": "Shows daily Claude Code tokens or estimated cost over the last 7 days or 4 weeks as heat cells",
+			"Controllers": ["Encoder", "Keypad"],
+			"PropertyInspectorPath": "propertyInspector/heatmap.html",
+			"States": [{ "Image": "icons/actionDefaultImage" }],
+			"Encoder": {
+				"layout": "layouts/chart.json"
+			}
 		}
 	]
 }
