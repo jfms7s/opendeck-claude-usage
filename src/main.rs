@@ -6,7 +6,6 @@ mod clock_action;
 mod clock_icon;
 mod format;
 mod hub;
-mod icon;
 mod level;
 mod metric;
 mod metric_action;
@@ -16,6 +15,7 @@ mod peak;
 mod pricing;
 mod source;
 mod style;
+mod styles;
 mod tile;
 
 use action::UsageGaugeAction;

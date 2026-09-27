@@ -14,9 +14,9 @@ use tokio::sync::RwLock;
 use crate::burn::{BurnMetric, build_burn_display, burn_error_display, burn_feedback};
 use crate::burn_icon::build_burn_icon;
 use crate::format::{build_display, error_display, feedback_for_display};
-use crate::icon::build_icon;
 use crate::level::ColorSettings;
 use crate::source::{UsageSnapshot, UsageSource, UsageSourceError, WindowKind};
+use crate::styles::speedometer::build_icon;
 
 /// The wire value OpenDeck sends as `Instance::controller` for a keypad
 /// tile (vs. `"Encoder"` for a dial) - confirmed against openaction 2.7's

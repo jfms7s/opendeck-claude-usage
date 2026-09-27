@@ -68,6 +68,10 @@ pub struct UsageDisplay {
     pub detail_text: String,
     /// Shorter `detail_text` for the keypad tile's second line.
     pub tile_detail: String,
+    /// Uppercase window name for styles that caption the value.
+    pub label: &'static str,
+    /// `percent_text` without the `%` sign, for the donut/ring centers.
+    pub number_text: String,
     /// Clamped to 0..=100 - a genuine >100% (e.g. an overage) still shows as
     /// "105%" in `percent_text`, but an out-of-range bar/gauge value renders
     /// undefined on the actual hardware.
@@ -80,8 +84,16 @@ pub struct UsageDisplay {
 
 /// Computes what to show for one instance's current state, independent of
 /// which controller ends up rendering it. `feedback_for_display` below turns
-/// this into an Encoder's `setFeedback` payload; `icon::build_icon` and a
+/// this into an Encoder's `setFeedback` payload; `styles::build_styled_icon` and a
 /// two-line title turn it into a Keypad tile.
+fn window_label(window: WindowKind) -> &'static str {
+    match window {
+        WindowKind::Session => "SESSION",
+        WindowKind::Weekly => "WEEKLY",
+        WindowKind::Monthly => "MONTHLY",
+    }
+}
+
 pub fn build_display(
     snapshot: &UsageSnapshot,
     window: WindowKind,
@@ -111,6 +123,7 @@ fn window_display(
     let projected = pace(window, kind, now).map(|p| p.projected);
     let level = colors.level(window.percent, projected);
     make_display(
+        window_label(kind),
         window.percent,
         colors.palette.color(level).to_string(),
         detail,
@@ -128,6 +141,8 @@ fn monthly_display(monthly: &MonthlyUsage, colors: &ColorSettings) -> UsageDispl
             color: DISABLED_COLOR.to_string(),
             detail_text: "not enabled".to_string(),
             tile_detail: "not enabled".to_string(),
+            label: "MONTHLY",
+            number_text: "\u{2014}".to_string(),
             bar_value: 0.0,
             marks: colors.marks,
             palette: colors.palette.clone(),
@@ -143,6 +158,7 @@ fn monthly_display(monthly: &MonthlyUsage, colors: &ColorSettings) -> UsageDispl
     };
     let level = colors.level(percent, None);
     make_display(
+        "MONTHLY",
         percent,
         colors.palette.color(level).to_string(),
         detail,
@@ -152,17 +168,21 @@ fn monthly_display(monthly: &MonthlyUsage, colors: &ColorSettings) -> UsageDispl
 }
 
 fn make_display(
+    label: &'static str,
     percent: f64,
     color: String,
     detail_text: String,
     tile_detail: String,
     colors: &ColorSettings,
 ) -> UsageDisplay {
+    let percent_text = format_percent(percent);
     UsageDisplay {
-        percent_text: format_percent(percent),
+        number_text: percent_text.trim_end_matches('%').to_string(),
+        percent_text,
         color,
         detail_text,
         tile_detail,
+        label,
         bar_value: percent.clamp(0.0, 100.0),
         marks: colors.marks,
         palette: colors.palette.clone(),
@@ -192,6 +212,8 @@ pub fn error_display() -> UsageDisplay {
         color: DISABLED_COLOR.to_string(),
         detail_text: "no data".to_string(),
         tile_detail: "no data".to_string(),
+        label: "USAGE",
+        number_text: "\u{2014}".to_string(),
         bar_value: 0.0,
         marks: Marks::default(),
         palette: Palette::default(),
@@ -504,5 +526,40 @@ mod tests {
         };
         let d = build_display(&snapshot(), WindowKind::Monthly, &colors, dt(20, 30, 0));
         assert_eq!(d.color, DEFAULT_NORMAL); // 25%
+    }
+
+    #[test]
+    fn display_labels_each_window() {
+        let s = snapshot();
+        let c = ColorSettings::default();
+        assert_eq!(
+            build_display(&s, WindowKind::Session, &c, dt(20, 30, 0)).label,
+            "SESSION"
+        );
+        assert_eq!(
+            build_display(&s, WindowKind::Weekly, &c, dt(20, 30, 0)).label,
+            "WEEKLY"
+        );
+        assert_eq!(
+            build_display(&s, WindowKind::Monthly, &c, dt(20, 30, 0)).label,
+            "MONTHLY"
+        );
+        assert_eq!(error_display().label, "USAGE");
+    }
+
+    #[test]
+    fn number_text_strips_percent() {
+        let c = ColorSettings::default();
+        assert_eq!(
+            build_display(&snapshot(), WindowKind::Session, &c, dt(20, 30, 0)).number_text,
+            "33"
+        );
+        let mut s = snapshot();
+        s.monthly.enabled = false;
+        assert_eq!(
+            build_display(&s, WindowKind::Monthly, &c, dt(20, 30, 0)).number_text,
+            "\u{2014}"
+        );
+        assert_eq!(error_display().number_text, "\u{2014}");
     }
 }
