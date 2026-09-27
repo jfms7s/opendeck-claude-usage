@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
+use crate::level::{ColorSettings, Marks, Palette};
+use crate::pace::pace;
 use crate::source::{MonthlyUsage, UsageSnapshot, WindowKind, WindowUsage};
 
 pub const DISABLED_COLOR: &str = "#6b7280";
@@ -9,18 +11,6 @@ pub const DISABLED_COLOR: &str = "#6b7280";
 /// convention (`printf "%.0f"`).
 pub fn format_percent(percent: f64) -> String {
     format!("{:.0}%", percent.round())
-}
-
-/// Threshold colors matching the existing statusline convention: green below
-/// 50%, yellow 50-79%, red 80% and up.
-pub fn bar_color(percent: f64) -> &'static str {
-    if percent >= 80.0 {
-        "#ef4444"
-    } else if percent >= 50.0 {
-        "#eab308"
-    } else {
-        "#22c55e"
-    }
 }
 
 /// "resets in Xd Yh" / "resets in Xh Ym" / "resets in Ym" /
@@ -34,18 +24,24 @@ pub fn format_countdown(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> String 
 }
 
 /// The bare remaining time - "Xd Yh" / "Xh Ym" / "Ym" / "<1m" - or `None`
-/// once `resets_at` has passed. Days kick in at 24h so a weekly window
-/// reads "6d 10h" rather than "154h 34m".
+/// once `resets_at` has passed.
 fn format_remaining(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> Option<String> {
     let remaining = resets_at - now;
     if remaining <= chrono::Duration::zero() {
         return None;
     }
-    let total_minutes = remaining.num_minutes();
+    Some(format_duration_compact(remaining))
+}
+
+/// "Xd Yh" / "Xh Ym" / "Ym" / "<1m". Days kick in at 24h so a weekly
+/// window reads "6d 10h" rather than "154h 34m". Shared by the reset
+/// countdown and Burn Rate's runway.
+pub fn format_duration_compact(d: chrono::Duration) -> String {
+    let total_minutes = d.num_minutes();
     let days = total_minutes / (24 * 60);
     let hours = total_minutes / 60 % 24;
     let minutes = total_minutes % 60;
-    Some(if days > 0 {
+    if days > 0 {
         format!("{days}d {hours}h")
     } else if hours > 0 {
         format!("{hours}h {minutes:02}m")
@@ -53,7 +49,7 @@ fn format_remaining(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> Option<Stri
         format!("{minutes}m")
     } else {
         "<1m".to_string()
-    })
+    }
 }
 
 /// Keypad-tile variant of `format_countdown`: the tile has room for about
@@ -68,7 +64,7 @@ fn format_countdown_short(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> Strin
 /// they can never drift apart.
 pub struct UsageDisplay {
     pub percent_text: String,
-    pub color: &'static str,
+    pub color: String,
     pub detail_text: String,
     /// Shorter `detail_text` for the keypad tile's second line.
     pub tile_detail: String,
@@ -76,6 +72,10 @@ pub struct UsageDisplay {
     /// "105%" in `percent_text`, but an out-of-range bar/gauge value renders
     /// undefined on the actual hardware.
     pub bar_value: f64,
+    /// The key's own marks and palette, so the keypad speedometer draws
+    /// its zones where this key's colors actually change.
+    pub marks: Marks,
+    pub palette: Palette,
 }
 
 /// Computes what to show for one instance's current state, independent of
@@ -85,16 +85,22 @@ pub struct UsageDisplay {
 pub fn build_display(
     snapshot: &UsageSnapshot,
     window: WindowKind,
+    colors: &ColorSettings,
     now: DateTime<Utc>,
 ) -> UsageDisplay {
     match window {
-        WindowKind::Session => window_display(&snapshot.session, now),
-        WindowKind::Weekly => window_display(&snapshot.weekly, now),
-        WindowKind::Monthly => monthly_display(&snapshot.monthly),
+        WindowKind::Session => window_display(&snapshot.session, window, colors, now),
+        WindowKind::Weekly => window_display(&snapshot.weekly, window, colors, now),
+        WindowKind::Monthly => monthly_display(&snapshot.monthly, colors),
     }
 }
 
-fn window_display(window: &WindowUsage, now: DateTime<Utc>) -> UsageDisplay {
+fn window_display(
+    window: &WindowUsage,
+    kind: WindowKind,
+    colors: &ColorSettings,
+    now: DateTime<Utc>,
+) -> UsageDisplay {
     let (detail, tile_detail) = match window.resets_at {
         Some(resets_at) => (
             format_countdown(resets_at, now),
@@ -102,22 +108,29 @@ fn window_display(window: &WindowUsage, now: DateTime<Utc>) -> UsageDisplay {
         ),
         None => ("no reset info".to_string(), "\u{2014}".to_string()),
     };
+    let projected = pace(window, kind, now).map(|p| p.projected);
+    let level = colors.level(window.percent, projected);
     make_display(
         window.percent,
-        bar_color(window.percent),
+        colors.palette.color(level).to_string(),
         detail,
         tile_detail,
+        colors,
     )
 }
 
-fn monthly_display(monthly: &MonthlyUsage) -> UsageDisplay {
+/// Monthly has no window length, so it's colored by actual % whatever the
+/// key's color mode says.
+fn monthly_display(monthly: &MonthlyUsage, colors: &ColorSettings) -> UsageDisplay {
     if !monthly.enabled {
         return UsageDisplay {
             percent_text: "\u{2014}".to_string(),
-            color: DISABLED_COLOR,
+            color: DISABLED_COLOR.to_string(),
             detail_text: "not enabled".to_string(),
             tile_detail: "not enabled".to_string(),
             bar_value: 0.0,
+            marks: colors.marks,
+            palette: colors.palette.clone(),
         };
     }
     let percent = monthly.percent.unwrap_or(0.0);
@@ -128,14 +141,22 @@ fn monthly_display(monthly: &MonthlyUsage) -> UsageDisplay {
         ),
         _ => ("spend unavailable".to_string(), "no spend".to_string()),
     };
-    make_display(percent, bar_color(percent), detail, tile_detail)
+    let level = colors.level(percent, None);
+    make_display(
+        percent,
+        colors.palette.color(level).to_string(),
+        detail,
+        tile_detail,
+        colors,
+    )
 }
 
 fn make_display(
     percent: f64,
-    color: &'static str,
+    color: String,
     detail_text: String,
     tile_detail: String,
+    colors: &ColorSettings,
 ) -> UsageDisplay {
     UsageDisplay {
         percent_text: format_percent(percent),
@@ -143,6 +164,8 @@ fn make_display(
         detail_text,
         tile_detail,
         bar_value: percent.clamp(0.0, 100.0),
+        marks: colors.marks,
+        palette: colors.palette.clone(),
     }
 }
 
@@ -166,16 +189,19 @@ pub fn feedback_for_display(display: &UsageDisplay) -> Value {
 pub fn error_display() -> UsageDisplay {
     UsageDisplay {
         percent_text: "\u{2014}".to_string(),
-        color: DISABLED_COLOR,
+        color: DISABLED_COLOR.to_string(),
         detail_text: "no data".to_string(),
         tile_detail: "no data".to_string(),
         bar_value: 0.0,
+        marks: Marks::default(),
+        palette: Palette::default(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::level::{ColorMode, ColorSettings, DEFAULT_NORMAL, DEFAULT_RISK, DEFAULT_WATCH};
     use chrono::TimeZone;
 
     fn dt(hour: u32, minute: u32, second: u32) -> DateTime<Utc> {
@@ -188,16 +214,6 @@ mod tests {
         assert_eq!(format_percent(32.6), "33%");
         assert_eq!(format_percent(0.0), "0%");
         assert_eq!(format_percent(100.0), "100%");
-    }
-
-    #[test]
-    fn bar_color_thresholds() {
-        assert_eq!(bar_color(0.0), "#22c55e");
-        assert_eq!(bar_color(49.9), "#22c55e");
-        assert_eq!(bar_color(50.0), "#eab308");
-        assert_eq!(bar_color(79.9), "#eab308");
-        assert_eq!(bar_color(80.0), "#ef4444");
-        assert_eq!(bar_color(100.0), "#ef4444");
     }
 
     #[test]
@@ -245,6 +261,30 @@ mod tests {
     }
 
     #[test]
+    fn compact_duration_formats() {
+        assert_eq!(
+            format_duration_compact(chrono::Duration::minutes(175)),
+            "2h 55m"
+        );
+        assert_eq!(
+            format_duration_compact(chrono::Duration::hours(22)),
+            "22h 00m"
+        );
+        assert_eq!(
+            format_duration_compact(chrono::Duration::minutes(3 * 24 * 60 + 4 * 60)),
+            "3d 4h"
+        );
+        assert_eq!(
+            format_duration_compact(chrono::Duration::minutes(45)),
+            "45m"
+        );
+        assert_eq!(
+            format_duration_compact(chrono::Duration::seconds(20)),
+            "<1m"
+        );
+    }
+
+    #[test]
     fn countdown_already_passed() {
         assert_eq!(format_countdown(dt(20, 0, 0), dt(20, 30, 0)), "resets now");
         assert_eq!(format_countdown(dt(20, 30, 0), dt(20, 30, 0)), "resets now");
@@ -274,7 +314,12 @@ mod tests {
     // dispatches through `UsageDisplay` instead) - these two just compose
     // the same pipeline for the JSON-shape assertions below.
     fn build_feedback(snapshot: &UsageSnapshot, window: WindowKind, now: DateTime<Utc>) -> Value {
-        feedback_for_display(&build_display(snapshot, window, now))
+        feedback_for_display(&build_display(
+            snapshot,
+            window,
+            &ColorSettings::default(),
+            now,
+        ))
     }
 
     fn error_feedback() -> Value {
@@ -286,7 +331,7 @@ mod tests {
         let feedback = build_feedback(&snapshot(), WindowKind::Session, dt(20, 30, 0));
         assert_eq!(feedback["percent"], "33%");
         assert_eq!(feedback["bar"]["value"], 33.0);
-        assert_eq!(feedback["bar"]["bar_fill_c"], "#22c55e");
+        assert_eq!(feedback["bar"]["bar_fill_c"], DEFAULT_NORMAL);
         assert_eq!(feedback["detail"], "resets in 2h 10m");
     }
 
@@ -294,7 +339,7 @@ mod tests {
     fn builds_weekly_feedback() {
         let feedback = build_feedback(&snapshot(), WindowKind::Weekly, dt(20, 30, 0));
         assert_eq!(feedback["percent"], "29%");
-        assert_eq!(feedback["bar"]["bar_fill_c"], "#22c55e");
+        assert_eq!(feedback["bar"]["bar_fill_c"], DEFAULT_NORMAL);
     }
 
     #[test]
@@ -337,9 +382,14 @@ mod tests {
 
     #[test]
     fn display_session() {
-        let d = build_display(&snapshot(), WindowKind::Session, dt(20, 30, 0));
+        let d = build_display(
+            &snapshot(),
+            WindowKind::Session,
+            &ColorSettings::default(),
+            dt(20, 30, 0),
+        );
         assert_eq!(d.percent_text, "33%");
-        assert_eq!(d.color, "#22c55e");
+        assert_eq!(d.color, DEFAULT_NORMAL);
         assert_eq!(d.detail_text, "resets in 2h 10m");
         assert_eq!(d.tile_detail, "2h 10m");
         assert_eq!(d.bar_value, 33.0);
@@ -347,7 +397,12 @@ mod tests {
 
     #[test]
     fn display_enabled_monthly_tile_detail_is_compact() {
-        let d = build_display(&snapshot(), WindowKind::Monthly, dt(20, 30, 0));
+        let d = build_display(
+            &snapshot(),
+            WindowKind::Monthly,
+            &ColorSettings::default(),
+            dt(20, 30, 0),
+        );
         assert_eq!(d.tile_detail, "$12.50/$50");
     }
 
@@ -360,7 +415,12 @@ mod tests {
             used_dollars: None,
             limit_dollars: None,
         };
-        let d = build_display(&s, WindowKind::Monthly, dt(20, 30, 0));
+        let d = build_display(
+            &s,
+            WindowKind::Monthly,
+            &ColorSettings::default(),
+            dt(20, 30, 0),
+        );
         assert_eq!(d.percent_text, "\u{2014}");
         assert_eq!(d.color, DISABLED_COLOR);
         assert_eq!(d.detail_text, "not enabled");
@@ -370,7 +430,12 @@ mod tests {
     fn display_clamps_bar_value_but_not_percent_text() {
         let mut s = snapshot();
         s.session.percent = 142.0;
-        let d = build_display(&s, WindowKind::Session, dt(20, 30, 0));
+        let d = build_display(
+            &s,
+            WindowKind::Session,
+            &ColorSettings::default(),
+            dt(20, 30, 0),
+        );
         assert_eq!(d.percent_text, "142%");
         assert_eq!(d.bar_value, 100.0);
     }
@@ -381,5 +446,63 @@ mod tests {
         assert_eq!(d.detail_text, "no data");
         assert_eq!(d.bar_value, 0.0);
         assert_eq!(d.color, DISABLED_COLOR);
+    }
+
+    #[test]
+    fn crossing_a_mark_changes_the_color() {
+        let mut s = snapshot();
+        s.session.percent = 60.0;
+        let d = build_display(
+            &s,
+            WindowKind::Session,
+            &ColorSettings::default(),
+            dt(20, 30, 0),
+        );
+        assert_eq!(d.color, DEFAULT_WATCH);
+    }
+
+    #[test]
+    fn custom_palette_is_used() {
+        let mut colors = ColorSettings::default();
+        colors.palette.normal = "#123456".to_string();
+        let d = build_display(&snapshot(), WindowKind::Session, &colors, dt(20, 30, 0));
+        assert_eq!(d.color, "#123456");
+        assert_eq!(d.palette.normal, "#123456");
+    }
+
+    #[test]
+    fn pace_mode_warns_on_fast_burn() {
+        // Session 17:40-22:40; at 18:55 (25% elapsed) 20% used projects to 80% -> Risk.
+        let mut s = snapshot();
+        s.session.percent = 20.0;
+        let colors = ColorSettings {
+            mode: ColorMode::Pace,
+            ..ColorSettings::default()
+        };
+        let d = build_display(&s, WindowKind::Session, &colors, dt(18, 55, 0));
+        assert_eq!(d.color, DEFAULT_RISK);
+    }
+
+    #[test]
+    fn pace_mode_ignores_too_early_projection() {
+        // 5 minutes into the session: 3% would "project" to 180%.
+        let mut s = snapshot();
+        s.session.percent = 3.0;
+        let colors = ColorSettings {
+            mode: ColorMode::Pace,
+            ..ColorSettings::default()
+        };
+        let d = build_display(&s, WindowKind::Session, &colors, dt(17, 45, 0));
+        assert_eq!(d.color, DEFAULT_NORMAL);
+    }
+
+    #[test]
+    fn pace_mode_on_monthly_uses_actual_only() {
+        let colors = ColorSettings {
+            mode: ColorMode::Pace,
+            ..ColorSettings::default()
+        };
+        let d = build_display(&snapshot(), WindowKind::Monthly, &colors, dt(20, 30, 0));
+        assert_eq!(d.color, DEFAULT_NORMAL); // 25%
     }
 }

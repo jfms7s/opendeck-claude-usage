@@ -1,7 +1,7 @@
 # OpenDeck Claude Usage
 
-An [OpenDeck](https://github.com/nekename/OpenDeck) plugin with three actions
-- **Usage Gauge**, **Peak Clock**, and **Metric Tile**. Usage Gauge is
+An [OpenDeck](https://github.com/nekename/OpenDeck) plugin with four actions
+- **Usage Gauge**, **Burn Rate**, **Peak Clock**, and **Metric Tile**. Usage Gauge is
 assignable to a Stream Deck dial or a keypad tile and shows percent used and
 time until reset for one of Claude's usage windows - **Session** (5 hour),
 **Weekly** (7 day), or **Monthly** (pay-as-you-go extra usage spend, if
@@ -9,9 +9,8 @@ enabled on your account).
 
 On a dial, the touch strip shows a live bar, percent, and detail text. On a
 keypad tile (no touch strip), the same data renders as a generated icon on
-a dark card: a speedometer-style gauge - a three-zone semicircle
-(green/yellow/red, at the same 50%/80% thresholds as the dial's bar) with a
-light needle pointing at the current percent - above the percent and a
+a dark card: a speedometer-style gauge - a four-zone semicircle drawn from the key's own
+Watch/Risk/Critical marks and colors (see below) - with a light needle pointing at the current percent - above the percent and a
 compact countdown (e.g. `3h 54m`, `6d 10h`). The text is drawn into the
 icon itself rather than the key's native title, so it looks the same
 whatever title font/size/alignment the key is set to, and needs no custom
@@ -92,6 +91,10 @@ either double-click it (if your file manager associates the extension with
 OpenDeck) or unzip it into `~/.config/opendeck/plugins/` and restart OpenDeck
 (plugins are only loaded at startup).
 
+**Upgrading from 0.6.0:** existing Usage Gauge keys switch from
+green/yellow/red at 50/80% to copper with Watch 50, Risk 75 and Critical
+90. Open a key's **Colors & thresholds** section to change this.
+
 ## Using a dial or tile
 
 1. Add a **Usage Gauge** key on a dial or a keypad tile.
@@ -107,6 +110,28 @@ OpenDeck) or unzip it into `~/.config/opendeck/plugins/` and restart OpenDeck
 3. It updates automatically on that schedule; tap the tile for an
    immediate refresh (this doesn't reset the schedule - the next
    automatic refresh still happens on time).
+
+## Colors & thresholds
+
+Usage Gauge and Burn Rate keys stay a calm copper until usage crosses one
+of three marks you set per key (in % used): **Watch** (default 50),
+**Risk** (75), **Critical** (90), each with its own editable color. Marks
+must increase; if they don't, the defaults are used.
+
+On a Usage Gauge you can also color by **pace**: the key warns at
+whichever level is worse, current usage or the usage you'd reach at reset
+if you keep burning at the current rate. Pace is only computed after 10%
+of the window has passed (earlier projections are noise), and never for
+Monthly.
+
+## Using Burn Rate
+
+1. Add a **Burn Rate** key on a dial or a keypad tile.
+2. Pick the window (Session or Weekly) and what to show:
+   - **Pace**: % used per hour (Session) or per day (Weekly) so far.
+   - **Even burn**: projected usage at reset ÷ 100%, so `1.0x` is exactly on track.
+   - **Runway**: time until 100% at the current rate, or ✓ if it lasts to the reset.
+3. Its color always follows pace. It shows "too early" for the first 10% of a window.
 
 ## Manual smoke-test checklist
 
@@ -135,6 +160,13 @@ development environment, which has no OpenDeck/Stream Deck to test against:
       default 60s). *(not yet verified)*
 - [ ] Tapping a Metric Tile refreshes it immediately without disrupting
       its next scheduled refresh. *(not yet verified)*
+- [ ] Changing a Usage Gauge's marks/colors updates both a dial's bar
+      color and a tile's speedometer zones immediately. *(not yet verified)*
+- [ ] Color-by-pace on a Usage Gauge turns it Watch/Risk earlier during a
+      fast burn, and not during the first 10% of a window. *(not yet verified)*
+- [ ] Burn Rate shows Pace / Even burn / Runway on a key and on a dial for
+      Session and Weekly. *(not yet verified)*
+- [ ] A key upgraded from 0.6.0 keeps its window setting. *(not yet verified)*
 
 ## Development
 

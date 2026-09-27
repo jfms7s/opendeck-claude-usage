@@ -1,18 +1,26 @@
 mod action;
+mod burn;
+mod burn_action;
+mod burn_icon;
 mod clock_action;
 mod clock_icon;
 mod format;
+mod hub;
 mod icon;
+mod level;
 mod metric;
 mod metric_action;
 mod metric_icon;
+mod pace;
 mod peak;
 mod pricing;
 mod source;
 mod tile;
 
 use action::UsageGaugeAction;
+use burn_action::BurnRateAction;
 use clock_action::PeakClockAction;
+use hub::UsageHub;
 use metric_action::MetricTileAction;
 use openaction::{OpenActionResult, register_action, run};
 use source::api::ApiUsageSource;
@@ -25,7 +33,7 @@ async fn main() -> OpenActionResult<()> {
     simplelog::SimpleLogger::init(log::LevelFilter::Info, simplelog::Config::default())
         .expect("logger init");
 
-    // One throttled in-memory source shared by both actions, so the gauges'
+    // One throttled in-memory source shared by every action, so the gauges'
     // ~20s polls, taps and the Metric Tile's Session range together hit
     // Anthropic's usage endpoint at most once a minute - its rate limit is
     // per account and shared with Claude Code's own `/usage`, so failures
@@ -39,9 +47,13 @@ async fn main() -> OpenActionResult<()> {
         },
     );
 
-    let action = UsageGaugeAction::new(usage.clone());
-    let poller = action.clone();
-    tokio::spawn(async move { poller.poll_loop().await });
+    // Every usage-driven action (gauge, burn rate) registers its instances
+    // in this one hub, so a single poll loop serves them all.
+    let hub = UsageHub::new(usage.clone());
+    tokio::spawn(hub.clone().poll_loop());
+
+    let action = UsageGaugeAction::new(hub.clone());
+    let burn_rate = BurnRateAction::new(hub.clone());
 
     let clock = PeakClockAction::new();
     let ticker = clock.clone();
@@ -54,5 +66,6 @@ async fn main() -> OpenActionResult<()> {
     register_action(action).await;
     register_action(clock).await;
     register_action(metric_tile).await;
+    register_action(burn_rate).await;
     run(std::env::args().collect()).await
 }

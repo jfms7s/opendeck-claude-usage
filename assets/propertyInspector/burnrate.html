@@ -18,8 +18,15 @@
 	<select id="window">
 		<option value="session">Session (5 hour)</option>
 		<option value="weekly">Weekly (7 day)</option>
-		<option value="monthly">Monthly (extra usage)</option>
 	</select>
+
+	<label for="metric">Show</label>
+	<select id="metric">
+		<option value="pace">Pace (% per hour / per day)</option>
+		<option value="evenBurn">Even burn (1.0x = on track)</option>
+		<option value="runway">Runway (time until empty)</option>
+	</select>
+	<p class="hint">Colors always follow pace: a fast burn warns before usage itself crosses a mark.</p>
 
 	<div id="colors"></div>
 	<script src="colors.js"></script>
@@ -33,7 +40,7 @@
 		let websocket;
 		let uuid;
 
-		mountColorSection(document.getElementById("colors"), { showMode: true, onChange: sendSettings });
+		mountColorSection(document.getElementById("colors"), { showMode: false, onChange: sendSettings });
 
 		window.connectOpenActionSocketData.then(([inPort, inUUID, inRegisterEvent, inInfo, inActionInfo]) => {
 			uuid = inUUID;
@@ -54,7 +61,8 @@
 		});
 
 		function applySettings(settings) {
-			document.getElementById("window").value = settings.window || "session";
+			document.getElementById("window").value = settings.window === "weekly" ? "weekly" : "session";
+			document.getElementById("metric").value = settings.metric || "pace";
 			applyColorSettings(settings);
 		}
 
@@ -62,11 +70,16 @@
 			websocket.send(JSON.stringify({
 				event: "setSettings",
 				context: uuid,
-				payload: { window: document.getElementById("window").value, ...readColorSettings() },
+				payload: {
+					window: document.getElementById("window").value,
+					metric: document.getElementById("metric").value,
+					...readColorSettings(),
+				},
 			}));
 		}
 
 		document.getElementById("window").addEventListener("change", sendSettings);
+		document.getElementById("metric").addEventListener("change", sendSettings);
 	</script>
 </body>
 </html>
