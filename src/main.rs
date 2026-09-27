@@ -12,6 +12,7 @@ mod metric_action;
 mod metric_icon;
 mod pace;
 mod peak;
+mod press;
 mod pricing;
 mod source;
 mod style;

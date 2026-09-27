@@ -1,8 +1,6 @@
 //! Usage Gauge keypad styles and the short-press cycle through them. Pure,
 //! so the cycle rules and the lenient settings wire format are unit-testable.
 
-use std::time::Duration;
-
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -28,15 +26,6 @@ pub const ALL_STYLES: [GaugeStyle; 6] = [
     GaugeStyle::TrackedDonut,
     GaugeStyle::ThinRing,
 ];
-
-/// Held at least this long, a press refreshes instead of cycling.
-pub const LONG_PRESS: Duration = Duration::from_millis(500);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Press {
-    Short,
-    Long,
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(from = "StyleSettingsWire", into = "StyleSettingsWire")]
@@ -77,16 +66,6 @@ pub fn next_style(current: GaugeStyle, cycle: &[GaugeStyle]) -> Option<GaugeStyl
         Some(i) => cycle[(i + 1) % cycle.len()],
         None => cycle[0],
     })
-}
-
-/// `None` means `key_up` arrived with no recorded `key_down` (e.g. the
-/// plugin restarted mid-press) - treated as the cheaper, reversible short
-/// press.
-pub fn classify_press(held: Option<Duration>) -> Press {
-    match held {
-        Some(d) if d >= LONG_PRESS => Press::Long,
-        _ => Press::Short,
-    }
 }
 
 impl From<StyleSettingsWire> for StyleSettings {
@@ -153,23 +132,6 @@ mod tests {
     fn single_style_cycle_has_no_next() {
         assert_eq!(next_style(Bar, &[Bar]), None);
         assert_eq!(next_style(Bar, &[]), None);
-    }
-
-    #[test]
-    fn press_threshold_is_500ms() {
-        assert_eq!(
-            classify_press(Some(Duration::from_millis(499))),
-            Press::Short
-        );
-        assert_eq!(
-            classify_press(Some(Duration::from_millis(500))),
-            Press::Long
-        );
-    }
-
-    #[test]
-    fn no_key_down_is_short() {
-        assert_eq!(classify_press(None), Press::Short);
     }
 
     #[test]

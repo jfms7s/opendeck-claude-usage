@@ -1,13 +1,12 @@
 use crate::hub::{UsageHub, View};
 use crate::level::ColorSettings;
+use crate::press::{Press, PressTimer};
 use crate::source::WindowKind;
-use crate::style::{Press, StyleSettings, classify_press, next_style};
+use crate::style::{StyleSettings, next_style};
 use async_trait::async_trait;
-use dashmap::DashMap;
 use openaction::{Action, Instance, OpenActionResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UsageGaugeSettings {
@@ -45,16 +44,15 @@ impl UsageGaugeSettings {
 #[derive(Clone)]
 pub struct UsageGaugeAction {
     hub: Arc<UsageHub>,
-    /// When each key went down, so `key_up` can tell a short press (cycle
-    /// style) from a long one (refresh).
-    pressed_at: Arc<DashMap<String, Instant>>,
+    /// Tells a short press (cycle style) from a long one (refresh).
+    presses: Arc<PressTimer>,
 }
 
 impl UsageGaugeAction {
     pub fn new(hub: Arc<UsageHub>) -> Self {
         Self {
             hub,
-            pressed_at: Arc::new(DashMap::new()),
+            presses: Arc::new(PressTimer::default()),
         }
     }
 
@@ -108,7 +106,7 @@ impl Action for UsageGaugeAction {
         instance: &Instance,
         _settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        self.pressed_at.remove(&instance.instance_id);
+        self.presses.forget(&instance.instance_id);
         self.hub.untrack(&instance.instance_id);
         Ok(())
     }
@@ -126,19 +124,14 @@ impl Action for UsageGaugeAction {
         instance: &Instance,
         _settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        self.pressed_at
-            .insert(instance.instance_id.clone(), Instant::now());
+        self.presses.down(&instance.instance_id);
         Ok(())
     }
 
     /// Short press cycles the ticked styles; a long press (>= 500 ms)
     /// forces a refresh, which is what a tap did before styles existed.
     async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-        let held = self
-            .pressed_at
-            .remove(&instance.instance_id)
-            .map(|(_, down)| down.elapsed());
-        match classify_press(held) {
+        match self.presses.up(&instance.instance_id) {
             Press::Long => self.hub.refresh_one(instance, &settings.view()).await,
             Press::Short => self.cycle_style(instance, settings).await,
         }
