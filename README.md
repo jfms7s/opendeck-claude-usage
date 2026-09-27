@@ -143,7 +143,8 @@ touch-strip bar.
 2. Pick the window (Session or Weekly) and what to show:
    - **Pace**: % used per hour (Session) or per day (Weekly) so far.
    - **Even burn**: projected usage at reset ÷ 100%, so `1.0x` is exactly on track.
-   - **Runway**: time until 100% at the current rate, or ✓ if it lasts to the reset.
+   - **Runway**: time until 100% at the current rate, with "lasts to reset" or
+     "runs out early" underneath (∞ when nothing has been used yet).
 3. Its color always follows pace. It shows "too early" for the first 10% of a window.
 
 ## Using Session + Weekly

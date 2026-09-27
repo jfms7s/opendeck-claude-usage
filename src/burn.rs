@@ -96,8 +96,9 @@ fn metric_text(metric: BurnMetric, kind: WindowKind, p: &PaceReading) -> (String
         BurnMetric::EvenBurn => (format!("{:.1}x", p.even_burn), "even burn"),
         BurnMetric::Runway => match p.runway {
             Runway::Empty => ("0".to_string(), "empty"),
-            Runway::LastsToReset => ("\u{2713}".to_string(), "lasts to reset"),
-            Runway::Until(d) => (format_duration_compact(d), "until empty"),
+            Runway::LastsToReset(Some(d)) => (format_duration_compact(d), "lasts to reset"),
+            Runway::LastsToReset(None) => ("\u{221e}".to_string(), "lasts to reset"),
+            Runway::Until(d) => (format_duration_compact(d), "runs out early"),
         },
     };
     (value, subtitle.to_string())
@@ -201,7 +202,7 @@ mod tests {
         let d = build(WindowKind::Session, BurnMetric::Runway, at(13, 18, 55));
         assert_eq!(d.label, "RUNWAY");
         assert_eq!(d.value_text, "2h 55m");
-        assert_eq!(d.subtitle, "until empty");
+        assert_eq!(d.subtitle, "runs out early");
     }
 
     #[test]
@@ -213,7 +214,21 @@ mod tests {
             &ColorSettings::default(),
             at(13, 20, 10),
         );
-        assert_eq!(d.value_text, "\u{2713}");
+        // 4%/h needs 22.5h for the remaining 90% - past the 22:40 reset.
+        assert_eq!(d.value_text, "22h 30m");
+        assert_eq!(d.subtitle, "lasts to reset");
+    }
+
+    #[test]
+    fn runway_with_nothing_used_is_infinite() {
+        let d = build_burn_display(
+            &snapshot(0.0),
+            WindowKind::Session,
+            BurnMetric::Runway,
+            &ColorSettings::default(),
+            at(13, 20, 10),
+        );
+        assert_eq!(d.value_text, "\u{221e}");
         assert_eq!(d.subtitle, "lasts to reset");
     }
 
