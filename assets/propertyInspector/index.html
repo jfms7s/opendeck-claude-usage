@@ -65,7 +65,15 @@
 			websocket.onmessage = (event) => {
 				const message = JSON.parse(event.data);
 				if (message.event === "didReceiveSettings") {
-					applySettings(message.payload.settings || {});
+					const settings = message.payload.settings || {};
+					if (pendingSave) {
+						// The reply to our getSettings: only the pass-through
+						// value is refreshed, so the edit being saved is kept.
+						storedStyle = settings.style;
+						saveSettings();
+					} else {
+						applySettings(settings);
+					}
 				}
 			};
 		});
@@ -82,7 +90,21 @@
 			styleBoxes().forEach((box) => { box.checked = cycle.includes(box.value); });
 		}
 
+		// OpenDeck may not forward the plugin's own setSettings (a press
+		// changing the gauge style) to an open PI, so the gauge style held here can be
+		// stale. Re-read the stored settings before saving; if no reply
+		// comes, save with what we have.
+		let pendingSave = null;
+
 		function sendSettings() {
+			if (pendingSave) return; // the pending save reads the form when it sends
+			pendingSave = setTimeout(saveSettings, 500);
+			websocket.send(JSON.stringify({ event: "getSettings", context: uuid }));
+		}
+
+		function saveSettings() {
+			clearTimeout(pendingSave);
+			pendingSave = null;
 			websocket.send(JSON.stringify({
 				event: "setSettings",
 				context: uuid,

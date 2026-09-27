@@ -358,4 +358,31 @@ mod tests {
             assert!(js.contains(&needle), "colors.js is missing `{needle}`");
         }
     }
+
+    /// KI-11: a stored color that isn't `#rrggbb` must show (and save) the
+    /// default, not the `#000000` an `<input type=color>` falls back to.
+    #[test]
+    fn property_inspector_validates_stored_colors() {
+        let js = include_str!("../assets/propertyInspector/colors.js");
+        assert!(js.contains("function isHexColor"));
+        assert!(js.contains("isHexColor(value)"));
+    }
+
+    /// KI-12: saving must leave untouched default fields out, so a later
+    /// release can change the defaults for keys that never set them.
+    #[test]
+    fn property_inspector_saves_only_changed_color_fields() {
+        let js = include_str!("../assets/propertyInspector/colors.js");
+        assert!(js.contains("touchedColorFields"));
+        assert!(js.contains("isDefaultColorValue"));
+    }
+
+    /// KI-13: marks that aren't increasing get an inline warning, since
+    /// the plugin silently swaps in the defaults.
+    #[test]
+    fn property_inspector_warns_on_non_increasing_marks() {
+        let js = include_str!("../assets/propertyInspector/colors.js");
+        assert!(js.contains(r#"id="marksWarning""#));
+        assert!(js.contains("function updateMarksWarning"));
+    }
 }

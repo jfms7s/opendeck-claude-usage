@@ -34,11 +34,11 @@ design; no fix planned)
 | ID | Issue | Where | Status |
 |---|---|---|---|
 | KI-10 ⭐ | An unknown saved Burn Rate `metric` leaves the select empty. The next edit sends `""`, and openaction then resets every setting, colors included. | `assets/propertyInspector/burnrate.html` | fixed in v0.11.1 |
-| KI-11 | An invalid saved color shows as `#000000` in `<input type=color>` and is saved as black on the next edit. | `assets/propertyInspector/colors.js` | open |
-| KI-12 | The first edit saves all eight color fields, which pins today's defaults if a later release changes them. | `assets/propertyInspector/colors.js` | open |
-| KI-13 | Threshold marks that aren't increasing get no inline warning; the key quietly uses the defaults. | `assets/propertyInspector/colors.js` | open |
-| KI-14 | The PI passes a stale value through if OpenDeck doesn't forward the plugin's `setSettings` to an open PI. That value is the gauge `style`, Heatmap `view` or Sparkline `series`. Saving the PI then undoes the press-picked choice. It is visual only, and one press fixes it. | gauge / heatmap / sparkline PIs | open |
-| KI-15 | The Combo PI hint is longer than the spec's wording. | `assets/propertyInspector/combo.html` | open |
+| KI-11 | An invalid saved color shows as `#000000` in `<input type=color>` and is saved as black on the next edit. | `assets/propertyInspector/colors.js` | fixed in v0.11.2 |
+| KI-12 | The first edit saves all eight color fields, which pins today's defaults if a later release changes them. | `assets/propertyInspector/colors.js` | fixed in v0.11.2 |
+| KI-13 | Threshold marks that aren't increasing get no inline warning; the key quietly uses the defaults. | `assets/propertyInspector/colors.js` | fixed in v0.11.2 |
+| KI-14 | The PI passes a stale value through if OpenDeck doesn't forward the plugin's `setSettings` to an open PI. That value is the gauge `style`, Heatmap `view` or Sparkline `series`. Saving the PI then undoes the press-picked choice. It is visual only, and one press fixes it. | gauge / heatmap / sparkline PIs | fixed in v0.11.2 |
+| KI-15 | The Combo PI hint is longer than the spec's wording. | `assets/propertyInspector/combo.html` | fixed in v0.11.2 |
 
 ## History file
 

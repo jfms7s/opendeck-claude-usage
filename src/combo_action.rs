@@ -217,4 +217,22 @@ mod tests {
         assert!(html.contains("showMode: true"));
         assert!(html.contains("storedLayout"));
     }
+
+    /// KI-14: the PI re-reads the stored settings before saving, in case
+    /// OpenDeck didn't forward the plugin's press-driven `setSettings`.
+    #[test]
+    fn property_inspector_refreshes_before_saving() {
+        let html = include_str!("../assets/propertyInspector/combo.html");
+        assert!(html.contains(r#"event: "getSettings""#));
+        assert!(html.contains("pendingSave"));
+    }
+
+    /// KI-15: the hint uses the spec's wording.
+    #[test]
+    fn property_inspector_hint_matches_the_spec() {
+        let html = include_str!("../assets/propertyInspector/combo.html");
+        assert!(html.contains(
+            r#"<p class="hint">Short press flips between horizontal and vertical. Hold to refresh.</p>"#
+        ));
+    }
 }

@@ -268,4 +268,13 @@ mod tests {
         assert_eq!(back.styles, s.styles);
         assert_eq!(back.colors, s.colors);
     }
+
+    /// KI-14: the PI re-reads the stored settings before saving, in case
+    /// OpenDeck didn't forward the plugin's press-driven `setSettings`.
+    #[test]
+    fn property_inspector_refreshes_before_saving() {
+        let html = include_str!("../assets/propertyInspector/index.html");
+        assert!(html.contains(r#"event: "getSettings""#));
+        assert!(html.contains("pendingSave"));
+    }
 }
