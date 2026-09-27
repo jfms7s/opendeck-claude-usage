@@ -25,6 +25,25 @@ pub fn classify_press(held: Option<Duration>) -> Press {
     }
 }
 
+/// What a key or dial release does on an action whose short press
+/// switches what it shows: a long press refreshes; a short one switches to
+/// `next`'s settings, or stays put when there is nothing to switch to.
+/// Pure, so each action's press behaviour is testable without an
+/// `Instance`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Release<S> {
+    Refresh,
+    Switch(S),
+    Stay,
+}
+
+pub fn on_release<S>(press: Press, next: impl FnOnce() -> Option<S>) -> Release<S> {
+    match press {
+        Press::Long => Release::Refresh,
+        Press::Short => next().map_or(Release::Stay, Release::Switch),
+    }
+}
+
 /// When each key went down, so `key_up` can classify the press.
 #[derive(Default)]
 pub struct PressTimer {
@@ -71,6 +90,18 @@ mod tests {
     #[test]
     fn no_key_down_is_short() {
         assert_eq!(classify_press(None), Press::Short);
+    }
+
+    #[test]
+    fn a_long_release_refreshes_without_computing_the_switch() {
+        let r: Release<u8> = on_release(Press::Long, || unreachable!());
+        assert_eq!(r, Release::Refresh);
+    }
+
+    #[test]
+    fn a_short_release_switches_or_stays() {
+        assert_eq!(on_release(Press::Short, || Some(7)), Release::Switch(7));
+        assert_eq!(on_release(Press::Short, || None::<u8>), Release::Stay);
     }
 
     #[test]

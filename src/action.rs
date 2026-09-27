@@ -1,6 +1,6 @@
 use crate::hub::{UsageHub, View};
 use crate::level::ColorSettings;
-use crate::press::{Press, PressTimer};
+use crate::press::{Press, PressTimer, Release, on_release};
 use crate::source::WindowKind;
 use crate::style::{StyleSettings, next_style};
 use async_trait::async_trait;
@@ -39,6 +39,13 @@ impl UsageGaugeSettings {
         updated.styles.style = next;
         Some(updated)
     }
+
+    /// Short press cycles the ticked styles (nothing to cycle with one);
+    /// a long press (>= 500 ms) forces a refresh, which is what a tap did
+    /// before styles existed.
+    fn release(&self, press: Press) -> Release<UsageGaugeSettings> {
+        on_release(press, || self.cycled())
+    }
 }
 
 #[derive(Clone)]
@@ -59,14 +66,11 @@ impl UsageGaugeAction {
     /// Switches to the next ticked style: persists it (so it survives an
     /// OpenDeck restart), re-tracks the view for the poll loop, and redraws
     /// from the cached snapshot - instant, no API call.
-    async fn cycle_style(
+    async fn show_style(
         &self,
         instance: &Instance,
-        settings: &UsageGaugeSettings,
+        updated: UsageGaugeSettings,
     ) -> OpenActionResult<()> {
-        let Some(updated) = settings.cycled() else {
-            return Ok(());
-        };
         if let Err(e) = instance.set_settings(&updated).await {
             log::warn!("could not persist gauge style: {e}");
         }
@@ -128,12 +132,11 @@ impl Action for UsageGaugeAction {
         Ok(())
     }
 
-    /// Short press cycles the ticked styles; a long press (>= 500 ms)
-    /// forces a refresh, which is what a tap did before styles existed.
     async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-        match self.presses.up(&instance.instance_id) {
-            Press::Long => self.hub.refresh_one(instance, &settings.view()).await,
-            Press::Short => self.cycle_style(instance, settings).await,
+        match settings.release(self.presses.up(&instance.instance_id)) {
+            Release::Refresh => self.hub.refresh_one(instance, &settings.view()).await,
+            Release::Switch(updated) => self.show_style(instance, updated).await,
+            Release::Stay => Ok(()),
         }
     }
 }
@@ -146,18 +149,12 @@ mod tests {
 
     #[test]
     fn feedback_keys_match_the_shipped_layout() {
-        let layout: serde_json::Value =
-            serde_json::from_str(include_str!("../assets/layouts/usage.json")).unwrap();
-        let keys: Vec<&str> = layout["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|i| i["key"].as_str().unwrap())
-            .collect();
         let feedback = feedback_for_display(&error_display());
-        for k in feedback.as_object().unwrap().keys() {
-            assert!(keys.contains(&k.as_str()), "layout has no item keyed {k}");
-        }
+        crate::test_support::assert_feedback_matches_layout(
+            include_str!("../assets/layouts/usage.json"),
+            &feedback,
+            &[],
+        );
     }
 
     #[test]
@@ -252,6 +249,28 @@ mod tests {
     fn cycled_is_none_with_one_style() {
         let s: UsageGaugeSettings = serde_json::from_str(r#"{"cycleStyles":["bar"]}"#).unwrap();
         assert!(s.cycled().is_none());
+    }
+
+    #[test]
+    fn a_short_release_switches_to_the_next_style() {
+        let s: UsageGaugeSettings =
+            serde_json::from_str(r#"{"style":"bar","cycleStyles":["bar","openDonut"]}"#).unwrap();
+        let Release::Switch(next) = s.release(Press::Short) else {
+            panic!("expected a switch");
+        };
+        assert_eq!(next.styles.style, GaugeStyle::OpenDonut);
+    }
+
+    #[test]
+    fn a_short_release_with_one_style_stays() {
+        let s: UsageGaugeSettings = serde_json::from_str(r#"{"cycleStyles":["bar"]}"#).unwrap();
+        assert!(matches!(s.release(Press::Short), Release::Stay));
+    }
+
+    #[test]
+    fn a_long_release_refreshes() {
+        let s = UsageGaugeSettings::default();
+        assert!(matches!(s.release(Press::Long), Release::Refresh));
     }
 
     #[test]

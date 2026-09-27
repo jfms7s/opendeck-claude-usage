@@ -1,7 +1,7 @@
 use crate::combo::LayoutSettings;
 use crate::hub::{UsageHub, View};
 use crate::level::ColorSettings;
-use crate::press::{Press, PressTimer};
+use crate::press::{Press, PressTimer, Release, on_release};
 use async_trait::async_trait;
 use openaction::{Action, Instance, OpenActionResult};
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,11 @@ impl ComboSettings {
         updated.layout.layout = self.layout.layout.flipped();
         updated
     }
+
+    /// Short press flips horizontal/vertical; a long press refreshes.
+    fn release(&self, press: Press) -> Release<ComboSettings> {
+        on_release(press, || Some(self.flipped()))
+    }
 }
 
 #[derive(Clone)]
@@ -50,12 +55,11 @@ impl ComboAction {
 
     /// Switches to the other layout: persists it (survives restarts),
     /// re-tracks the view for the poll loop, redraws from the cache.
-    async fn flip_layout(
+    async fn show_layout(
         &self,
         instance: &Instance,
-        settings: &ComboSettings,
+        updated: ComboSettings,
     ) -> OpenActionResult<()> {
-        let updated = settings.flipped();
         if let Err(e) = instance.set_settings(&updated).await {
             log::warn!("could not persist combo layout: {e}");
         }
@@ -117,11 +121,11 @@ impl Action for ComboAction {
         Ok(())
     }
 
-    /// Short press flips horizontal/vertical; a long press refreshes.
     async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-        match self.presses.up(&instance.instance_id) {
-            Press::Long => self.hub.refresh_one(instance, &settings.view()).await,
-            Press::Short => self.flip_layout(instance, settings).await,
+        match settings.release(self.presses.up(&instance.instance_id)) {
+            Release::Refresh => self.hub.refresh_one(instance, &settings.view()).await,
+            Release::Switch(updated) => self.show_layout(instance, updated).await,
+            Release::Stay => Ok(()),
         }
     }
 }
@@ -150,18 +154,12 @@ mod tests {
 
     #[test]
     fn feedback_keys_match_the_shipped_layout() {
-        let layout: serde_json::Value =
-            serde_json::from_str(include_str!("../assets/layouts/combo.json")).unwrap();
-        let keys: Vec<&str> = layout["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|i| i["key"].as_str().unwrap())
-            .collect();
         let feedback = combo_feedback(&error_display(), &error_display());
-        for k in feedback.as_object().unwrap().keys() {
-            assert!(keys.contains(&k.as_str()), "layout has no item keyed {k}");
-        }
+        crate::test_support::assert_feedback_matches_layout(
+            include_str!("../assets/layouts/combo.json"),
+            &feedback,
+            &["s_label", "w_label"],
+        );
     }
 
     #[test]
@@ -195,6 +193,16 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_release_flips_when_short_and_refreshes_when_long() {
+        let s = ComboSettings::default();
+        let Release::Switch(next) = s.release(Press::Short) else {
+            panic!("expected a switch");
+        };
+        assert_eq!(next.layout.layout, ComboLayout::Vertical);
+        assert!(matches!(s.release(Press::Long), Release::Refresh));
     }
 
     #[test]
