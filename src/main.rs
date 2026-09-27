@@ -7,6 +7,7 @@ mod clock_icon;
 mod combo;
 mod combo_action;
 mod format;
+mod heatmap;
 mod hub;
 mod level;
 mod metric;
