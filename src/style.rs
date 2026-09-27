@@ -210,4 +210,16 @@ mod tests {
         let back: StyleSettings = serde_json::from_value(v).unwrap();
         assert_eq!(back, s);
     }
+
+    /// The Property Inspector's checkboxes must offer exactly the wire
+    /// names the plugin accepts.
+    #[test]
+    fn property_inspector_lists_every_style() {
+        let html = include_str!("../assets/propertyInspector/index.html");
+        for style in ALL_STYLES {
+            let name = serde_json::to_value(style).unwrap();
+            let needle = format!(r#"value="{}""#, name.as_str().unwrap());
+            assert!(html.contains(&needle), "index.html is missing {needle}");
+        }
+    }
 }
