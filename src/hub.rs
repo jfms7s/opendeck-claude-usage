@@ -173,11 +173,19 @@ impl UsageHub {
         let output = output_for(
             view,
             snapshot.as_ref(),
-            &self.history.readings(),
+            &self.history_for(view),
             instance.is_keypad(),
             Utc::now(),
         );
         instance.push(output).await
+    }
+
+    /// The recorded readings, copied only for the one view that plots them.
+    fn history_for(&self, view: &View) -> Vec<Reading> {
+        match view {
+            View::Sparkline { .. } => self.history.readings(),
+            _ => Vec::new(),
+        }
     }
 
     /// Reads the source and caches it on success - shared by `refresh_one`
@@ -201,7 +209,7 @@ impl UsageHub {
         let output = output_for(
             view,
             result.as_ref().ok(),
-            &self.history.readings(),
+            &self.history_for(view),
             instance.is_keypad(),
             Utc::now(),
         );
@@ -254,7 +262,7 @@ impl UsageHub {
                 let output = output_for(
                     &view,
                     snapshot,
-                    &self.history.readings(),
+                    &self.history_for(&view),
                     instance.is_keypad(),
                     Utc::now(),
                 );
@@ -527,6 +535,17 @@ mod tests {
         hub.read_and_cache().await.unwrap();
         assert_eq!(history.readings().len(), 1);
         assert_eq!(history.readings()[0].session, 33.0);
+    }
+
+    #[tokio::test]
+    async fn only_a_sparkline_gets_the_history() {
+        let history = HistoryStore::in_memory();
+        let hub = UsageHub::new(AlwaysOk, history.clone());
+        hub.read_and_cache().await.unwrap();
+        assert_eq!(hub.history_for(&sparkline_view()).len(), 1);
+        for view in [gauge(), burn()] {
+            assert!(hub.history_for(&view).is_empty());
+        }
     }
 
     fn sparkline_view() -> View {

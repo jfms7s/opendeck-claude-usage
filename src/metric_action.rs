@@ -1,6 +1,6 @@
 use crate::metric::{MetricKind, RangeKind};
 use crate::source::UsageSource;
-use crate::source::logs::LogUsageSource;
+use crate::source::logs::{LogEntry, LogUsageSource};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use openaction::{Action, Instance, OpenActionResult};
@@ -67,18 +67,17 @@ impl MetricTileAction {
         self.registry.remove(instance_id);
     }
 
-    /// Reads the log source and (for the Session range) the shared
-    /// usage source's session reset time, then renders one instance -
-    /// used by `will_appear`/`did_receive_settings` (so a tile shows
+    /// Renders one instance from already-scanned log entries (so a tick
+    /// scans once for all its due instances) and, for the Session range,
+    /// the shared usage source's session reset time - used by `will_appear`/`did_receive_settings` (so a tile shows
     /// real data immediately), `key_up` (tap-to-refresh), and the tick
     /// loop.
     async fn render(
         instance: &Instance,
-        log_source: &LogUsageSource,
+        entries: &[LogEntry],
         session_source: &dyn UsageSource,
         settings: &MetricTileSettings,
     ) -> OpenActionResult<()> {
-        let entries = log_source.entries().await;
         let display = if entries.is_empty() {
             crate::metric::error_display()
         } else {
@@ -92,7 +91,7 @@ impl MetricTileAction {
                 None
             };
             crate::metric::build_metric_display(
-                &entries,
+                entries,
                 settings.metric,
                 settings.range,
                 chrono::Utc::now(),
@@ -133,6 +132,8 @@ impl MetricTileAction {
             .map(|e| (e.key().clone(), e.next_due))
             .collect();
 
+        // Scanned at most once per tick, however many instances are due.
+        let mut scanned = None;
         for instance_id in due_instance_ids(&snapshot, now) {
             let Some(settings) = self.registry.get(&instance_id).map(|t| t.settings.clone()) else {
                 continue; // removed between the snapshot and now
@@ -144,13 +145,12 @@ impl MetricTileAction {
             let Some(instance) = openaction::get_instance(instance_id).await else {
                 continue; // instance disappeared between the snapshot and now
             };
-            if let Err(e) = Self::render(
-                &instance,
-                &self.log_source,
-                &*self.session_source,
-                &settings,
-            )
-            .await
+            let entries = match &scanned {
+                Some(entries) => Arc::clone(entries),
+                None => Arc::clone(scanned.insert(self.log_source.entries().await)),
+            };
+            if let Err(e) =
+                Self::render(&instance, &entries, &*self.session_source, &settings).await
             {
                 log::warn!("metric tile render failed: {e}");
             }
@@ -180,7 +180,8 @@ impl Action for MetricTileAction {
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
         self.track(&instance.instance_id, settings.clone());
-        Self::render(instance, &self.log_source, &*self.session_source, settings).await
+        let entries = self.log_source.entries().await;
+        Self::render(instance, &entries, &*self.session_source, settings).await
     }
 
     async fn did_receive_settings(
@@ -189,7 +190,8 @@ impl Action for MetricTileAction {
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
         self.track(&instance.instance_id, settings.clone());
-        Self::render(instance, &self.log_source, &*self.session_source, settings).await
+        let entries = self.log_source.entries().await;
+        Self::render(instance, &entries, &*self.session_source, settings).await
     }
 
     async fn will_disappear(
@@ -206,7 +208,8 @@ impl Action for MetricTileAction {
     /// `next_due`, since a tap is a bonus refresh, not a reason to skip
     /// the next one.
     async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-        Self::render(instance, &self.log_source, &*self.session_source, settings).await
+        let entries = self.log_source.entries().await;
+        Self::render(instance, &entries, &*self.session_source, settings).await
     }
 }
 
