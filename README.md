@@ -1,7 +1,8 @@
 # OpenDeck Claude Usage
 
-An [OpenDeck](https://github.com/nekename/OpenDeck) plugin with four actions
-- **Usage Gauge**, **Burn Rate**, **Peak Clock**, and **Metric Tile**. Usage Gauge is
+An [OpenDeck](https://github.com/nekename/OpenDeck) plugin with five actions
+- **Usage Gauge**, **Session + Weekly**, **Burn Rate**, **Peak Clock**, and
+**Metric Tile**. Usage Gauge is
 assignable to a Stream Deck dial or a keypad tile and shows percent used and
 time until reset for one of Claude's usage windows - **Session** (5 hour),
 **Weekly** (7 day), or **Monthly** (pay-as-you-go extra usage spend, if
@@ -144,6 +145,18 @@ touch-strip bar.
    - **Runway**: time until 100% at the current rate, or ✓ if it lasts to the reset.
 3. Its color always follows pace. It shows "too early" for the first 10% of a window.
 
+## Using Session + Weekly
+
+1. Add a **Session + Weekly** key on a dial or a keypad tile.
+2. On a key it shows both windows at once: as two rows with bars and reset
+   times (horizontal) or as two tall bars (vertical). A short press flips
+   between them and the key remembers its layout; hold half a second to
+   refresh.
+3. On a dial the touch strip shows two bars, 5h and 7d, each with its
+   percent and time until reset; press the dial to refresh.
+4. Both bars share one set of marks and colors (**Colors & thresholds**),
+   but each is colored by its own usage.
+
 ## Manual smoke-test checklist
 
 Run this against a live OpenDeck + Stream Deck XL+ session before cutting a
@@ -186,6 +199,12 @@ development environment, which has no OpenDeck/Stream Deck to test against:
       *(not yet verified)*
 - [ ] With fewer than two styles ticked, a short press does nothing.
       *(not yet verified)*
+- [ ] Session + Weekly shows both layouts on a key with each bar in its
+      own level color and tick marks at the marks. *(not yet verified)*
+- [ ] A short press flips the layout and it survives an OpenDeck restart;
+      holding refreshes. *(not yet verified)*
+- [ ] On a dial the touch strip shows the 5h and 7d bars with percent and
+      reset time. *(not yet verified)*
 
 ## Development
 

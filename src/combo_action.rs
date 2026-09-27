@@ -207,4 +207,14 @@ mod tests {
         assert_eq!(back.layout, s.layout);
         assert_eq!(back.colors, s.colors);
     }
+
+    /// The PI must load the shared colors section and pass the stored
+    /// layout through, or saving it would reset the layout.
+    #[test]
+    fn property_inspector_mounts_colors_and_keeps_layout() {
+        let html = include_str!("../assets/propertyInspector/combo.html");
+        assert!(html.contains(r#"<script src="colors.js"></script>"#));
+        assert!(html.contains("showMode: true"));
+        assert!(html.contains("storedLayout"));
+    }
 }

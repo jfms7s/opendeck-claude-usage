@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<style>
+		body { font: 12px system-ui, sans-serif; margin: 0; padding: 8px 12px; }
+		label { display: block; margin-top: 10px; font-size: 11px; opacity: 0.8; }
+		select, input { width: 100%; box-sizing: border-box; margin-top: 2px; }
+		details { margin-top: 12px; }
+		summary { cursor: pointer; font-size: 11px; opacity: 0.8; }
+		.hint { font-size: 10px; opacity: 0.6; }
+		button { margin-top: 8px; }
+	</style>
+</head>
+<body>
+	<p class="hint">Shows the 5-hour session and 7-day weekly windows together. On a key, a short press flips between horizontal and vertical; hold to refresh.</p>
+
+	<div id="colors"></div>
+	<script src="colors.js"></script>
+
+	<script>
+		window.connectOpenActionSocketData = new Promise((resolve) => {
+			window.connectOpenActionSocket = (...args) => resolve(args);
+			window.connectElgatoStreamDeckSocket = window.connectOpenActionSocket;
+		});
+
+		let websocket;
+		let uuid;
+		let storedLayout;
+
+		mountColorSection(document.getElementById("colors"), { showMode: true, onChange: sendSettings });
+
+		window.connectOpenActionSocketData.then(([inPort, inUUID, inRegisterEvent, inInfo, inActionInfo]) => {
+			uuid = inUUID;
+			const actionInfo = JSON.parse(inActionInfo);
+			websocket = new WebSocket(`ws://127.0.0.1:${inPort}`);
+
+			websocket.onopen = () => {
+				websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
+				applySettings(actionInfo.payload.settings || {});
+			};
+
+			websocket.onmessage = (event) => {
+				const message = JSON.parse(event.data);
+				if (message.event === "didReceiveSettings") {
+					applySettings(message.payload.settings || {});
+				}
+			};
+		});
+
+		function applySettings(settings) {
+			storedLayout = settings.layout;
+			applyColorSettings(settings);
+		}
+
+		function sendSettings() {
+			websocket.send(JSON.stringify({
+				event: "setSettings",
+				context: uuid,
+				payload: {
+					...readColorSettings(),
+					// The layout changes only by pressing the key; pass it
+					// through untouched so saving here doesn't reset it.
+					...(storedLayout ? { layout: storedLayout } : {}),
+				},
+			}));
+		}
+	</script>
+</body>
+</html>
