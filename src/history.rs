@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::source::UsageSnapshot;
@@ -169,17 +169,24 @@ impl HistoryStore {
     /// readings have been pruned, rewrites the file with only the kept
     /// ones. File I/O happens under the lock so an append can't slip in
     /// between a rewrite's snapshot and its rename.
-    pub fn record(&self, snapshot: &UsageSnapshot, now: DateTime<Utc>) {
+    ///
+    /// An unchanged reading is skipped - except the first one on a new day
+    /// in `now`'s time zone, which marks the usage at midnight for the
+    /// sparkline's "Today".
+    pub fn record<Tz: TimeZone>(&self, snapshot: &UsageSnapshot, now: DateTime<Tz>) {
+        let tz = now.timezone();
+        let day = |at: DateTime<Utc>| at.with_timezone(&tz).date_naive();
+        let now = now.with_timezone(&Utc);
         let reading = Reading::from_snapshot(snapshot, now);
         let mut readings = self.readings.lock().unwrap();
         // Inserted in time order: two racing refreshes or a clock jump
         // can hand us a reading older than the last one kept. The file
         // is still appended to; `load` sorts it.
         let index = readings.partition_point(|r| r.at <= reading.at);
-        if index
-            .checked_sub(1)
-            .is_some_and(|before| readings[before].same_values(&reading))
-        {
+        if index.checked_sub(1).is_some_and(|before| {
+            let before = &readings[before];
+            before.same_values(&reading) && day(before.at) == day(reading.at)
+        }) {
             return;
         }
         readings.insert(index, reading.clone());
@@ -392,6 +399,29 @@ mod tests {
         store.record(&snapshot(30.0, 1.0), at(10));
         store.record(&snapshot(10.0, 1.0), at(9));
         assert_eq!(store.readings().len(), 2);
+    }
+
+    /// The first reading of each local day is kept even when nothing
+    /// changed, so "Today" knows the usage at (within a poll of) midnight.
+    #[test]
+    fn the_first_reading_of_a_local_day_is_kept_even_if_unchanged() {
+        let plus2 = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+        let store = HistoryStore::in_memory();
+        // 23:00 on the 30th local, then 00:01 and 00:05 on the 1st.
+        store.record(&snapshot(40.0, 20.0), at(21).with_timezone(&plus2));
+        let after_midnight = at(22) + Duration::minutes(1);
+        store.record(&snapshot(40.0, 20.0), after_midnight.with_timezone(&plus2));
+        store.record(
+            &snapshot(40.0, 20.0),
+            (at(22) + Duration::minutes(5)).with_timezone(&plus2),
+        );
+        let times: Vec<_> = store.readings().iter().map(|r| r.at).collect();
+        assert_eq!(times, vec![at(21), after_midnight]);
+        // The same instants are all on the 30th in UTC: nothing new is kept.
+        let utc = HistoryStore::in_memory();
+        utc.record(&snapshot(40.0, 20.0), at(21));
+        utc.record(&snapshot(40.0, 20.0), after_midnight);
+        assert_eq!(utc.readings().len(), 1);
     }
 
     #[test]

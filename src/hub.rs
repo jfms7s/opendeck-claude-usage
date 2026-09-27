@@ -196,7 +196,8 @@ impl UsageHub {
             // Recording can touch the history file - off the async threads,
             // so a slow disk can't stall every key's rendering.
             let (history, recorded) = (self.history.clone(), snapshot.clone());
-            let now = Utc::now();
+            // Local time, so each local day's first poll is kept (see `record`).
+            let now = Local::now();
             if let Err(e) =
                 tokio::task::spawn_blocking(move || history.record(&recorded, now)).await
             {

@@ -177,14 +177,17 @@ touch-strip bar.
 2. A short press (key or dial) cycles the series; hold to refresh:
    - **Trend** — % of limit over the current window.
    - **Per poll** — how much each reading added (e.g. `+2.1pp`).
-   - **Today** — running increase since local midnight (e.g. `8.4pp`).
+   - **Today** — running increase since local midnight (e.g. `8.4pp`). If
+     OpenDeck wasn't running (or couldn't read usage) around midnight, it
+     counts from the day's first reading instead of guessing how much of
+     the gap was yesterday's.
    - **Vs even** — pace vs an even burn over the window (`1.0x` = on track).
 3. The line takes the key's level color (**Colors & thresholds**). A new key
    says "collecting…" until at least two readings exist.
 
 Anthropic's usage endpoint only reports the current percentages, so the
-plugin records them itself: each successful poll whose numbers changed is
-appended to `~/.local/state/opendeck-claude-usage/history.jsonl` (or under
+plugin records them itself: each successful poll whose numbers changed (plus the
+first poll of each day, to mark midnight) is appended to `~/.local/state/opendeck-claude-usage/history.jsonl` (or under
 `$XDG_STATE_HOME`). It holds only session/weekly percentages and reset
 times - no tokens, credentials or account data - and anything older than 8
 days is dropped when OpenDeck starts. Delete the file any time to reset the
