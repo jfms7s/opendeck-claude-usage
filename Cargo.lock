@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "opendeck-claude-usage"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
