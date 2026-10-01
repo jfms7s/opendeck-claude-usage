@@ -95,7 +95,7 @@ OpenDeck) or unzip it into `~/.config/opendeck/plugins/` and restart OpenDeck
 
 **Upgrading from 0.6.0:** existing Usage Gauge keys switch from
 green/yellow/red at 50/80% to copper with Watch 50, Risk 75 and Critical
-90. Open a key's **Colors & thresholds** section to change this.
+90. Change this in a key's **Thresholds** and **Colors** settings.
 
 ## Using a dial or tile
 

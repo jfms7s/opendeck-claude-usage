@@ -1,4 +1,4 @@
-// Shared "Colors & thresholds" section for the Usage Gauge and Burn Rate
+// Shared "Colors & thresholds" cards for the Usage Gauge and Burn Rate
 // property inspectors. Field names and defaults mirror src/level.rs's wire
 // format (a Rust test checks the defaults stay in sync).
 const COLOR_DEFAULTS = {
@@ -13,35 +13,61 @@ const COLOR_DEFAULTS = {
 };
 
 function mountColorSection(container, { showMode, onChange }) {
+	// Two pi.css cards; the page's container uses display: contents so they
+	// sit in the page grid next to the page's own cards.
 	container.innerHTML = `
-		<details>
-			<summary>Colors &amp; thresholds</summary>
-			<label for="watch">Watch at (% used)</label>
-			<input type="number" id="watch" min="0" max="100" step="1" />
-			<label for="risk">Risk at (% used)</label>
-			<input type="number" id="risk" min="0" max="100" step="1" />
-			<label for="critical">Critical at (% used)</label>
-			<input type="number" id="critical" min="0" max="100" step="1" />
-			<label for="colorNormal">Normal color</label>
-			<input type="color" id="colorNormal" />
-			<label for="colorWatch">Watch color</label>
-			<input type="color" id="colorWatch" />
-			<label for="colorRisk">Risk color</label>
-			<input type="color" id="colorRisk" />
-			<label for="colorCritical">Critical color</label>
-			<input type="color" id="colorCritical" />
-			<div id="colorModeRow">
+		<section class="card">
+			<h2>Thresholds</h2>
+			<div class="row">
+				<div class="field">
+					<label for="watch">Watch</label>
+					<input type="number" id="watch" min="0" max="100" step="1" />
+				</div>
+				<div class="field">
+					<label for="risk">Risk</label>
+					<input type="number" id="risk" min="0" max="100" step="1" />
+				</div>
+				<div class="field">
+					<label for="critical">Critical</label>
+					<input type="number" id="critical" min="0" max="100" step="1" />
+				</div>
+			</div>
+			<p class="hint">% used. Marks must increase (Watch &lt; Risk &lt; Critical), otherwise defaults are used.</p>
+			<p class="status bad hidden" id="marksWarning">These marks aren't increasing, so the key is using the defaults (50 / 75 / 90).</p>
+		</section>
+		<section class="card">
+			<h2>Colors</h2>
+			<div class="row">
+				<div class="field">
+					<label for="colorNormal">Normal</label>
+					<input type="color" id="colorNormal" />
+				</div>
+				<div class="field">
+					<label for="colorWatch">Watch</label>
+					<input type="color" id="colorWatch" />
+				</div>
+				<div class="field">
+					<label for="colorRisk">Risk</label>
+					<input type="color" id="colorRisk" />
+				</div>
+				<div class="field">
+					<label for="colorCritical">Critical</label>
+					<input type="color" id="colorCritical" />
+				</div>
+			</div>
+			<div class="field" id="colorModeRow">
 				<label for="colorMode">Color by</label>
 				<select id="colorMode">
 					<option value="fixed">Current usage</option>
 					<option value="pace">Pace (also warn when burning too fast)</option>
 				</select>
 			</div>
-			<p class="hint">Marks must increase (Watch &lt; Risk &lt; Critical), otherwise defaults are used.</p>
-			<p class="hint" id="marksWarning" style="color: #ef4444; opacity: 1" hidden>These marks aren't increasing, so the key is using the defaults (50 / 75 / 90).</p>
-			<button type="button" id="colorReset">Reset to defaults</button>
-		</details>`;
-	container.querySelector("#colorModeRow").hidden = !showMode;
+			<div class="row">
+				<button type="button" id="colorReset">Reset to defaults</button>
+			</div>
+		</section>`;
+	// .field sets display, which would override the hidden attribute.
+	container.querySelector("#colorModeRow").classList.toggle("hidden", !showMode);
 	for (const key of Object.keys(COLOR_DEFAULTS)) {
 		container.querySelector(`#${key}`).addEventListener("change", () => {
 			touchedColorFields.add(key);
@@ -124,5 +150,5 @@ function readColorSettings() {
 function updateMarksWarning() {
 	const clamp = (n) => Math.min(100, Math.max(0, n));
 	const [watch, risk, critical] = ["watch", "risk", "critical"].map((key) => clamp(readColorValue(key)));
-	document.getElementById("marksWarning").hidden = watch < risk && risk < critical;
+	document.getElementById("marksWarning").classList.toggle("hidden", watch < risk && risk < critical);
 }
