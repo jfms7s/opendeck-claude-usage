@@ -3,28 +3,40 @@
 <head>
 	<meta charset="utf-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1" />
-	<style>
-		body { font: 12px system-ui, sans-serif; margin: 0; padding: 8px 12px; }
-		label { display: block; margin-top: 10px; font-size: 11px; opacity: 0.8; }
-		select, input { width: 100%; box-sizing: border-box; margin-top: 2px; }
-	</style>
+	<link rel="stylesheet" href="pi.css" />
 </head>
 <body>
-	<label for="metric">Metric</label>
-	<select id="metric">
-		<option value="tokens">Tokens</option>
-		<option value="cost">Cost</option>
-	</select>
+	<main class="pi">
+		<section class="card">
+			<h2>Display</h2>
+			<div class="row">
+				<div class="field">
+					<label for="metric">Metric</label>
+					<select id="metric">
+						<option value="tokens">Tokens</option>
+						<option value="cost">Cost</option>
+					</select>
+				</div>
+				<div class="field">
+					<label for="range">Range</label>
+					<select id="range">
+						<option value="today">Today</option>
+						<option value="sevenday">7 days</option>
+						<option value="session">Session (5 hour)</option>
+					</select>
+				</div>
+			</div>
+		</section>
 
-	<label for="range">Range</label>
-	<select id="range">
-		<option value="today">Today</option>
-		<option value="sevenday">7 days</option>
-		<option value="session">Session (5 hour)</option>
-	</select>
-
-	<label for="refresh_seconds">Refresh every (seconds)</label>
-	<input type="number" id="refresh_seconds" min="5" max="3600" step="1" />
+		<section class="card">
+			<h2>Updates</h2>
+			<div class="field">
+				<label for="refresh_seconds">Refresh every</label>
+				<input type="number" id="refresh_seconds" min="5" max="3600" step="1" />
+				<p class="hint">Seconds (5 to 3600).</p>
+			</div>
+		</section>
+	</main>
 
 	<script>
 		window.connectOpenActionSocketData = new Promise((resolve) => {

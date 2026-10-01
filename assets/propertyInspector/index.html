@@ -3,38 +3,41 @@
 <head>
 	<meta charset="utf-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<link rel="stylesheet" href="pi.css" />
 	<style>
-		body { font: 12px system-ui, sans-serif; margin: 0; padding: 8px 12px; }
-		label { display: block; margin-top: 10px; font-size: 11px; opacity: 0.8; }
-		select, input { width: 100%; box-sizing: border-box; margin-top: 2px; }
-		details { margin-top: 12px; }
-		summary { cursor: pointer; font-size: 11px; opacity: 0.8; }
-		.hint { font-size: 10px; opacity: 0.6; }
-		button { margin-top: 8px; }
-		.check { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 12px; opacity: 1; }
-		.check input { width: auto; margin: 0; }
+		#colors { display: contents; }
+		.checks { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
 	</style>
 </head>
 <body>
-	<label for="window">Window</label>
-	<select id="window">
-		<option value="session">Session (5 hour)</option>
-		<option value="weekly">Weekly (7 day)</option>
-		<option value="monthly">Monthly (extra usage)</option>
-	</select>
+	<main class="pi">
+		<section class="card">
+			<h2>Display</h2>
+			<div class="field">
+				<label for="window">Window</label>
+				<select id="window">
+					<option value="session">Session (5 hour)</option>
+					<option value="weekly">Weekly (7 day)</option>
+					<option value="monthly">Monthly (extra usage)</option>
+				</select>
+			</div>
+		</section>
 
-	<label>Cycle styles</label>
-	<div id="cycleStyles">
-		<label class="check"><input type="checkbox" value="speedometer" /> Speedometer</label>
-		<label class="check"><input type="checkbox" value="bar" /> Bar</label>
-		<label class="check"><input type="checkbox" value="softPill" /> Soft pill</label>
-		<label class="check"><input type="checkbox" value="openDonut" /> Open donut</label>
-		<label class="check"><input type="checkbox" value="trackedDonut" /> Tracked donut</label>
-		<label class="check"><input type="checkbox" value="thinRing" /> Thin ring</label>
-	</div>
-	<p class="hint">Short press cycles the checked styles (need at least two). Hold to refresh.</p>
+		<section class="card">
+			<h2>Cycle styles</h2>
+			<div class="checks" id="cycleStyles">
+				<label class="check"><input type="checkbox" value="speedometer" /> Speedometer</label>
+				<label class="check"><input type="checkbox" value="bar" /> Bar</label>
+				<label class="check"><input type="checkbox" value="softPill" /> Soft pill</label>
+				<label class="check"><input type="checkbox" value="openDonut" /> Open donut</label>
+				<label class="check"><input type="checkbox" value="trackedDonut" /> Tracked donut</label>
+				<label class="check"><input type="checkbox" value="thinRing" /> Thin ring</label>
+			</div>
+			<p class="hint">Short press cycles the checked styles (need at least two). Hold to refresh.</p>
+		</section>
 
-	<div id="colors"></div>
+		<div id="colors"></div>
+	</main>
 	<script src="colors.js"></script>
 
 	<script>

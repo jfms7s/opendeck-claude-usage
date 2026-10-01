@@ -3,35 +3,40 @@
 <head>
 	<meta charset="utf-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<link rel="stylesheet" href="pi.css" />
 	<style>
-		body { font: 12px system-ui, sans-serif; margin: 0; padding: 8px 12px; }
-		label { display: block; margin-top: 10px; font-size: 11px; opacity: 0.8; }
-		input[type="time"] { width: 100%; box-sizing: border-box; margin-top: 2px; }
-		fieldset { border: 0; margin: 10px 0 0; padding: 0; }
-		legend { padding: 0; font-size: 11px; opacity: 0.8; }
-		.days { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; }
-		.days label { display: inline-flex; align-items: center; gap: 3px; margin: 0; font-size: 12px; opacity: 1; }
+		.days { display: flex; flex-wrap: wrap; gap: 8px 14px; }
 	</style>
 </head>
 <body>
-	<label for="peak_start">Peak starts at</label>
-	<input type="time" id="peak_start" />
+	<main class="pi">
+		<section class="card">
+			<h2>Peak hours</h2>
+			<div class="row">
+				<div class="field">
+					<label for="peak_start">Starts at</label>
+					<input type="time" id="peak_start" />
+				</div>
+				<div class="field">
+					<label for="peak_end">Ends at</label>
+					<input type="time" id="peak_end" />
+				</div>
+			</div>
+		</section>
 
-	<label for="peak_end">Peak ends at</label>
-	<input type="time" id="peak_end" />
-
-	<fieldset>
-		<legend>Peak applies on</legend>
-		<div class="days" id="peak_days">
-			<label><input type="checkbox" value="mon" />Mon</label>
-			<label><input type="checkbox" value="tue" />Tue</label>
-			<label><input type="checkbox" value="wed" />Wed</label>
-			<label><input type="checkbox" value="thu" />Thu</label>
-			<label><input type="checkbox" value="fri" />Fri</label>
-			<label><input type="checkbox" value="sat" />Sat</label>
-			<label><input type="checkbox" value="sun" />Sun</label>
-		</div>
-	</fieldset>
+		<section class="card">
+			<h2>Peak applies on</h2>
+			<div class="days" id="peak_days" role="group" aria-label="Peak applies on">
+				<label class="check"><input type="checkbox" value="mon" /> Mon</label>
+				<label class="check"><input type="checkbox" value="tue" /> Tue</label>
+				<label class="check"><input type="checkbox" value="wed" /> Wed</label>
+				<label class="check"><input type="checkbox" value="thu" /> Thu</label>
+				<label class="check"><input type="checkbox" value="fri" /> Fri</label>
+				<label class="check"><input type="checkbox" value="sat" /> Sat</label>
+				<label class="check"><input type="checkbox" value="sun" /> Sun</label>
+			</div>
+		</section>
+	</main>
 
 	<script>
 		window.connectOpenActionSocketData = new Promise((resolve) => {

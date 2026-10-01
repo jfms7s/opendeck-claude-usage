@@ -3,26 +3,29 @@
 <head>
 	<meta charset="utf-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<link rel="stylesheet" href="pi.css" />
 	<style>
-		body { font: 12px system-ui, sans-serif; margin: 0; padding: 8px 12px; }
-		label { display: block; margin-top: 10px; font-size: 11px; opacity: 0.8; }
-		select, input { width: 100%; box-sizing: border-box; margin-top: 2px; }
-		details { margin-top: 12px; }
-		summary { cursor: pointer; font-size: 11px; opacity: 0.8; }
-		.hint { font-size: 10px; opacity: 0.6; }
-		button { margin-top: 8px; }
+		#colors { display: contents; }
 	</style>
 </head>
 <body>
-	<label for="window">Window</label>
-	<select id="window">
-		<option value="session">Session (5 hour)</option>
-		<option value="weekly">Weekly (7 day)</option>
-		<option value="monthly">Monthly (extra usage)</option>
-	</select>
-	<p class="hint">Short press (key or dial) cycles Trend → Per poll → Today → Vs even. Hold to refresh. History builds up as the plugin runs and is kept for 8 days, so Monthly shows at most the last 8 days, and Vs even needs a reset time Monthly doesn't have.</p>
+	<main class="pi">
+		<section class="card">
+			<h2>Display</h2>
+			<div class="field">
+				<label for="window">Window</label>
+				<select id="window">
+					<option value="session">Session (5 hour)</option>
+					<option value="weekly">Weekly (7 day)</option>
+					<option value="monthly">Monthly (extra usage)</option>
+				</select>
+				<p class="hint">History builds up as the plugin runs and is kept for 8 days, so Monthly shows at most the last 8 days, and Vs even needs a reset time Monthly doesn't have.</p>
+			</div>
+			<p class="hint">Short press (key or dial) cycles Trend → Per poll → Today → Vs even. Hold to refresh.</p>
+		</section>
 
-	<div id="colors"></div>
+		<div id="colors"></div>
+	</main>
 	<script src="colors.js"></script>
 
 	<script>

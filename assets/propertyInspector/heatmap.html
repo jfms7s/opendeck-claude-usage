@@ -3,24 +3,28 @@
 <head>
 	<meta charset="utf-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1" />
-	<style>
-		body { font: 12px system-ui, sans-serif; margin: 0; padding: 8px 12px; }
-		label { display: block; margin-top: 10px; font-size: 11px; opacity: 0.8; }
-		select, input { width: 100%; box-sizing: border-box; margin-top: 2px; }
-		.hint { font-size: 10px; opacity: 0.6; }
-	</style>
+	<link rel="stylesheet" href="pi.css" />
 </head>
 <body>
-	<label for="metric">Measure</label>
-	<select id="metric">
-		<option value="tokens">Tokens</option>
-		<option value="cost">Cost (estimated)</option>
-	</select>
-
-	<label for="color">Color</label>
-	<input type="color" id="color" />
-
-	<p class="hint">Short press (key or dial) flips between 7 days and 4 weeks. Hold to refresh.</p>
+	<main class="pi">
+		<section class="card">
+			<h2>Display</h2>
+			<div class="row">
+				<div class="field">
+					<label for="metric">Measure</label>
+					<select id="metric">
+						<option value="tokens">Tokens</option>
+						<option value="cost">Cost (estimated)</option>
+					</select>
+				</div>
+				<div class="field narrow">
+					<label for="color">Color</label>
+					<input type="color" id="color" />
+				</div>
+			</div>
+			<p class="hint">Short press (key or dial) flips between 7 days and 4 weeks. Hold to refresh.</p>
+		</section>
+	</main>
 
 	<script>
 		const DEFAULT_COLOR = "#d97757";
