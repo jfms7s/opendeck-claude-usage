@@ -1,5 +1,6 @@
 pub mod api;
 pub mod cached;
+pub mod console;
 pub mod logs;
 
 use async_trait::async_trait;
