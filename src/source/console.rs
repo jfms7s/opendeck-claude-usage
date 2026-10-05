@@ -275,6 +275,9 @@ impl ConsoleSource {
     pub fn new(key_path: PathBuf) -> Self {
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
+            // reqwest drops `Authorization` on a cross-host redirect but not
+            // custom headers like `x-api-key`, so never follow one.
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("opendeck-claude-usage/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("reqwest client with static config");
@@ -745,5 +748,42 @@ mod tests {
 
         std::fs::write(&path, "sk-ant-admin01-new").unwrap();
         assert!(source.input_changed().await);
+    }
+
+    /// The Admin key rides in a custom header, which reqwest would forward
+    /// to whatever host a redirect points at - so redirects aren't followed.
+    #[tokio::test]
+    async fn a_redirect_is_not_followed_with_the_key() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let elsewhere = TcpListener::bind("127.0.0.1:0").unwrap();
+        let elsewhere_addr = elsewhere.local_addr().unwrap();
+        elsewhere.set_nonblocking(true).unwrap();
+        let redirector = TcpListener::bind("127.0.0.1:0").unwrap();
+        let redirector_addr = redirector.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut conn, _) = redirector.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = conn.read(&mut request);
+            let reply = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{elsewhere_addr}/collect\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            conn.write_all(reply.as_bytes()).unwrap();
+        });
+
+        let source = ConsoleSource::new(PathBuf::from("/nonexistent"));
+        let url = reqwest::Url::parse(&format!(
+            "http://{redirector_addr}/v1/organizations/cost_report"
+        ))
+        .unwrap();
+        let result = source
+            .get(&AdminKey("sk-ant-admin01-secret".to_string()), url)
+            .await;
+        assert_eq!(result, Err(ConsoleError::Request("HTTP 302".to_string())));
+        assert!(
+            elsewhere.accept().is_err(),
+            "the redirect target was contacted"
+        );
     }
 }
