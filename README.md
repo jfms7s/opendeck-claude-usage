@@ -243,7 +243,7 @@ before a downgrade) is left untouched rather than overwritten.
 
 ## Manual smoke-test checklist
 
-The unit tests (Rust) and the settings-page tests (`node --test tests/`)
+The unit tests (Rust) and the settings-page tests (`node --test tests/pi/*.test.mjs`)
 cover the logic; these are the things only a live OpenDeck + Stream Deck
 XL+ session can show. Run them before cutting a release and record the
 version you checked them on:
@@ -264,7 +264,7 @@ version you checked them on:
 
 ```bash
 cargo test --locked                          # unit tests (no live OpenDeck needed)
-node --test tests/                           # settings-page (Property Inspector) tests
+node --test tests/pi/*.test.mjs                  # settings-page (Property Inspector) tests
 cargo test -- --ignored live_ --nocapture    # one real usage-API request + a scan of your transcripts
 cargo build --release --locked
 node build.mjs                               # assembles dist/<uuid>.sdPlugin from what was built

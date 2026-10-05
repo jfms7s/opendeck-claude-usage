@@ -53,7 +53,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-      - run: node --test tests/
+      - run: node --test tests/pi/*.test.mjs
       # --all: every target in the manifest's CodePaths must be bundled.
       - run: node build.mjs --all
       - name: Zip the plugin bundle and checksum it

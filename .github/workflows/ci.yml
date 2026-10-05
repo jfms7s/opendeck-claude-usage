@@ -27,7 +27,7 @@ jobs:
         with:
           node-version: 24
       # The Property Inspector logic, executed (not grepped).
-      - run: node --test tests/
+      - run: node --test tests/pi/*.test.mjs
       # Packaging runs on every PR, so a version mismatch or a missing
       # asset fails here rather than when a release is cut.
       - run: cargo build --release --locked --target x86_64-unknown-linux-gnu
