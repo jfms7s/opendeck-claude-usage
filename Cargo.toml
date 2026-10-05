@@ -1,6 +1,6 @@
 [package]
 name = "opendeck-claude-usage"
-version = "0.14.2"
+version = "0.15.0"
 edition = "2024"
 # Edition 2024 + let-chains need 1.88; it is also the highest MSRV in the
 # locked dependency tree. CI checks the crate still builds on it.
