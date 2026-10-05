@@ -4,12 +4,16 @@
 //! Admin key (`sk-ant-admin01-…`) read from a private file: regular API
 //! keys can't read usage, and individual accounts can't create Admin keys.
 
+use super::cached::{CachedSource, Fetch};
+use async_trait::async_trait;
+use chrono::SecondsFormat;
 use chrono::{DateTime, Datelike, Days, NaiveDate, Utc};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
 
 /// One UTC day of org-wide usage.
@@ -49,6 +53,13 @@ pub struct AdminKey(String);
 impl fmt::Debug for AdminKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("AdminKey([redacted])")
+    }
+}
+
+impl AdminKey {
+    /// The key itself - only for the `x-api-key` header.
+    fn expose(&self) -> &str {
+        &self.0
     }
 }
 
@@ -228,6 +239,158 @@ pub fn window(now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
     let month_start = today.with_day(1).expect("day 1 exists");
     let start = month_start.min(today - Days::new(6));
     (midnight(start), midnight(today + Days::new(1)))
+}
+
+const BASE_URL: &str = "https://api.anthropic.com";
+const COST_PATH: &str = "/v1/organizations/cost_report";
+const USAGE_PATH: &str = "/v1/organizations/usage_report/messages";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// The window is at most 37 daily buckets - two pages of 31. More pages
+/// than this means the API isn't paging the way we expect.
+const MAX_PAGES: usize = 4;
+
+/// Fetches month-to-date (plus the last 7 days) of org-wide cost and
+/// tokens on every `fetch`. Unthrottled on its own - wrap it in
+/// `CachedSource`.
+pub struct ConsoleSource {
+    key_path: PathBuf,
+    client: reqwest::Client,
+}
+
+impl ConsoleSource {
+    pub fn new(key_path: PathBuf) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .user_agent(concat!("opendeck-claude-usage/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("reqwest client with static config");
+        Self { key_path, client }
+    }
+
+    async fn get(&self, key: &AdminKey, url: reqwest::Url) -> Result<String, ConsoleError> {
+        let response = self
+            .client
+            .get(url)
+            .header("x-api-key", key.expose())
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .send()
+            .await
+            .map_err(|e| ConsoleError::Request(e.without_url().to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(error_for_status(status.as_u16()));
+        }
+        response
+            .text()
+            .await
+            .map_err(|e| ConsoleError::Request(e.without_url().to_string()))
+    }
+
+    /// Every page of one report, as per-day values.
+    async fn report<V>(
+        &self,
+        key: &AdminKey,
+        path: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        parse: fn(&str) -> Result<Page<V>, ConsoleError>,
+    ) -> Result<Vec<(NaiveDate, V)>, ConsoleError> {
+        let mut days = Vec::new();
+        let mut page: Option<String> = None;
+        for _ in 0..MAX_PAGES {
+            let body = self
+                .get(key, report_url(path, start, end, page.as_deref()))
+                .await?;
+            let parsed = parse(&body)?;
+            days.extend(parsed.days);
+            match parsed.next_page {
+                Some(next) => page = Some(next),
+                None => return Ok(days),
+            }
+        }
+        Err(ConsoleError::Parse(format!("more than {MAX_PAGES} pages")))
+    }
+}
+
+impl Default for ConsoleSource {
+    fn default() -> Self {
+        Self::new(default_key_path())
+    }
+}
+
+/// One report request: daily buckets over `[start, end)`, optionally from a
+/// `next_page` cursor.
+fn report_url(
+    path: &str,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    page: Option<&str>,
+) -> reqwest::Url {
+    let start = start.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let end = end.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let mut params = vec![
+        ("starting_at", start.as_str()),
+        ("ending_at", end.as_str()),
+        ("bucket_width", "1d"),
+        ("limit", "31"),
+    ];
+    if let Some(page) = page {
+        params.push(("page", page));
+    }
+    reqwest::Url::parse_with_params(&format!("{BASE_URL}{path}"), &params)
+        .expect("BASE_URL is a valid URL")
+}
+
+/// 401/403 mean the key isn't an Admin key (or the account has no
+/// organization); anything else is a plain request failure to back off on.
+fn error_for_status(status: u16) -> ConsoleError {
+    match status {
+        401 | 403 => ConsoleError::Unauthorized(status),
+        _ => ConsoleError::Request(format!("HTTP {status}")),
+    }
+}
+
+#[async_trait]
+impl Fetch for ConsoleSource {
+    type Snapshot = ConsoleSnapshot;
+    type Error = ConsoleError;
+    const LABEL: &'static str = "console spend";
+
+    async fn fetch(&self) -> Result<ConsoleSnapshot, ConsoleError> {
+        let key = read_admin_key(&self.key_path).await?;
+        let (start, end) = window(Utc::now());
+        let cost = self
+            .report(&key, COST_PATH, start, end, parse_cost_page)
+            .await?;
+        let tokens = self
+            .report(&key, USAGE_PATH, start, end, parse_usage_page)
+            .await?;
+        Ok(merge_days(cost, tokens))
+    }
+
+    /// Key-file problems are a local stat, not a request - re-check them on
+    /// every read so a newly added key shows up within a tick.
+    fn is_local(error: &ConsoleError) -> bool {
+        matches!(error, ConsoleError::NoKey | ConsoleError::InsecureKeyFile)
+    }
+}
+
+/// What API Spend and Console-sourced Metric Tiles read: the throttled
+/// snapshot. A trait so their tests can hand in fixed data.
+#[async_trait]
+pub trait ConsoleData: Send + Sync {
+    async fn snapshot(&self) -> Result<ConsoleSnapshot, ConsoleError>;
+}
+
+#[async_trait]
+impl<S> ConsoleData for CachedSource<S>
+where
+    S: Fetch<Snapshot = ConsoleSnapshot, Error = ConsoleError>,
+{
+    async fn snapshot(&self) -> Result<ConsoleSnapshot, ConsoleError> {
+        self.read().await
+    }
 }
 
 #[cfg(test)]
@@ -447,5 +610,89 @@ mod tests {
     #[test]
     fn the_key_lives_under_the_config_dir() {
         assert!(default_key_path().ends_with(".config/opendeck-claude-usage/admin-key"));
+    }
+
+    use crate::source::cached::CachePolicy;
+    use std::time::Duration;
+
+    #[test]
+    fn report_urls_carry_the_window_daily_buckets_and_the_page() {
+        let start = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 10, 16, 0, 0, 0).unwrap();
+        assert_eq!(
+            report_url(COST_PATH, start, end, None).as_str(),
+            "https://api.anthropic.com/v1/organizations/cost_report?starting_at=2026-10-01T00%3A00%3A00Z&ending_at=2026-10-16T00%3A00%3A00Z&bucket_width=1d&limit=31"
+        );
+        let next = report_url(USAGE_PATH, start, end, Some("page_abc="));
+        assert!(
+            next.as_str()
+                .starts_with("https://api.anthropic.com/v1/organizations/usage_report/messages?"),
+            "{next}"
+        );
+        assert!(next.as_str().ends_with("&page=page_abc%3D"), "{next}");
+    }
+
+    #[test]
+    fn rejected_keys_are_unauthorized_and_other_statuses_are_request_errors() {
+        assert_eq!(error_for_status(401), ConsoleError::Unauthorized(401));
+        assert_eq!(error_for_status(403), ConsoleError::Unauthorized(403));
+        assert_eq!(
+            error_for_status(429),
+            ConsoleError::Request("HTTP 429".to_string())
+        );
+        assert_eq!(
+            error_for_status(500),
+            ConsoleError::Request("HTTP 500".to_string())
+        );
+    }
+
+    #[test]
+    fn only_key_file_problems_are_local() {
+        assert!(ConsoleSource::is_local(&ConsoleError::NoKey));
+        assert!(ConsoleSource::is_local(&ConsoleError::InsecureKeyFile));
+        assert!(!ConsoleSource::is_local(&ConsoleError::Unauthorized(401)));
+        assert!(!ConsoleSource::is_local(&ConsoleError::Request("x".into())));
+        assert!(!ConsoleSource::is_local(&ConsoleError::Parse("x".into())));
+    }
+
+    #[tokio::test]
+    async fn no_key_file_fails_without_a_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = ConsoleSource::new(dir.path().join("admin-key"));
+        assert_eq!(source.fetch().await, Err(ConsoleError::NoKey));
+    }
+
+    #[tokio::test]
+    async fn the_cached_console_reports_a_missing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let cached = CachedSource::new(
+            ConsoleSource::new(dir.path().join("admin-key")),
+            CachePolicy {
+                min_interval: Duration::from_secs(300),
+                max_backoff: Duration::from_secs(1800),
+                stale_after: Duration::from_secs(3600),
+            },
+        );
+        assert_eq!(cached.snapshot().await, Err(ConsoleError::NoKey));
+    }
+
+    /// Hits the real Admin API with the key at `default_key_path()` - run
+    /// by hand (`cargo test -- --ignored live_`), never in CI. Skips when
+    /// there's no key file.
+    #[tokio::test]
+    #[ignore]
+    async fn live_console_reads_month_to_date() {
+        let path = default_key_path();
+        if !path.exists() {
+            println!("skipped: no Admin key at {}", path.display());
+            return;
+        }
+        let snapshot = ConsoleSource::default().fetch().await.unwrap();
+        println!("{snapshot:?}");
+        let today = Utc::now().date_naive();
+        assert!(
+            snapshot.days.iter().any(|d| d.date == today),
+            "today's bucket is missing - check ending_at"
+        );
     }
 }
