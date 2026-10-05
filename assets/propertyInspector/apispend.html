@@ -30,83 +30,29 @@
 
 		<div id="colors"></div>
 	</main>
+	<script src="pi-common.js"></script>
 	<script src="colors.js"></script>
 
 	<script>
-		window.connectOpenActionSocketData = new Promise((resolve) => {
-			window.connectOpenActionSocket = (...args) => resolve(args);
-			window.connectElgatoStreamDeckSocket = window.connectOpenActionSocket;
-		});
-
-		let websocket;
-		let uuid;
-		let storedRange;
-
-		mountColorSection(document.getElementById("colors"), { showMode: false, onChange: sendSettings });
-
-		window.connectOpenActionSocketData.then(([inPort, inUUID, inRegisterEvent, inInfo, inActionInfo]) => {
-			uuid = inUUID;
-			const actionInfo = JSON.parse(inActionInfo);
-			websocket = new WebSocket(`ws://127.0.0.1:${inPort}`);
-
-			websocket.onopen = () => {
-				websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
-				applySettings(actionInfo.payload.settings || {});
-			};
-
-			websocket.onmessage = (event) => {
-				const message = JSON.parse(event.data);
-				if (message.event === "didReceiveSettings") {
-					const settings = message.payload.settings || {};
-					if (pendingSave) {
-						// The reply to our getSettings: only the pass-through
-						// value is refreshed, so the edit being saved is kept.
-						storedRange = settings.range;
-						saveSettings();
-					} else {
-						applySettings(settings);
-					}
-				}
-			};
-		});
-
-		function applySettings(settings) {
-			storedRange = settings.range;
-			const budget = Number(settings.budgetDollars);
-			document.getElementById("budgetDollars").value = Number.isFinite(budget) && budget > 0 ? budget : "";
-			applyColorSettings(settings);
-		}
-
-		// OpenDeck may not forward the plugin's own setSettings (a press
-		// changing the range) to an open PI, so the range held here can be
-		// stale. Re-read the stored settings before saving; if no reply
-		// comes, save with what we have.
-		let pendingSave = null;
-
-		function sendSettings() {
-			if (pendingSave) return; // the pending save reads the form when it sends
-			pendingSave = setTimeout(saveSettings, 500);
-			websocket.send(JSON.stringify({ event: "getSettings", context: uuid }));
-		}
-
-		function saveSettings() {
-			clearTimeout(pendingSave);
-			pendingSave = null;
-			const budget = Number(document.getElementById("budgetDollars").value);
-			websocket.send(JSON.stringify({
-				event: "setSettings",
-				context: uuid,
-				payload: {
+		const pi = connectPI({
+			apply(settings) {
+				const budget = Number(settings.budgetDollars);
+				document.getElementById("budgetDollars").value = Number.isFinite(budget) && budget > 0 ? budget : "";
+				applyColorSettings(settings);
+			},
+			read() {
+				const budget = Number(document.getElementById("budgetDollars").value);
+				return {
 					...(Number.isFinite(budget) && budget > 0 ? { budgetDollars: budget } : {}),
 					...readColorSettings(),
-					// The range changes only by pressing; pass it through
-					// untouched so saving here doesn't reset it.
-					...(storedRange ? { range: storedRange } : {}),
-				},
-			}));
-		}
+				};
+			},
+			// The range changes only by pressing the key or dial.
+			passThrough: ["range"],
+		});
 
-		document.getElementById("budgetDollars").addEventListener("change", sendSettings);
+		mountColorSection(document.getElementById("colors"), { showMode: false, onChange: pi.changed });
+		document.getElementById("budgetDollars").addEventListener("change", pi.changed);
 	</script>
 </body>
 </html>

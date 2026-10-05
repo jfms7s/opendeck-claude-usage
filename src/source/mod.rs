@@ -29,9 +29,9 @@ pub struct UsageSnapshot {
     pub monthly: MonthlyUsage,
 }
 
-/// Which part of a `UsageSnapshot` a given dial is configured to show -
-/// lives here (not in `action.rs`) so `format.rs` can render from it without
-/// depending on the Action/settings module.
+/// Which part of a `UsageSnapshot` a given key or dial is configured to
+/// show - lives here (not in an action module) so the pure display modules
+/// can render from it without depending on any action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WindowKind {
@@ -51,6 +51,10 @@ pub enum UsageSourceError {
     Credentials(String),
     #[error("usage request failed: {0}")]
     Request(String),
+    /// HTTP 429 - the per-account limit shared with Claude Code's own
+    /// `/usage`. `retry_after_secs` is the response's `Retry-After`, if any.
+    #[error("usage request rate-limited (HTTP 429){}", retry_after_secs.map(|s| format!(", retry after {s}s")).unwrap_or_default())]
+    RateLimited { retry_after_secs: Option<u64> },
     #[error("failed to parse usage response: {0}")]
     Parse(String),
 }

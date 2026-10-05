@@ -1,18 +1,28 @@
-use crate::burn::{BurnMetric, burn_window};
-use crate::hub::{UsageHub, View};
-use crate::level::ColorSettings;
-use crate::serde_util::or_default;
-use crate::source::WindowKind;
-use async_trait::async_trait;
-use openaction::{Action, Instance, OpenActionResult};
-use serde::{Deserialize, Serialize};
+//! Burn Rate: Pace, Even burn or Runway for the Session or Weekly window,
+//! on a key or a dial. A press refreshes.
+
 use std::sync::Arc;
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use openaction::{Action, Instance, OpenActionResult};
+use serde::{Deserialize, Serialize};
+
+use crate::burn::{BurnMetric, build_burn_display, burn_error_display, burn_feedback, burn_window};
+use crate::burn_icon::build_burn_icon;
+use crate::history::Reading;
+use crate::hub::{HubView, UsageHub, View};
+use crate::hub_action::{HubActionCore, HubSettings};
+use crate::level::ColorSettings;
+use crate::settings::lenient;
+use crate::source::{UsageSnapshot, WindowKind};
+use crate::surface::Output;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BurnRateSettings {
-    #[serde(default, deserialize_with = "or_default")]
+    #[serde(default, deserialize_with = "lenient")]
     pub window: WindowKind,
-    #[serde(default, deserialize_with = "or_default")]
+    #[serde(default, deserialize_with = "lenient")]
     pub metric: BurnMetric,
     /// Only marks and palette matter here - Burn Rate always colors
     /// pace-based, so a stored `colorMode` is ignored.
@@ -20,24 +30,57 @@ pub struct BurnRateSettings {
     pub colors: ColorSettings,
 }
 
-impl BurnRateSettings {
-    fn view(&self) -> View {
-        View::Burn {
-            window: burn_window(self.window),
-            metric: self.metric,
-            colors: self.colors.clone(),
+/// What a Burn Rate instance shows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BurnView {
+    pub window: WindowKind,
+    pub metric: BurnMetric,
+    pub colors: ColorSettings,
+}
+
+impl HubView for BurnView {
+    fn output(
+        &self,
+        snapshot: Option<&UsageSnapshot>,
+        _history: &[Reading],
+        keypad: bool,
+        now: DateTime<Utc>,
+    ) -> Output {
+        let display = match snapshot {
+            Some(s) => build_burn_display(s, self.window, self.metric, &self.colors, now),
+            None => burn_error_display(self.metric),
+        };
+        if keypad {
+            Output::Image(build_burn_icon(&display))
+        } else {
+            Output::Feedback(burn_feedback(&display))
         }
     }
 }
 
+impl HubSettings for BurnRateSettings {
+    fn view(&self) -> View {
+        Arc::new(BurnView {
+            window: burn_window(self.window),
+            metric: self.metric,
+            colors: self.colors.clone(),
+        })
+    }
+
+    // Nothing to switch: a press only refreshes.
+    const SWITCHED: &'static str = "burn rate settings";
+}
+
 #[derive(Clone)]
 pub struct BurnRateAction {
-    hub: Arc<UsageHub>,
+    core: Arc<HubActionCore<BurnRateSettings>>,
 }
 
 impl BurnRateAction {
     pub fn new(hub: Arc<UsageHub>) -> Self {
-        Self { hub }
+        Self {
+            core: Arc::new(HubActionCore::new(hub)),
+        }
     }
 }
 
@@ -51,9 +94,7 @@ impl Action for BurnRateAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        let view = settings.view();
-        self.hub.track(&instance.instance_id, view.clone());
-        self.hub.render_cached(instance, &view).await
+        self.core.appear(instance, settings).await
     }
 
     async fn did_receive_settings(
@@ -61,9 +102,7 @@ impl Action for BurnRateAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        let view = settings.view();
-        self.hub.track(&instance.instance_id, view.clone());
-        self.hub.render_cached(instance, &view).await
+        self.core.settings_changed(instance, settings).await
     }
 
     async fn will_disappear(
@@ -71,7 +110,7 @@ impl Action for BurnRateAction {
         instance: &Instance,
         _settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        self.hub.untrack(&instance.instance_id);
+        self.core.disappear(&instance.instance_id);
         Ok(())
     }
 
@@ -80,29 +119,56 @@ impl Action for BurnRateAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        self.hub.refresh_one(instance, &settings.view()).await
+        self.core.refresh(instance, settings).await
     }
 
     /// A tap forces an immediate refresh of just that tile.
     async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-        self.hub.refresh_one(instance, &settings.view()).await
+        self.core.refresh(instance, settings).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::burn::{burn_error_display, burn_feedback};
+    use crate::source::{MonthlyUsage, WindowUsage};
+    use crate::test_support::{assert_feedback_matches_layout, manifest_entry};
+    use chrono::TimeZone;
+
+    fn snapshot() -> UsageSnapshot {
+        UsageSnapshot {
+            session: WindowUsage {
+                percent: 33.0,
+                resets_at: Some(Utc.with_ymd_and_hms(2026, 9, 13, 22, 40, 0).unwrap()),
+            },
+            weekly: WindowUsage {
+                percent: 29.0,
+                resets_at: Some(Utc.with_ymd_and_hms(2026, 9, 17, 6, 0, 0).unwrap()),
+            },
+            monthly: MonthlyUsage {
+                enabled: false,
+                percent: None,
+                used_dollars: None,
+                limit_dollars: None,
+            },
+        }
+    }
+
+    fn now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 9, 13, 20, 30, 0).unwrap()
+    }
+
+    fn view() -> BurnView {
+        BurnView {
+            window: WindowKind::Session,
+            metric: BurnMetric::EvenBurn,
+            colors: ColorSettings::default(),
+        }
+    }
 
     #[test]
     fn action_uuid_matches_the_shipped_manifest() {
-        let manifest: serde_json::Value =
-            serde_json::from_str(include_str!("../assets/manifest.json")).unwrap();
-        let entry = &manifest["Actions"][3];
-        assert_eq!(
-            entry["UUID"].as_str().unwrap(),
-            <BurnRateAction as Action>::UUID
-        );
+        let entry = manifest_entry(<BurnRateAction as Action>::UUID);
         assert_eq!(entry["Encoder"]["layout"], "layouts/usage.json");
         assert_eq!(
             entry["PropertyInspectorPath"],
@@ -113,11 +179,40 @@ mod tests {
     #[test]
     fn feedback_keys_match_the_shipped_layout() {
         let feedback = burn_feedback(&burn_error_display(BurnMetric::Pace));
-        crate::test_support::assert_feedback_matches_layout(
+        assert_feedback_matches_layout(
             include_str!("../assets/layouts/usage.json"),
             &feedback,
             &[],
         );
+    }
+
+    #[test]
+    fn burn_on_a_dial_is_feedback() {
+        let Output::Feedback(f) = view().output(Some(&snapshot()), &[], false, now()) else {
+            panic!("expected feedback");
+        };
+        assert!(f["detail"].as_str().unwrap().ends_with("session"));
+    }
+
+    #[test]
+    fn burn_on_a_keypad_is_an_image() {
+        assert!(matches!(
+            view().output(Some(&snapshot()), &[], true, now()),
+            Output::Image(_)
+        ));
+    }
+
+    #[test]
+    fn no_snapshot_renders_no_data() {
+        let Output::Feedback(f) = view().output(None, &[], false, now()) else {
+            panic!("expected feedback");
+        };
+        assert_eq!(f["detail"], "no data");
+    }
+
+    #[test]
+    fn a_press_has_nothing_to_switch_to() {
+        assert!(BurnRateSettings::default().next().is_none());
     }
 
     #[test]
@@ -153,26 +248,19 @@ mod tests {
         assert_eq!(s.colors.marks.critical, 95.0);
     }
 
-    /// KI-10: the PI must show a real option for a stored value it doesn't
-    /// know, or the next edit would send "".
+    /// KI-10: the PI shows a real option for a stored value it doesn't
+    /// know (`selectKnown`, exercised in `tests/pi/`), or the next edit
+    /// would send "".
     #[test]
-    fn property_inspector_falls_back_to_a_known_metric() {
+    fn property_inspector_falls_back_to_known_options() {
         let html = include_str!("../assets/propertyInspector/burnrate.html");
-        assert!(
-            html.contains("knownMetric"),
-            "burnrate.html must validate the stored metric"
-        );
+        assert!(html.contains(r#"selectKnown(document.getElementById("metric")"#));
+        assert!(html.contains(r#"selectKnown(document.getElementById("window")"#));
     }
 
     #[test]
     fn monthly_setting_views_as_session() {
         let s: BurnRateSettings = serde_json::from_str(r#"{"window":"monthly"}"#).unwrap();
-        assert!(matches!(
-            s.view(),
-            View::Burn {
-                window: WindowKind::Session,
-                ..
-            }
-        ));
+        assert!(format!("{:?}", s.view()).contains("window: Session"));
     }
 }

@@ -1,11 +1,22 @@
-use crate::hub::{UsageHub, View};
-use crate::level::ColorSettings;
-use crate::press::{LatestSettings, Press, PressTimer, Release, on_release};
-use crate::sparkline::SparkSettings;
+//! Usage Sparkline: recorded usage history as a line on a key or a dial
+//! strip; a short press (key or dial) cycles the series.
+
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use chrono::{DateTime, Local, Utc};
 use openaction::{Action, Instance, OpenActionResult};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+
+use crate::history::Reading;
+use crate::hub::{HubView, UsageHub, View};
+use crate::hub_action::{HubActionCore, HubSettings};
+use crate::level::ColorSettings;
+use crate::source::UsageSnapshot;
+use crate::sparkline::{SparkSettings, build_sparkline};
+use crate::styles::sparkline::{render_key, sparkline_feedback};
+use crate::surface::Output;
+use crate::tile;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SparklineSettings {
@@ -17,79 +28,67 @@ pub struct SparklineSettings {
     pub colors: ColorSettings,
 }
 
-impl SparklineSettings {
-    fn view(&self) -> View {
-        View::Sparkline {
-            settings: self.spark.clone(),
-            colors: self.colors.clone(),
+/// What a sparkline instance shows. Drawn from the recorded history, not
+/// the snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SparkView {
+    pub settings: SparkSettings,
+    pub colors: ColorSettings,
+}
+
+impl HubView for SparkView {
+    fn output(
+        &self,
+        _snapshot: Option<&UsageSnapshot>,
+        history: &[Reading],
+        keypad: bool,
+        now: DateTime<Utc>,
+    ) -> Output {
+        let display = build_sparkline(
+            history,
+            &self.settings,
+            &self.colors,
+            now.with_timezone(&Local),
+        );
+        if keypad {
+            Output::Image(tile::data_uri(&render_key(&display)))
+        } else {
+            Output::Feedback(sparkline_feedback(&display))
         }
     }
 
-    /// These settings with the next series - everything else unchanged.
-    fn cycled(&self) -> SparklineSettings {
-        let mut updated = self.clone();
-        updated.spark.series = self.spark.series.next();
-        updated
+    fn needs_history(&self) -> bool {
+        true
+    }
+}
+
+impl HubSettings for SparklineSettings {
+    fn view(&self) -> View {
+        Arc::new(SparkView {
+            settings: self.spark.clone(),
+            colors: self.colors.clone(),
+        })
     }
 
-    /// Short press (key or dial) cycles the series; a long one refreshes.
-    fn release(&self, press: Press) -> Release<SparklineSettings> {
-        on_release(press, || Some(self.cycled()))
+    /// These settings with the next series - everything else unchanged.
+    fn next(&self) -> Option<Self> {
+        let mut updated = self.clone();
+        updated.spark.series = self.spark.series.next();
+        Some(updated)
     }
+
+    const SWITCHED: &'static str = "sparkline series";
 }
 
 #[derive(Clone)]
 pub struct SparklineAction {
-    hub: Arc<UsageHub>,
-    /// Tells a short press (next series) from a long one (refresh), on
-    /// keys and dials alike.
-    presses: Arc<PressTimer>,
-    /// What each instance was last set to, so a press starts from it.
-    latest: Arc<LatestSettings<SparklineSettings>>,
+    core: Arc<HubActionCore<SparklineSettings>>,
 }
 
 impl SparklineAction {
     pub fn new(hub: Arc<UsageHub>) -> Self {
         Self {
-            hub,
-            presses: Arc::new(PressTimer::default()),
-            latest: Arc::new(LatestSettings::default()),
-        }
-    }
-
-    /// What a release does, decided from the last-set settings rather than
-    /// the event's, and kept when it switches (see `LatestSettings`).
-    fn release(
-        &self,
-        instance_id: &str,
-        settings: &SparklineSettings,
-        press: Press,
-    ) -> Release<SparklineSettings> {
-        self.latest
-            .release(instance_id, settings, |s| s.release(press))
-    }
-
-    async fn released(
-        &self,
-        instance: &Instance,
-        settings: &SparklineSettings,
-    ) -> OpenActionResult<()> {
-        let press = self.presses.up(&instance.instance_id);
-        match self.release(&instance.instance_id, settings, press) {
-            Release::Refresh => {
-                let view = self.latest.current(&instance.instance_id, settings).view();
-                self.hub.refresh_one(instance, &view).await
-            }
-            Release::Stay => Ok(()),
-            Release::Switch(updated) => {
-                // Tracked before the await, so a poll meanwhile draws it.
-                let view = updated.view();
-                self.hub.track(&instance.instance_id, view.clone());
-                if let Err(e) = instance.set_settings(&updated).await {
-                    log::warn!("could not persist sparkline series: {e}");
-                }
-                self.hub.render_cached(instance, &view).await
-            }
+            core: Arc::new(HubActionCore::new(hub)),
         }
     }
 }
@@ -104,10 +103,7 @@ impl Action for SparklineAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        self.latest.set(&instance.instance_id, settings);
-        let view = settings.view();
-        self.hub.track(&instance.instance_id, view.clone());
-        self.hub.render_cached(instance, &view).await
+        self.core.appear(instance, settings).await
     }
 
     async fn did_receive_settings(
@@ -115,10 +111,7 @@ impl Action for SparklineAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        self.latest.set(&instance.instance_id, settings);
-        let view = settings.view();
-        self.hub.track(&instance.instance_id, view.clone());
-        self.hub.render_cached(instance, &view).await
+        self.core.settings_changed(instance, settings).await
     }
 
     async fn will_disappear(
@@ -126,9 +119,7 @@ impl Action for SparklineAction {
         instance: &Instance,
         _settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        self.presses.forget(&instance.instance_id);
-        self.latest.forget(&instance.instance_id);
-        self.hub.untrack(&instance.instance_id);
+        self.core.disappear(&instance.instance_id);
         Ok(())
     }
 
@@ -137,7 +128,7 @@ impl Action for SparklineAction {
         instance: &Instance,
         _settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        self.presses.down(&instance.instance_id);
+        self.core.press(&instance.instance_id);
         Ok(())
     }
 
@@ -148,7 +139,7 @@ impl Action for SparklineAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        self.released(instance, settings).await
+        self.core.release(instance, settings).await
     }
 
     async fn key_down(
@@ -156,12 +147,13 @@ impl Action for SparklineAction {
         instance: &Instance,
         _settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        self.presses.down(&instance.instance_id);
+        self.core.press(&instance.instance_id);
         Ok(())
     }
 
+    /// Short press cycles the series; a long one refreshes.
     async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-        self.released(instance, settings).await
+        self.core.release(instance, settings).await
     }
 }
 
@@ -170,17 +162,18 @@ mod tests {
     use super::*;
     use crate::source::WindowKind;
     use crate::sparkline::SparkSeries;
-    use serde_json::Value;
+    use crate::test_support::{assert_feedback_matches_layout, manifest_entry};
+
+    fn view() -> SparkView {
+        SparkView {
+            settings: SparkSettings::default(),
+            colors: ColorSettings::default(),
+        }
+    }
 
     #[test]
     fn action_uuid_matches_the_shipped_manifest() {
-        let manifest: Value =
-            serde_json::from_str(include_str!("../assets/manifest.json")).unwrap();
-        let entry = &manifest["Actions"][6];
-        assert_eq!(
-            entry["UUID"].as_str().unwrap(),
-            <SparklineAction as Action>::UUID
-        );
+        let entry = manifest_entry(<SparklineAction as Action>::UUID);
         assert_eq!(entry["Encoder"]["layout"], "layouts/chart.json");
         assert_eq!(
             entry["PropertyInspectorPath"],
@@ -190,38 +183,53 @@ mod tests {
 
     #[test]
     fn feedback_keys_match_the_shipped_layout() {
-        let d = crate::sparkline::build_sparkline(
+        let d = build_sparkline(
             &[],
             &SparkSettings::default(),
             &ColorSettings::default(),
-            chrono::Local::now(),
+            Local::now(),
         );
-        crate::test_support::assert_feedback_matches_layout(
+        assert_feedback_matches_layout(
             include_str!("../assets/layouts/chart.json"),
-            &crate::styles::sparkline::sparkline_feedback(&d),
+            &sparkline_feedback(&d),
             &[],
         );
     }
 
     #[test]
-    fn cycled_moves_to_the_next_series_and_keeps_the_rest() {
-        let s: SparklineSettings =
-            serde_json::from_str(r#"{"window":"weekly","series":"today","critical":95}"#).unwrap();
-        let c = s.cycled();
-        assert_eq!(c.spark.series, SparkSeries::EvenBurn);
-        assert_eq!(c.spark.window, WindowKind::Weekly);
-        assert_eq!(c.colors, s.colors);
-        assert!(matches!(c.view(), View::Sparkline { .. }));
+    fn a_sparkline_on_a_keypad_is_an_image() {
+        assert!(matches!(
+            view().output(None, &[], true, Utc::now()),
+            Output::Image(_)
+        ));
     }
 
     #[test]
-    fn a_release_cycles_when_short_and_refreshes_when_long() {
-        let s = SparklineSettings::default();
-        let Release::Switch(next) = s.release(Press::Short) else {
-            panic!("expected a switch");
+    fn a_sparkline_on_a_dial_is_chart_feedback() {
+        let Output::Feedback(f) = view().output(None, &[], false, Utc::now()) else {
+            panic!("expected feedback");
         };
-        assert_eq!(next.spark.series, s.spark.series.next());
-        assert!(matches!(s.release(Press::Long), Release::Refresh));
+        assert!(
+            f["chart"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/svg+xml;base64,")
+        );
+    }
+
+    #[test]
+    fn only_the_sparkline_view_needs_history() {
+        assert!(view().needs_history());
+    }
+
+    #[test]
+    fn next_moves_to_the_next_series_and_keeps_the_rest() {
+        let s: SparklineSettings =
+            serde_json::from_str(r#"{"window":"weekly","series":"today","critical":95}"#).unwrap();
+        let c = s.next().unwrap();
+        assert_eq!(c.spark.series, SparkSeries::EvenBurn);
+        assert_eq!(c.spark.window, WindowKind::Weekly);
+        assert_eq!(c.colors, s.colors);
     }
 
     #[test]
@@ -253,55 +261,7 @@ mod tests {
         assert!(html.contains(r#"<script src="colors.js"></script>"#));
         assert!(html.contains(r#"<option value="weekly">"#));
         assert!(html.contains(r#"<option value="monthly">"#));
-        assert!(!html.contains(r#"settings.window === "weekly" ? "weekly" : "session""#));
-        assert!(html.contains("storedSeries"));
+        assert!(html.contains(r#"passThrough: ["series"]"#));
         assert!(html.contains("key or dial"));
-    }
-
-    /// KI-14: the PI re-reads the stored settings before saving, in case
-    /// OpenDeck didn't forward the plugin's press-driven `setSettings`.
-    #[test]
-    fn property_inspector_refreshes_before_saving() {
-        let html = include_str!("../assets/propertyInspector/sparkline.html");
-        assert!(html.contains(r#"event: "getSettings""#));
-        assert!(html.contains("pendingSave"));
-    }
-
-    fn action() -> SparklineAction {
-        SparklineAction::new(crate::hub::UsageHub::new(
-            crate::hub::test_support::NeverCalled,
-            crate::history::HistoryStore::in_memory(),
-        ))
-    }
-
-    fn switched(r: Release<SparklineSettings>) -> SparkSeries {
-        let Release::Switch(s) = r else {
-            panic!("expected a switch");
-        };
-        s.spark.series
-    }
-
-    /// KI-08: the second of two fast presses gets OpenDeck's settings from
-    /// before the first.
-    #[test]
-    fn two_fast_presses_advance_two_series() {
-        let a = action();
-        let stale = SparklineSettings::default();
-        let first = switched(a.release("ctx1", &stale, Press::Short));
-        let second = switched(a.release("ctx1", &stale, Press::Short));
-        assert_eq!(first, SparkSeries::BetweenPolls);
-        assert_eq!(second, SparkSeries::Today);
-    }
-
-    #[test]
-    fn a_press_after_new_settings_starts_from_them() {
-        let a = action();
-        a.release("ctx1", &SparklineSettings::default(), Press::Short);
-        let pi: SparklineSettings = serde_json::from_str(r#"{"series":"evenBurn"}"#).unwrap();
-        a.latest.set("ctx1", &pi);
-        assert_eq!(
-            switched(a.release("ctx1", &pi, Press::Short)),
-            SparkSeries::Trend
-        );
     }
 }

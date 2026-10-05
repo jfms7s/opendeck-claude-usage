@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::format::DISABLED_COLOR;
 use crate::level::{ColorSettings, Level};
 use crate::metric::{COST_ACCENT, format_cost_compact};
-use crate::serde_util::{or_default, positive_or_none};
+use crate::settings::{lenient, positive_or_none};
 use crate::source::console::{ConsoleError, ConsoleSnapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -60,7 +60,7 @@ impl SpendRange {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ApiSpendSettings {
     /// Changed only by pressing the key or dial.
-    #[serde(default, deserialize_with = "or_default")]
+    #[serde(default, deserialize_with = "lenient")]
     pub range: SpendRange,
     /// Monthly budget in dollars; `None` (blank, zero, junk) means none.
     #[serde(

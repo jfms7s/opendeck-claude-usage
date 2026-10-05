@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::sparkline::SparkDisplay;
 use crate::styles::svg;
-use crate::tile::{self, CARD_COLOR, MUTED_TEXT_COLOR, TEXT_COLOR};
+use crate::tile::{self, MUTED_TEXT_COLOR, TEXT_COLOR};
 
 /// The rectangle the line is drawn in: x from `left` to `right`, y from
 /// `top` (highest value) to `bottom` (lowest).
@@ -71,8 +71,8 @@ pub fn render_key(display: &SparkDisplay) -> String {
     svg(&format!("{caption}{headline}{body}"))
 }
 
-/// Own 200-wide wrapper and unsqueezed text, like the heatmap strip -
-/// `styles::svg` and `tile::text_at` assume a 100-wide key.
+/// The 200-wide `tile::strip_svg`, with unsqueezed text like the heatmap
+/// strip.
 pub fn render_strip(display: &SparkDisplay) -> String {
     let caption = tile::escape_xml(&display.caption);
     let headline = tile::escape_xml(&display.headline);
@@ -86,9 +86,9 @@ pub fn render_strip(display: &SparkDisplay) -> String {
     } else {
         chart(&display.points, &STRIP_AREA, color)
     };
-    format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"><rect x="0" y="0" width="200" height="100" fill="{CARD_COLOR}" /><text x="10" y="18" text-anchor="start" font-family="sans-serif" font-size="14" font-weight="700" fill="{TEXT_COLOR}">{caption}</text><text x="190" y="20" text-anchor="end" font-family="sans-serif" font-size="{headline_size}" font-weight="700" fill="{color}">{headline}</text>{body}</svg>"#
-    )
+    tile::strip_svg(&format!(
+        r#"<text x="10" y="18" text-anchor="start" font-family="sans-serif" font-size="14" font-weight="700" fill="{TEXT_COLOR}">{caption}</text><text x="190" y="20" text-anchor="end" font-family="sans-serif" font-size="{headline_size}" font-weight="700" fill="{color}">{headline}</text>{body}"#
+    ))
 }
 
 /// The strip headline's font size: 20, shrunk (down to 10) so it ends
@@ -173,7 +173,10 @@ mod tests {
     fn strip_is_200_wide_with_right_aligned_headline() {
         let s = render_strip(&display(rising()));
         assert!(s.contains(r#"viewBox="0 0 200 100""#));
-        assert!(s.contains(&format!(r#"width="200" height="100" fill="{CARD_COLOR}""#)));
+        assert!(s.contains(&format!(
+            r#"width="200" height="100" fill="{}""#,
+            tile::CARD_COLOR
+        )));
         assert!(s.contains(r##"x="190" y="20" text-anchor="end" font-family="sans-serif" font-size="20" font-weight="700" fill="#d97757">40%</text>"##), "got: {s}");
         assert!(
             s.contains(r#"points="10.00,"#) && s.contains(" 190.00,"),

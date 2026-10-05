@@ -161,7 +161,8 @@ impl ColorSettings {
     }
 }
 
-fn is_hex_color(s: &str) -> bool {
+/// `#rrggbb`, either case - the only color form settings accept.
+pub fn is_hex_color(s: &str) -> bool {
     s.len() == 7 && s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
@@ -359,30 +360,28 @@ mod tests {
         }
     }
 
-    /// KI-11: a stored color that isn't `#rrggbb` must show (and save) the
-    /// default, not the `#000000` an `<input type=color>` falls back to.
+    /// colors.js's marks warning and `Marks::sanitized` must agree on
+    /// which marks the key actually uses: both are checked against the
+    /// same cases (the JS side in tests/pi/colors.test.mjs). The PI's
+    /// KI-11/12/13 behaviour itself is exercised there, under node.
     #[test]
-    fn property_inspector_validates_stored_colors() {
-        let js = include_str!("../assets/propertyInspector/colors.js");
-        assert!(js.contains("function isHexColor"));
-        assert!(js.contains("isHexColor(value)"));
-    }
-
-    /// KI-12: saving must leave untouched default fields out, so a later
-    /// release can change the defaults for keys that never set them.
-    #[test]
-    fn property_inspector_saves_only_changed_color_fields() {
-        let js = include_str!("../assets/propertyInspector/colors.js");
-        assert!(js.contains("touchedColorFields"));
-        assert!(js.contains("isDefaultColorValue"));
-    }
-
-    /// KI-13: marks that aren't increasing get an inline warning, since
-    /// the plugin silently swaps in the defaults.
-    #[test]
-    fn property_inspector_warns_on_non_increasing_marks() {
-        let js = include_str!("../assets/propertyInspector/colors.js");
-        assert!(js.contains(r#"id="marksWarning""#));
-        assert!(js.contains("function updateMarksWarning"));
+    fn sanitized_marks_match_the_shared_pi_cases() {
+        let cases: Value =
+            serde_json::from_str(include_str!("../tests/pi/marks-cases.json")).unwrap();
+        for case in cases["cases"].as_array().unwrap() {
+            let m: Vec<f64> = serde_json::from_value(case["marks"].clone()).unwrap();
+            let given = marks(m[0], m[1], m[2]);
+            let clamped = marks(
+                m[0].clamp(0.0, 100.0),
+                m[1].clamp(0.0, 100.0),
+                m[2].clamp(0.0, 100.0),
+            );
+            let expected = if case["used"].as_bool().unwrap() {
+                clamped
+            } else {
+                Marks::default()
+            };
+            assert_eq!(given.sanitized(), expected, "marks {m:?}");
+        }
     }
 }

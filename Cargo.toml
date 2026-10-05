@@ -1,7 +1,10 @@
 [package]
 name = "opendeck-claude-usage"
-version = "0.14.2"
+version = "0.15.0"
 edition = "2024"
+# Edition 2024 + let-chains need 1.88; it is also the highest MSRV in the
+# locked dependency tree. CI checks the crate still builds on it.
+rust-version = "1.88"
 license = "MIT"
 description = "OpenDeck plugin: Claude session/weekly/monthly usage on a dial's touch strip or a keypad tile"
 repository = "https://github.com/jfms7s/opendeck-claude-usage"
@@ -19,8 +22,18 @@ log = "0.4"
 simplelog = "0.12"
 base64 = "0.22"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+# O_NOFOLLOW for the history file (already in the tree via tokio).
+libc = "0.2"
 
 [dev-dependencies]
 chrono-tz = "0.10.4"
 tempfile = "3"
 tokio = { version = "1.48", features = ["test-util", "macros", "rt"] }
+
+# Smaller shipped binaries (about a quarter to a third off). `panic` stays
+# `unwind` on purpose: a panicking background task is logged and restarted
+# (see `supervise.rs`), which `abort` would turn into a dead plugin.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

@@ -833,13 +833,14 @@ dependencies = [
 
 [[package]]
 name = "opendeck-claude-usage"
-version = "0.14.2"
+version = "0.15.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
  "chrono-tz",
  "dashmap",
+ "libc",
  "log",
  "openaction",
  "reqwest",

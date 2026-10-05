@@ -32,60 +32,26 @@
 
 		<div id="colors"></div>
 	</main>
+	<script src="pi-common.js"></script>
 	<script src="colors.js"></script>
 
 	<script>
-		window.connectOpenActionSocketData = new Promise((resolve) => {
-			window.connectOpenActionSocket = (...args) => resolve(args);
-			window.connectElgatoStreamDeckSocket = window.connectOpenActionSocket;
+		const pi = connectPI({
+			apply(settings) {
+				selectKnown(document.getElementById("window"), settings.window, "session");
+				selectKnown(document.getElementById("metric"), settings.metric, "pace");
+				applyColorSettings(settings);
+			},
+			read: () => ({
+				window: document.getElementById("window").value,
+				metric: document.getElementById("metric").value,
+				...readColorSettings(),
+			}),
 		});
 
-		let websocket;
-		let uuid;
-
-		mountColorSection(document.getElementById("colors"), { showMode: false, onChange: sendSettings });
-
-		window.connectOpenActionSocketData.then(([inPort, inUUID, inRegisterEvent, inInfo, inActionInfo]) => {
-			uuid = inUUID;
-			const actionInfo = JSON.parse(inActionInfo);
-			websocket = new WebSocket(`ws://127.0.0.1:${inPort}`);
-
-			websocket.onopen = () => {
-				websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
-				applySettings(actionInfo.payload.settings || {});
-			};
-
-			websocket.onmessage = (event) => {
-				const message = JSON.parse(event.data);
-				if (message.event === "didReceiveSettings") {
-					applySettings(message.payload.settings || {});
-				}
-			};
-		});
-
-		function applySettings(settings) {
-			document.getElementById("window").value = settings.window === "weekly" ? "weekly" : "session";
-			// An unknown stored metric would leave the select empty and the
-			// next edit would send "" - show the default instead.
-			const knownMetric = ["pace", "evenBurn", "runway"].includes(settings.metric);
-			document.getElementById("metric").value = knownMetric ? settings.metric : "pace";
-			applyColorSettings(settings);
-		}
-
-		function sendSettings() {
-			websocket.send(JSON.stringify({
-				event: "setSettings",
-				context: uuid,
-				payload: {
-					window: document.getElementById("window").value,
-					metric: document.getElementById("metric").value,
-					...readColorSettings(),
-				},
-			}));
-		}
-
-		document.getElementById("window").addEventListener("change", sendSettings);
-		document.getElementById("metric").addEventListener("change", sendSettings);
+		mountColorSection(document.getElementById("colors"), { showMode: false, onChange: pi.changed });
+		document.getElementById("window").addEventListener("change", pi.changed);
+		document.getElementById("metric").addEventListener("change", pi.changed);
 	</script>
 </body>
 </html>

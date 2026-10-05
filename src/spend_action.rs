@@ -1,16 +1,22 @@
-use crate::hub::Output;
-use crate::press::{LatestSettings, Press, PressTimer, Release, on_release};
-use crate::source::console::{ConsoleData, ConsoleError, ConsoleSnapshot};
-use crate::spend::{ApiSpendSettings, build_spend_display, spend_feedback};
-use crate::spend_icon::render_key;
-use crate::surface::{Surface, for_each_tracked};
-use crate::tile;
+//! API Spend: billed Console spend for Today (UTC), 7 days or this month,
+//! with an optional monthly budget; a short press (key or dial) cycles the
+//! range.
+
+use std::future::Future;
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::NaiveDate;
 use openaction::{Action, Instance, OpenActionResult};
-use std::future::Future;
-use std::sync::Arc;
-use std::time::Duration;
+use tokio::sync::Notify;
+
+use crate::press::{PressCycler, Release};
+use crate::source::console::{ConsoleData, ConsoleError, ConsoleSnapshot};
+use crate::spend::{ApiSpendSettings, build_spend_display, spend_feedback};
+use crate::spend_icon::render_key;
+use crate::surface::{Frames, Output, Surface, for_each_tracked};
+use crate::tasks::{park_while_empty, sleep_to_next_minute};
+use crate::tile;
 
 /// The frame for `settings` on a key or a dial strip.
 fn output_from(
@@ -33,41 +39,36 @@ fn today_utc() -> NaiveDate {
     chrono::Utc::now().date_naive()
 }
 
-/// Redraws read the shared 5-minute cache, so a minute keeps keys in step
-/// with it (and picks up a newly added key file) at no request cost.
-const REFRESH: Duration = Duration::from_secs(60);
-
-fn cycled(settings: &ApiSpendSettings) -> ApiSpendSettings {
+/// These settings with the next range - what a short press (key or dial)
+/// switches to. The range is otherwise only reachable by pressing.
+fn cycled(settings: &ApiSpendSettings) -> Option<ApiSpendSettings> {
     let mut updated = settings.clone();
     updated.range = settings.range.next();
-    updated
-}
-
-/// What a key or dial release does: a short press cycles the range (the
-/// only way to change it), a long press refreshes.
-fn release(press: Press, settings: &ApiSpendSettings) -> Release<ApiSpendSettings> {
-    on_release(press, || Some(cycled(settings)))
+    Some(updated)
 }
 
 #[derive(Clone)]
 pub struct ApiSpendAction {
     console: Arc<dyn ConsoleData>,
-    /// Each visible instance's last-set settings: what the tick redraws,
-    /// and what a press starts from (see `LatestSettings`).
-    registry: Arc<LatestSettings<ApiSpendSettings>>,
-    /// Tells a short press (next range) from a long one (refresh).
-    presses: Arc<PressTimer>,
+    /// Each visible instance's last-set settings - what the tick redraws,
+    /// and what a press starts from (KI-07, KI-08).
+    presses: Arc<PressCycler<ApiSpendSettings>>,
+    frames: Arc<Frames>,
+    /// Pinged when an instance appears, so a parked tick loop resumes.
+    wake: Arc<Notify>,
 }
 
 impl ApiSpendAction {
     pub fn new(console: Arc<dyn ConsoleData>) -> Self {
         Self {
             console,
-            registry: Arc::new(LatestSettings::default()),
-            presses: Arc::new(PressTimer::default()),
+            presses: Arc::new(PressCycler::default()),
+            frames: Arc::new(Frames::default()),
+            wake: Arc::new(Notify::new()),
         }
     }
 
+    /// The frame for `settings`, reading the Console cache.
     async fn output(&self, settings: &ApiSpendSettings, keypad: bool) -> Output {
         output_from(
             &self.console.snapshot().await,
@@ -77,25 +78,29 @@ impl ApiSpendAction {
         )
     }
 
-    async fn render(
+    async fn render<S: Surface + ?Sized>(
         &self,
-        instance: &impl Surface,
+        surface: &S,
         settings: &ApiSpendSettings,
     ) -> OpenActionResult<()> {
-        instance
-            .push(self.output(settings, instance.is_keypad()).await)
-            .await
+        let output = self.output(settings, surface.is_keypad()).await;
+        self.frames.push(surface, output).await
     }
 
     fn track(&self, instance_id: &str, settings: &ApiSpendSettings) {
-        self.registry.set(instance_id, settings);
+        self.presses.set(instance_id, settings);
+        self.wake.notify_one();
     }
 
-    /// Runs forever: every minute, re-renders every visible API Spend key
-    /// and dial. Spawned once from `main.rs`.
-    pub async fn tick_loop(&self) {
+    /// Runs forever: just after every minute boundary, re-renders every
+    /// visible API Spend key and dial from the shared 5-minute cache (which
+    /// also picks up a newly added key file) - no extra requests, and
+    /// unchanged frames aren't resent. Parks while none is visible.
+    /// Spawned once from `main.rs`, supervised.
+    pub async fn tick_loop(self) {
         loop {
-            tokio::time::sleep(REFRESH).await;
+            park_while_empty(|| self.presses.is_empty(), &self.wake).await;
+            sleep_to_next_minute().await;
             self.render_tracked(openaction::get_instance).await;
         }
     }
@@ -109,16 +114,18 @@ impl ApiSpendAction {
         L: FnMut(String) -> LF,
         LF: Future<Output = Option<S>>,
     {
+        // Read once, up front: an await between reading an instance's
+        // settings and pushing its frame would reopen the race.
         let outcome = self.console.snapshot().await;
         let outcome = &outcome;
         let today = today_utc();
         for_each_tracked(
-            self.registry.ids(),
-            |id| self.registry.get(id),
+            self.presses.ids(),
+            |id| self.presses.get(id),
             lookup,
-            |instance, settings| async move {
-                let output = output_from(outcome, &settings, instance.is_keypad(), today);
-                if let Err(e) = instance.push(output).await {
+            |surface, settings| async move {
+                let output = output_from(outcome, &settings, surface.is_keypad(), today);
+                if let Err(e) = self.frames.push(&surface, output).await {
                     log::warn!("api spend render failed: {e}");
                 }
             },
@@ -126,44 +133,31 @@ impl ApiSpendAction {
         .await;
     }
 
-    fn release(
-        &self,
-        instance_id: &str,
-        settings: &ApiSpendSettings,
-        press: Press,
-    ) -> Release<ApiSpendSettings> {
-        self.registry
-            .release(instance_id, settings, |s| release(press, s))
-    }
-
     /// Short press (key or dial) moves to the next range; a long press
-    /// redraws from the cache.
-    async fn released(
+    /// redraws from the cache (it can't bypass the 5-minute throttle).
+    async fn released<S: Surface + ?Sized>(
         &self,
-        instance: &Instance,
+        surface: &S,
         settings: &ApiSpendSettings,
     ) -> OpenActionResult<()> {
-        let press = self.presses.up(&instance.instance_id);
-        match self.release(&instance.instance_id, settings, press) {
+        match self.presses.up(surface.id(), settings, cycled) {
             Release::Refresh => {
-                let current = self.registry.current(&instance.instance_id, settings);
-                self.render(instance, &current).await
+                let current = self.presses.current(surface.id(), settings);
+                self.render(surface, &current).await
             }
-            Release::Switch(updated) => self.show_range(instance, updated).await,
+            Release::Switch(updated) => {
+                // Already kept by `up`, so a tick meanwhile draws it.
+                let saved = match serde_json::to_value(&updated) {
+                    Ok(value) => surface.persist(value).await,
+                    Err(e) => Err(e.into()),
+                };
+                if let Err(e) = saved {
+                    log::warn!("could not save the api spend range: {e}");
+                }
+                self.render(surface, &updated).await
+            }
             Release::Stay => Ok(()),
         }
-    }
-
-    async fn show_range(
-        &self,
-        instance: &Instance,
-        updated: ApiSpendSettings,
-    ) -> OpenActionResult<()> {
-        // Already kept by `release`, so a tick meanwhile draws it.
-        if let Err(e) = instance.set_settings(&updated).await {
-            log::warn!("could not persist api spend range: {e}");
-        }
-        self.render(instance, &updated).await
     }
 }
 
@@ -177,6 +171,7 @@ impl Action for ApiSpendAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
+        self.frames.forget(&instance.instance_id);
         self.track(&instance.instance_id, settings);
         self.render(instance, settings).await
     }
@@ -196,7 +191,7 @@ impl Action for ApiSpendAction {
         _settings: &Self::Settings,
     ) -> OpenActionResult<()> {
         self.presses.forget(&instance.instance_id);
-        self.registry.forget(&instance.instance_id);
+        self.frames.forget(&instance.instance_id);
         Ok(())
     }
 
@@ -235,8 +230,10 @@ impl Action for ApiSpendAction {
 mod tests {
     use super::*;
     use crate::spend::SpendRange;
+    use crate::surface::test_support::FakeSurface;
+    use crate::test_support::{assert_feedback_matches_layout, manifest_entry};
     use base64::Engine as _;
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     struct FixedConsole(Result<ConsoleSnapshot, ConsoleError>);
 
@@ -266,13 +263,7 @@ mod tests {
 
     #[test]
     fn action_uuid_matches_the_shipped_manifest() {
-        let manifest: Value =
-            serde_json::from_str(include_str!("../assets/manifest.json")).unwrap();
-        let entry = &manifest["Actions"][7];
-        assert_eq!(
-            entry["UUID"].as_str().unwrap(),
-            <ApiSpendAction as Action>::UUID
-        );
+        let entry = manifest_entry(<ApiSpendAction as Action>::UUID);
         assert_eq!(entry["Controllers"], json!(["Encoder", "Keypad"]));
         assert_eq!(entry["Encoder"]["layout"], "layouts/usage.json");
         assert_eq!(
@@ -283,18 +274,13 @@ mod tests {
     }
 
     #[test]
-    fn the_action_icon_is_shipped() {
-        assert!(!include_bytes!("../assets/icons/apispend.png").is_empty());
-    }
-
-    #[test]
     fn feedback_keys_match_the_shipped_layout() {
         let d = build_spend_display(
             Ok(&ConsoleSnapshot::default()),
             &ApiSpendSettings::default(),
             today_utc(),
         );
-        crate::test_support::assert_feedback_matches_layout(
+        assert_feedback_matches_layout(
             include_str!("../assets/layouts/usage.json"),
             &spend_feedback(&d),
             &[],
@@ -329,45 +315,34 @@ mod tests {
     }
 
     #[test]
-    fn a_release_cycles_when_short_and_refreshes_when_long() {
-        let s = ApiSpendSettings::default();
-        assert_eq!(release(Press::Short, &s), Release::Switch(cycled(&s)));
-        assert_eq!(cycled(&s).range, SpendRange::Today);
-        assert_eq!(release(Press::Long, &s), Release::Refresh);
+    fn cycled_changes_only_the_range() {
+        let s = ApiSpendSettings {
+            budget_dollars: Some(40.0),
+            ..ApiSpendSettings::default()
+        };
+        let c = cycled(&s).unwrap();
+        assert_eq!(c.range, SpendRange::Today);
+        assert_eq!(c.budget_dollars, Some(40.0));
     }
 
     /// KI-08: the second of two fast presses gets OpenDeck's settings from
     /// before the first - it must move on again, not repeat the first.
-    #[test]
-    fn two_fast_presses_cycle_twice() {
+    #[tokio::test]
+    async fn two_fast_presses_cycle_twice() {
         let a = action(Ok(ConsoleSnapshot::default()));
         let stale = ApiSpendSettings::default();
         a.track("ctx1", &stale);
-        let Release::Switch(first) = a.release("ctx1", &stale, Press::Short) else {
-            panic!("expected a switch");
-        };
-        let Release::Switch(second) = a.release("ctx1", &stale, Press::Short) else {
-            panic!("expected a switch");
-        };
-        assert_eq!(first.range, SpendRange::Today);
-        assert_eq!(second.range, SpendRange::SevenDay);
-    }
-
-    #[derive(Clone, Default)]
-    struct FakeSurface {
-        pushed: Arc<std::sync::Mutex<Vec<Output>>>,
-    }
-
-    #[async_trait]
-    impl Surface for FakeSurface {
-        fn is_keypad(&self) -> bool {
-            true
-        }
-
-        async fn push(&self, output: Output) -> OpenActionResult<()> {
-            self.pushed.lock().unwrap().push(output);
-            Ok(())
-        }
+        let key = FakeSurface::new("ctx1", true);
+        a.released(&key, &stale).await.unwrap();
+        a.released(&key, &stale).await.unwrap();
+        let ranges: Vec<_> = key
+            .persisted
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|v| v["range"].clone())
+            .collect();
+        assert_eq!(ranges, ["today", "sevenday"]);
     }
 
     /// KI-07: a range changed while the tick awaits the instance lookup
@@ -376,9 +351,9 @@ mod tests {
     async fn a_range_cycled_during_the_lookup_is_the_one_drawn() {
         let action = action(Ok(ConsoleSnapshot::default()));
         let month = ApiSpendSettings::default();
-        let today = cycled(&month);
+        let today = cycled(&month).unwrap();
         action.track("ctx1", &month);
-        let surface = FakeSurface::default();
+        let surface = FakeSurface::new("ctx1", true);
         action
             .render_tracked(|id| {
                 action.track(&id, &today); // the press lands here
@@ -386,29 +361,6 @@ mod tests {
             })
             .await;
         let expected = action.output(&today, true).await;
-        assert!(
-            *surface.pushed.lock().unwrap() == vec![expected],
-            "drew the old range"
-        );
-    }
-
-    #[test]
-    fn property_inspector_has_budget_colors_and_key_help() {
-        let html = include_str!("../assets/propertyInspector/apispend.html");
-        assert!(html.contains(r#"id="budgetDollars""#));
-        assert!(html.contains(r#"<script src="colors.js"></script>"#));
-        assert!(html.contains("~/.config/opendeck-claude-usage/admin-key"));
-        assert!(html.contains("chmod 600"));
-        assert!(html.contains("Short press (key or dial)"));
-    }
-
-    /// KI-14: the range changes only by pressing, so the PI passes the
-    /// stored one through and re-reads it before saving.
-    #[test]
-    fn property_inspector_keeps_the_pressed_range() {
-        let html = include_str!("../assets/propertyInspector/apispend.html");
-        assert!(html.contains("storedRange"));
-        assert!(html.contains(r#"event: "getSettings""#));
-        assert!(html.contains("pendingSave"));
+        assert!(surface.frames() == vec![expected], "drew the old range");
     }
 }

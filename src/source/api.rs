@@ -28,9 +28,14 @@ pub struct ApiUsageSource {
 
 impl ApiUsageSource {
     pub fn new(credentials_path: PathBuf) -> Self {
+        // The request carries the user's OAuth token, so it goes nowhere but
+        // the fixed https URL: no redirects (a 3xx is just a failed
+        // request), and never plain http.
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .user_agent(concat!("opendeck-claude-usage/", env!("CARGO_PKG_VERSION")))
+            .redirect(reqwest::redirect::Policy::none())
+            .https_only(true)
             .build()
             .expect("reqwest client with static config");
         Self {
@@ -72,8 +77,17 @@ struct RawOauth {
 /// one that has already expired rather than sending a request that can
 /// only come back 401.
 fn parse_token(json: &str, now: DateTime<Utc>) -> Result<String, UsageSourceError> {
-    let raw: RawCredentials = serde_json::from_str(json)
-        .map_err(|e| UsageSourceError::Credentials(format!("unreadable credentials: {e}")))?;
+    // serde_json's message quotes the offending value - which here could be
+    // the token itself (e.g. if `claudeAiOauth` were ever stored as a
+    // string). Errors are logged, so only say where and what kind.
+    let raw: RawCredentials = serde_json::from_str(json).map_err(|e| {
+        UsageSourceError::Credentials(format!(
+            "unreadable credentials file ({:?} error at line {}, column {})",
+            e.classify(),
+            e.line(),
+            e.column()
+        ))
+    })?;
     if let Some(ms) = raw.oauth.expires_at
         && ms <= now.timestamp_millis()
     {
@@ -88,7 +102,10 @@ fn parse_token(json: &str, now: DateTime<Utc>) -> Result<String, UsageSourceErro
 struct RawUsage {
     five_hour: RawWindow,
     seven_day: RawWindow,
-    extra_usage: RawExtraUsage,
+    /// Missing on some accounts (or in a future response shape): that
+    /// only means extra usage isn't enabled, not that nothing parsed.
+    #[serde(default)]
+    extra_usage: Option<RawExtraUsage>,
 }
 
 #[derive(Deserialize)]
@@ -134,13 +151,33 @@ fn parse_snapshot(json: &str) -> Result<UsageSnapshot, UsageSourceError> {
         // `extra_usage` enabled, so there's no real sample to check the
         // assumption against. If a real account later shows fractional-cent
         // drift here, that's the first place to look.
-        monthly: MonthlyUsage {
-            enabled: raw.extra_usage.is_enabled,
-            percent: raw.extra_usage.utilization,
-            used_dollars: raw.extra_usage.used_credits,
-            limit_dollars: raw.extra_usage.monthly_limit,
+        monthly: match raw.extra_usage {
+            Some(extra) => MonthlyUsage {
+                enabled: extra.is_enabled,
+                percent: extra.utilization,
+                used_dollars: extra.used_credits,
+                limit_dollars: extra.monthly_limit,
+            },
+            None => MonthlyUsage {
+                enabled: false,
+                percent: None,
+                used_dollars: None,
+                limit_dollars: None,
+            },
         },
     })
+}
+
+/// The error for a non-2xx response: only the status (never the body),
+/// plus `Retry-After` (in seconds) on a 429.
+fn status_error(status: reqwest::StatusCode, retry_after: Option<&str>) -> UsageSourceError {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        UsageSourceError::RateLimited {
+            retry_after_secs: retry_after.and_then(|v| v.trim().parse().ok()),
+        }
+    } else {
+        UsageSourceError::Request(format!("HTTP {status}"))
+    }
 }
 
 #[async_trait]
@@ -161,7 +198,11 @@ impl UsageSource for ApiUsageSource {
             .map_err(|e| UsageSourceError::Request(e.to_string()))?;
         let status = response.status();
         if !status.is_success() {
-            return Err(UsageSourceError::Request(format!("HTTP {status}")));
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok());
+            return Err(status_error(status, retry_after));
         }
         let body = response
             .text()
@@ -176,14 +217,17 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    // A trimmed real response from the usage endpoint, keeping only the
-    // fields this plugin reads.
+    // Synthetic: the session/weekly shape is copied from a real response,
+    // but the account used to build this has never had extra usage
+    // enabled, so the `extra_usage` values are made up (see
+    // `parse_snapshot`).
     const ENABLED_MONTHLY: &str = r#"{
         "five_hour": {"utilization": 33.0, "resets_at": "2026-09-13T22:40:00.186282+00:00"},
         "seven_day": {"utilization": 29.0, "resets_at": "2026-09-17T06:00:00.186306+00:00"},
         "extra_usage": {"is_enabled": true, "monthly_limit": 50.0, "used_credits": 12.5, "utilization": 25.0, "currency": "USD"}
     }"#;
 
+    // A trimmed real response, keeping only the fields this plugin reads.
     const DISABLED_MONTHLY: &str = r#"{
         "five_hour": {"utilization": 33.0, "resets_at": "2026-09-13T22:40:00.186282+00:00"},
         "seven_day": {"utilization": 29.0, "resets_at": "2026-09-17T06:00:00.186306+00:00"},
@@ -276,14 +320,79 @@ mod tests {
         assert!(matches!(result, Err(UsageSourceError::Credentials(_))));
     }
 
+    #[test]
+    fn a_response_without_extra_usage_is_monthly_off() {
+        let json = r#"{
+            "five_hour": {"utilization": 1.0, "resets_at": null},
+            "seven_day": {"utilization": 2.0, "resets_at": null}
+        }"#;
+        let snapshot = parse_snapshot(json).unwrap();
+        assert_eq!(snapshot.session.percent, 1.0);
+        assert!(!snapshot.monthly.enabled);
+        assert_eq!(snapshot.monthly.percent, None);
+    }
+
+    /// The credentials file holds a refresh token that never expires;
+    /// errors are logged, so a parse error must not quote the file.
+    #[test]
+    fn a_credentials_parse_error_does_not_echo_the_token() {
+        for json in [
+            r#"{"claudeAiOauth": "sk-ant-oat01-SECRET"}"#,
+            r#"{"claudeAiOauth": {"accessToken": ["sk-ant-oat01-SECRET"]}}"#,
+            r#"{"claudeAiOauth": {"accessToken": "sk-ant-oat01-SECRET", "expiresAt": "SECRET"}}"#,
+            r#"sk-ant-oat01-SECRET"#,
+        ] {
+            let err = parse_token(json, noon()).unwrap_err();
+            assert!(matches!(err, UsageSourceError::Credentials(_)));
+            assert!(!err.to_string().contains("SECRET"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_429_is_rate_limited_with_its_retry_after() {
+        use reqwest::StatusCode;
+        assert!(matches!(
+            status_error(StatusCode::TOO_MANY_REQUESTS, Some("120")),
+            UsageSourceError::RateLimited {
+                retry_after_secs: Some(120)
+            }
+        ));
+        // An HTTP-date Retry-After isn't used; the backoff still applies.
+        assert!(matches!(
+            status_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                Some("Wed, 21 Oct 2026 07:28:00 GMT")
+            ),
+            UsageSourceError::RateLimited {
+                retry_after_secs: None
+            }
+        ));
+        assert!(matches!(
+            status_error(StatusCode::FOUND, None),
+            UsageSourceError::Request(ref m) if m.contains("302")
+        ));
+    }
+
     /// Hits the real endpoint with this machine's real Claude login - run by
-    /// hand (`cargo test -- --ignored live_`) to check the API still matches
-    /// `parse_snapshot`, never in CI.
+    /// hand (`cargo test -- --ignored live_`) before a release to check the
+    /// API still matches `parse_snapshot`, never in CI. Record the date and
+    /// version of the last run in the vault's known-issues note.
     #[tokio::test]
     #[ignore]
     async fn live_read_against_the_real_api() {
         let snapshot = ApiUsageSource::default().read().await.unwrap();
         println!("{snapshot:?}");
-        assert!(snapshot.session.resets_at.is_some());
+        for (name, window) in [("session", &snapshot.session), ("weekly", &snapshot.weekly)] {
+            assert!(
+                (0.0..=100.0).contains(&window.percent),
+                "{name} percent out of range: {}",
+                window.percent
+            );
+            // An idle window (0%) has no reset time; a used one must.
+            assert!(
+                window.resets_at.is_some() || window.percent == 0.0,
+                "{name} is in use but has no reset time"
+            );
+        }
     }
 }

@@ -45,75 +45,44 @@
 			</div>
 		</section>
 	</main>
+	<script src="pi-common.js"></script>
 
 	<script>
-		window.connectOpenActionSocketData = new Promise((resolve) => {
-			window.connectOpenActionSocket = (...args) => resolve(args);
-			window.connectElgatoStreamDeckSocket = window.connectOpenActionSocket;
-		});
-
-		let websocket;
-		let uuid;
-
-		window.connectOpenActionSocketData.then(([inPort, inUUID, inRegisterEvent, inInfo, inActionInfo]) => {
-			uuid = inUUID;
-			const actionInfo = JSON.parse(inActionInfo);
-			websocket = new WebSocket(`ws://127.0.0.1:${inPort}`);
-
-			websocket.onopen = () => {
-				websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
-				applySettings(actionInfo.payload.settings || {});
-			};
-
-			websocket.onmessage = (event) => {
-				const message = JSON.parse(event.data);
-				if (message.event === "didReceiveSettings") {
-					applySettings(message.payload.settings || {});
-				}
-			};
-		});
-
-		function applySettings(settings) {
-			document.getElementById("source").value = settings.source === "console" ? "console" : "logs";
-			document.getElementById("metric").value = settings.metric || "tokens";
-			document.getElementById("range").value = settings.range || "today";
-			document.getElementById("refresh_seconds").value = settings.refresh_seconds || 60;
-			syncSource(false);
-		}
-
-		function sendSettings() {
-			const refreshSeconds = Math.min(3600, Math.max(5, parseInt(document.getElementById("refresh_seconds").value, 10) || 60));
-			websocket.send(JSON.stringify({
-				event: "setSettings",
-				context: uuid,
-				payload: {
-					metric: document.getElementById("metric").value,
-					range: document.getElementById("range").value,
-					refresh_seconds: refreshSeconds,
-					source: document.getElementById("source").value,
-				},
-			}));
-		}
-
 		// Console data only has whole UTC days - no 5-hour session. A saved
 		// Session range stays selected (the tile shows "5H N/A"); only the
 		// user switching to Console moves it to Today, and that gets saved.
 		function syncSource(moveOffSession) {
 			const consoleSource = document.getElementById("source").value === "console";
 			const range = document.getElementById("range");
-			range.querySelector('option[value="session"]').disabled = consoleSource;
+			Array.from(range.options).find((o) => o.value === "session").disabled = consoleSource;
 			if (moveOffSession && consoleSource && range.value === "session") range.value = "today";
 			document.getElementById("consoleHint").classList.toggle("hidden", !consoleSource);
 		}
 
-		document.getElementById("source").addEventListener("change", () => {
-			syncSource(true);
-			sendSettings();
+		const pi = connectPI({
+			apply(settings) {
+				selectKnown(document.getElementById("metric"), settings.metric, "tokens");
+				selectKnown(document.getElementById("range"), settings.range, "today");
+				selectKnown(document.getElementById("source"), settings.source, "logs");
+				const seconds = Number(settings.refresh_seconds);
+				document.getElementById("refresh_seconds").value = Number.isInteger(seconds) && seconds > 0 ? seconds : 60;
+				syncSource(false);
+			},
+			read: () => ({
+				metric: document.getElementById("metric").value,
+				range: document.getElementById("range").value,
+				refresh_seconds: Math.min(3600, Math.max(5, parseInt(document.getElementById("refresh_seconds").value, 10) || 60)),
+				source: document.getElementById("source").value,
+			}),
 		});
 
-		document.getElementById("metric").addEventListener("change", sendSettings);
-		document.getElementById("range").addEventListener("change", sendSettings);
-		document.getElementById("refresh_seconds").addEventListener("change", sendSettings);
+		for (const id of ["metric", "range", "refresh_seconds"]) {
+			document.getElementById(id).addEventListener("change", pi.changed);
+		}
+		document.getElementById("source").addEventListener("change", () => {
+			syncSource(true);
+			pi.changed();
+		});
 	</script>
 </body>
 </html>

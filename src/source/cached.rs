@@ -1,12 +1,37 @@
 use super::{UsageSnapshot, UsageSource, UsageSourceError};
 use async_trait::async_trait;
+use std::collections::hash_map::RandomState;
 use std::fmt::Display;
-use std::sync::Arc;
+use std::hash::BuildHasher;
+use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 type Outcome = Result<UsageSnapshot, UsageSourceError>;
+
+/// How often to ask, how long to wait before retrying, and how long a
+/// last-good snapshot may stand in for a failing source. See
+/// `CachedSource`.
+#[derive(Debug, Clone, Copy)]
+pub struct CachePolicy {
+    /// Time between requests after a success - and the base delay that
+    /// doubles with each consecutive failure.
+    pub min_interval: Duration,
+    /// Each interval after a success is stretched or shrunk by up to this
+    /// fraction at random, so this plugin's requests don't stay in lockstep
+    /// with anything else polling the same per-account limit.
+    pub jitter: f64,
+    /// Upper bound on the doubling retry delay.
+    pub max_backoff: Duration,
+    /// How old the last successful snapshot may get while it's still shown
+    /// in place of a failure. Past this, callers see the error instead.
+    pub stale_after: Duration,
+}
+
+/// A `Retry-After` longer than this is treated as this - an hour without a
+/// retry is already "no data" on every key.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
 
 /// One upstream read that `CachedSource` throttles. Every `UsageSource` is
 /// one (blanket impl below); the Console Admin API source implements it
@@ -19,6 +44,12 @@ pub trait Fetch: Send + Sync {
     const LABEL: &'static str;
 
     async fn fetch(&self) -> Result<Self::Snapshot, Self::Error>;
+
+    /// How long the server asked us to wait after this failure, if it did
+    /// (a 429's `Retry-After`). The retry waits at least that long.
+    fn retry_after(_error: &Self::Error) -> Option<Duration> {
+        None
+    }
 
     /// A failure that costs nothing to re-check (a missing local key
     /// file): retried on the very next read, with no backoff and no
@@ -45,84 +76,104 @@ impl<T: UsageSource> Fetch for T {
     async fn fetch(&self) -> Outcome {
         self.read().await
     }
+
+    fn retry_after(error: &UsageSourceError) -> Option<Duration> {
+        match error {
+            UsageSourceError::RateLimited {
+                retry_after_secs: Some(secs),
+            } => Some(Duration::from_secs(*secs)),
+            _ => None,
+        }
+    }
 }
 
-/// How long to wait before retrying, and how long a last-good snapshot may
-/// stand in for a failing source. See `CachedSource`.
-#[derive(Debug, Clone, Copy)]
-pub struct CachePolicy {
-    /// Minimum time between requests after a success - and the base delay
-    /// that doubles with each consecutive failure.
-    pub min_interval: Duration,
-    /// Upper bound on the doubling retry delay.
-    pub max_backoff: Duration,
-    /// How old the last successful snapshot may get while it's still shown
-    /// in place of a failure. Past this, callers see the error instead.
-    pub stale_after: Duration,
+/// The usage data every action shares: reads go through one throttle, so
+/// however many keys, dials and taps there are, the account's rate limit
+/// (shared with Claude Code's own `/usage`) sees one client. Only
+/// `CachedSource` implements this, so an action can't be handed a raw,
+/// unthrottled `ApiUsageSource` - that doesn't compile.
+#[async_trait]
+pub trait SharedUsage: Send + Sync {
+    /// The current usage, fetching only when the throttle allows.
+    async fn read(&self) -> Outcome;
+    /// What `read` would hand out right now, without ever fetching or
+    /// waiting for a fetch in progress; `None` before the first read
+    /// finished. Applies the same staleness rule as `read`.
+    fn peek(&self) -> Option<Outcome>;
 }
 
 /// Wraps a `Fetch` source and throttles it, all in memory - nothing is
 /// persisted, so the cache lives and dies with the plugin process:
 ///
-/// - After a success, the inner source isn't hit again for `min_interval`.
-/// - After `n` consecutive failures (a 429 from a shared per-account rate
-///   limit, a network blip, an expired token), the next attempt waits
-///   `min_interval * 2^n`, capped at `max_backoff`.
+/// - After a success, the inner source isn't hit again for `min_interval`
+///   (± `jitter`).
+/// - After `n` consecutive failures (a 429 from the shared per-account
+///   rate limit, a network blip, an expired token), the next attempt waits
+///   `min_interval * 2^n`, capped at `max_backoff` - or longer, if a 429
+///   said `Retry-After`.
 /// - A local failure (`Fetch::is_local`) is re-checked on the next read
 ///   instead, without growing the backoff - and so is any outcome once the
 ///   source reports its input changed (`Fetch::input_changed`).
 /// - While failing, callers keep getting the last successful snapshot until
 ///   it's older than `stale_after`, so one rejected request doesn't flip
-///   every dial to "no data".
+///   every key to "no data".
 ///
-/// Cloning shares the cache, which is how every action reading one source
-/// ends up behind a single request budget.
+/// Cloning shares the cache: every action reading one source reads one
+/// clone.
 pub struct CachedSource<S: Fetch> {
     inner: Arc<Inner<S>>,
 }
+
+/// The OAuth usage cache - the one `SharedUsage`.
+pub type CachedUsageSource<S> = CachedSource<S>;
 
 struct Inner<S: Fetch> {
     source: S,
     policy: CachePolicy,
     /// Held across the inner read, so concurrent callers that all find the
     /// cache expired wait for one request instead of each firing their own.
-    state: Mutex<State<S::Snapshot, S::Error>>,
+    fetch: Mutex<Schedule>,
+    /// What callers are served. Only briefly locked, never across an
+    /// await, so `peek` never waits on a slow request.
+    served: std::sync::Mutex<Served<S::Snapshot, S::Error>>,
 }
 
-struct State<T, E> {
-    last_good: Option<(Instant, T)>,
-    last_error: Option<E>,
+#[derive(Default)]
+struct Schedule {
     consecutive_failures: u32,
     /// `None` until the first read (and after a local failure), meaning the
     /// next read goes to the source.
     next_attempt: Option<Instant>,
 }
 
-impl<T, E> Default for State<T, E> {
+struct Served<T, E> {
+    last_good: Option<(Instant, T)>,
+    last_error: Option<E>,
+}
+
+impl<T, E> Default for Served<T, E> {
     fn default() -> Self {
         Self {
             last_good: None,
             last_error: None,
-            consecutive_failures: 0,
-            next_attempt: None,
         }
     }
 }
 
-impl<T: Clone, E: Clone> State<T, E> {
-    /// What callers see between attempts: the last good snapshot while it's
-    /// fresh enough, otherwise the most recent error.
-    fn served(&self, now: Instant, stale_after: Duration) -> Result<T, E> {
+impl<T: Clone, E: Clone> Served<T, E> {
+    /// The last good snapshot while it's fresh enough, otherwise the most
+    /// recent error; `None` before anything was read.
+    fn outcome(&self, now: Instant, stale_after: Duration) -> Option<Result<T, E>> {
         match (&self.last_good, &self.last_error) {
             (Some((at, snapshot)), _) if now.duration_since(*at) < stale_after => {
-                Ok(snapshot.clone())
+                Some(Ok(snapshot.clone()))
             }
-            (_, Some(error)) => Err(error.clone()),
+            (_, Some(error)) => Some(Err(error.clone())),
             // A stale snapshot with no error recorded can't happen (a
             // snapshot only goes stale while attempts keep failing), but
             // serving it beats inventing an error.
-            (Some((_, snapshot)), None) => Ok(snapshot.clone()),
-            (None, None) => unreachable!("served() is only called after a first read"),
+            (Some((_, snapshot)), None) => Some(Ok(snapshot.clone())),
+            (None, None) => None,
         }
     }
 }
@@ -145,34 +196,60 @@ fn backoff(policy: &CachePolicy, consecutive_failures: u32) -> Duration {
         .min(policy.max_backoff)
 }
 
+/// `base` stretched by `jitter * unit`, for `unit` in -1..=1.
+fn jittered(base: Duration, jitter: f64, unit: f64) -> Duration {
+    base.mul_f64((1.0 + jitter.clamp(0.0, 1.0) * unit.clamp(-1.0, 1.0)).max(0.0))
+}
+
+/// A random number in -1..=1. `RandomState` is randomly keyed per
+/// instance, which is plenty for spreading out a poll.
+fn random_unit() -> f64 {
+    let bits = RandomState::new().hash_one(0u8);
+    (bits as f64 / u64::MAX as f64) * 2.0 - 1.0
+}
+
 impl<S: Fetch> CachedSource<S> {
     pub fn new(source: S, policy: CachePolicy) -> Self {
         Self {
             inner: Arc::new(Inner {
                 source,
                 policy,
-                state: Mutex::new(State::default()),
+                fetch: Mutex::new(Schedule::default()),
+                served: std::sync::Mutex::new(Served::default()),
             }),
         }
     }
 
+    fn served(&self) -> std::sync::MutexGuard<'_, Served<S::Snapshot, S::Error>> {
+        // Plain data, valid after any panic: keep serving it.
+        self.inner
+            .served
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The current snapshot, fetching only when the throttle allows.
     pub async fn read(&self) -> Result<S::Snapshot, S::Error> {
         let policy = &self.inner.policy;
-        let mut state = self.inner.state.lock().await;
+        let mut schedule = self.inner.fetch.lock().await;
         let now = Instant::now();
-        if state.next_attempt.is_some_and(|at| now < at) {
-            if !self.inner.source.input_changed().await {
-                return state.served(now, policy.stale_after);
+        if schedule.next_attempt.is_some_and(|at| now < at) {
+            if self.inner.source.input_changed().await {
+                schedule.consecutive_failures = 0;
+            } else if let Some(outcome) = self.served().outcome(now, policy.stale_after) {
+                return outcome;
             }
-            state.consecutive_failures = 0;
         }
 
-        match self.inner.source.fetch().await {
+        let result = self.inner.source.fetch().await;
+        let mut served = self.served();
+        match result {
             Ok(snapshot) => {
-                state.last_good = Some((now, snapshot.clone()));
-                state.last_error = None;
-                state.consecutive_failures = 0;
-                state.next_attempt = Some(now + policy.min_interval);
+                served.last_good = Some((now, snapshot.clone()));
+                served.last_error = None;
+                schedule.consecutive_failures = 0;
+                schedule.next_attempt =
+                    Some(now + jittered(policy.min_interval, policy.jitter, random_unit()));
                 Ok(snapshot)
             }
             Err(error) if S::is_local(&error) => {
@@ -180,56 +257,89 @@ impl<S: Fetch> CachedSource<S> {
                     "{} unavailable, re-checking on the next read: {error}",
                     S::LABEL
                 );
-                state.last_error = Some(error);
-                state.next_attempt = None;
-                state.served(now, policy.stale_after)
+                served.last_error = Some(error.clone());
+                schedule.next_attempt = None;
+                served
+                    .outcome(now, policy.stale_after)
+                    .unwrap_or(Err(error))
             }
             Err(error) => {
-                state.consecutive_failures += 1;
-                let delay = backoff(policy, state.consecutive_failures);
+                schedule.consecutive_failures += 1;
+                let mut delay = backoff(policy, schedule.consecutive_failures);
+                if let Some(wait) = S::retry_after(&error) {
+                    delay = delay.max(wait.min(MAX_RETRY_AFTER));
+                }
                 log::warn!(
                     "{} fetch failed ({} in a row), retrying in {}s: {error}",
                     S::LABEL,
-                    state.consecutive_failures,
+                    schedule.consecutive_failures,
                     delay.as_secs()
                 );
-                state.last_error = Some(error);
-                state.next_attempt = Some(now + delay);
-                state.served(now, policy.stale_after)
+                served.last_error = Some(error.clone());
+                schedule.next_attempt = Some(now + delay);
+                served
+                    .outcome(now, policy.stale_after)
+                    .unwrap_or(Err(error))
             }
         }
+    }
+
+    /// What `read` would hand out right now, without ever fetching.
+    pub fn peek(&self) -> Option<Result<S::Snapshot, S::Error>> {
+        self.served()
+            .outcome(Instant::now(), self.inner.policy.stale_after)
     }
 }
 
 #[async_trait]
-impl<S> UsageSource for CachedSource<S>
+impl<S> SharedUsage for CachedSource<S>
 where
     S: Fetch<Snapshot = UsageSnapshot, Error = UsageSourceError>,
 {
     async fn read(&self) -> Outcome {
         CachedSource::read(self).await
     }
+
+    fn peek(&self) -> Option<Outcome> {
+        CachedSource::peek(self)
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
-    use crate::source::{MonthlyUsage, WindowUsage};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    const POLICY: CachePolicy = CachePolicy {
+    /// A policy for tests: no jitter, so request times are exact.
+    pub const POLICY: CachePolicy = CachePolicy {
         min_interval: Duration::from_secs(60),
+        jitter: 0.0,
         max_backoff: Duration::from_secs(600),
         stale_after: Duration::from_secs(900),
     };
 
+    /// `source` behind its own cache, for tests of anything that reads
+    /// usage.
+    pub fn shared(source: impl UsageSource + 'static) -> Arc<dyn SharedUsage> {
+        Arc::new(CachedUsageSource::new(source, POLICY))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::POLICY;
+    use super::*;
+    use crate::source::{MonthlyUsage, WindowUsage};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
     /// Counts reads (reporting the count as the session percent, so tests
-    /// can tell which read a snapshot came from), and fails every read
-    /// while `fail` is set.
+    /// can tell which read a snapshot came from), fails every read while
+    /// `fail` is set, and takes `delay` (virtual time) to answer.
     #[derive(Clone, Default)]
     struct Flaky {
         reads: Arc<AtomicUsize>,
         fail: Arc<AtomicBool>,
+        retry_after: Arc<AtomicU64>,
+        delay_secs: Arc<AtomicU64>,
     }
 
     impl Flaky {
@@ -246,8 +356,15 @@ mod tests {
     impl UsageSource for Flaky {
         async fn read(&self) -> Outcome {
             let n = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+            let delay = self.delay_secs.load(Ordering::SeqCst);
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+            }
             if self.fail.load(Ordering::SeqCst) {
-                return Err(UsageSourceError::Request("HTTP 429".to_string()));
+                let retry_after = self.retry_after.load(Ordering::SeqCst);
+                return Err(UsageSourceError::RateLimited {
+                    retry_after_secs: (retry_after > 0).then_some(retry_after),
+                });
             }
             Ok(UsageSnapshot {
                 session: WindowUsage {
@@ -268,9 +385,9 @@ mod tests {
         }
     }
 
-    fn cached() -> (CachedSource<Flaky>, Flaky) {
+    fn cached() -> (CachedUsageSource<Flaky>, Flaky) {
         let flaky = Flaky::default();
-        (CachedSource::new(flaky.clone(), POLICY), flaky)
+        (CachedUsageSource::new(flaky.clone(), POLICY), flaky)
     }
 
     async fn advance_secs(secs: u64) {
@@ -306,6 +423,25 @@ mod tests {
         cached.read().await.unwrap();
         other.read().await.unwrap();
 
+        assert_eq!(flaky.reads(), 1);
+    }
+
+    /// The single-flight promise: callers that all find the cache expired
+    /// while one request is in flight wait for it instead of each sending
+    /// their own (removing the lock around the inner read fails this).
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_reads_share_one_request() {
+        let (cached, flaky) = cached();
+        flaky.delay_secs.store(5, Ordering::SeqCst);
+        let reads: Vec<_> = (0..5)
+            .map(|_| {
+                let cached = cached.clone();
+                tokio::spawn(async move { cached.read().await })
+            })
+            .collect();
+        for read in reads {
+            assert_eq!(read.await.unwrap().unwrap().session.percent, 1.0);
+        }
         assert_eq!(flaky.reads(), 1);
     }
 
@@ -359,6 +495,21 @@ mod tests {
         assert_eq!(backoff(&POLICY, 64), Duration::from_secs(600));
     }
 
+    /// A 429's `Retry-After` beyond the backoff is honoured.
+    #[tokio::test(start_paused = true)]
+    async fn a_retry_after_longer_than_the_backoff_is_waited_out() {
+        let (cached, flaky) = cached();
+        flaky.set_failing(true);
+        flaky.retry_after.store(1800, Ordering::SeqCst);
+        cached.read().await.unwrap_err();
+        advance_secs(1799).await;
+        let _ = cached.read().await;
+        assert_eq!(flaky.reads(), 1);
+        advance_secs(1).await;
+        let _ = cached.read().await;
+        assert_eq!(flaky.reads(), 2);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_success_resets_the_backoff() {
         let (cached, flaky) = cached();
@@ -385,8 +536,38 @@ mod tests {
         advance_secs(900 - 60).await;
         assert!(matches!(
             cached.read().await,
-            Err(UsageSourceError::Request(_))
+            Err(UsageSourceError::RateLimited { .. })
         ));
+    }
+
+    /// `peek` follows the same staleness rule as `read`, never fetches -
+    /// and so a key drawn on appear can't show numbers `read` would no
+    /// longer serve.
+    #[tokio::test(start_paused = true)]
+    async fn peek_never_fetches_and_expires_like_read() {
+        let (cached, flaky) = cached();
+        assert!(cached.peek().is_none());
+        cached.read().await.unwrap();
+        flaky.set_failing(true);
+        advance_secs(60).await;
+        cached.read().await.unwrap(); // failure 1; snapshot still fresh
+        assert!(cached.peek().unwrap().is_ok());
+        advance_secs(900).await;
+        assert!(cached.peek().unwrap().is_err());
+        assert_eq!(flaky.reads(), 2);
+    }
+
+    #[test]
+    fn jitter_stretches_the_interval_by_at_most_its_fraction() {
+        let base = Duration::from_secs(200);
+        assert_eq!(jittered(base, 0.1, -1.0), Duration::from_secs(180));
+        assert_eq!(jittered(base, 0.1, 0.0), base);
+        assert_eq!(jittered(base, 0.1, 1.0), Duration::from_secs(220));
+        assert_eq!(jittered(base, 0.0, 1.0), base);
+        for _ in 0..100 {
+            let unit = random_unit();
+            assert!((-1.0..=1.0).contains(&unit), "{unit}");
+        }
     }
 
     /// Fails like a missing key file: a local check, no request made.

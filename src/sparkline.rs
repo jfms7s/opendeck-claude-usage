@@ -4,12 +4,12 @@
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 
 use crate::format::{DISABLED_COLOR, format_percent};
 use crate::history::{Reading, same_reset};
 use crate::level::ColorSettings;
 use crate::pace::{pace, window_length};
+use crate::settings::lenient;
 use crate::source::{WindowKind, WindowUsage};
 
 /// Between-polls keeps only the most recent steps, so a busy day doesn't
@@ -29,20 +29,14 @@ pub enum SparkSeries {
     EvenBurn,
 }
 
+/// Each field falls back alone (see `settings::lenient`).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(from = "SparkSettingsWire", into = "SparkSettingsWire")]
 pub struct SparkSettings {
+    #[serde(default, deserialize_with = "lenient")]
     pub window: WindowKind,
     /// Changed only by a short press.
+    #[serde(default, deserialize_with = "lenient")]
     pub series: SparkSeries,
-}
-
-/// Raw `Value`s for the same reason as `level::ColorSettingsWire`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SparkSettingsWire {
-    window: Value,
-    series: Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -73,24 +67,6 @@ impl SparkSeries {
             SparkSeries::BetweenPolls => "PER POLL",
             SparkSeries::Today => "TODAY",
             SparkSeries::EvenBurn => "VS EVEN",
-        }
-    }
-}
-
-impl From<SparkSettingsWire> for SparkSettings {
-    fn from(w: SparkSettingsWire) -> Self {
-        Self {
-            window: serde_json::from_value(w.window).unwrap_or_default(),
-            series: serde_json::from_value(w.series).unwrap_or_default(),
-        }
-    }
-}
-
-impl From<SparkSettings> for SparkSettingsWire {
-    fn from(s: SparkSettings) -> Self {
-        Self {
-            window: json!(s.window),
-            series: json!(s.series),
         }
     }
 }
@@ -327,6 +303,7 @@ mod tests {
     use super::*;
     use crate::level::{ColorMode, DEFAULT_CRITICAL, DEFAULT_NORMAL};
     use chrono::FixedOffset;
+    use serde_json::json;
 
     fn t(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()

@@ -698,6 +698,7 @@ mod tests {
             ConsoleSource::new(dir.path().join("admin-key")),
             CachePolicy {
                 min_interval: Duration::from_secs(300),
+                jitter: 0.0,
                 max_backoff: Duration::from_secs(1800),
                 stale_after: Duration::from_secs(3600),
             },

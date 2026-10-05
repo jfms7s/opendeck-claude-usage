@@ -4,9 +4,9 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use crate::format::{DISABLED_COLOR, format_duration_compact};
+use crate::format::{DISABLED_COLOR, format_duration_compact, usage_feedback};
 use crate::level::ColorSettings;
 use crate::pace::{Pace as PaceReading, Runway, pace};
 use crate::source::{UsageSnapshot, WindowKind};
@@ -115,14 +115,15 @@ pub fn burn_error_display(metric: BurnMetric) -> BurnDisplay {
     }
 }
 
-/// Dial payload for the shared `layouts/usage.json` - same keys as the
-/// gauge's `feedback_for_display`.
+/// Dial payload for the shared `layouts/usage.json` (see
+/// `format::usage_feedback`).
 pub fn burn_feedback(display: &BurnDisplay) -> Value {
-    json!({
-        "bar": { "value": display.bar_value, "bar_fill_c": display.color },
-        "percent": display.value_text,
-        "detail": display.detail_text,
-    })
+    usage_feedback(
+        display.bar_value,
+        &display.color,
+        &display.value_text,
+        &display.detail_text,
+    )
 }
 
 #[cfg(test)]
