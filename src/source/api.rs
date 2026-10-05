@@ -530,6 +530,22 @@ mod keychain_tests {
         path
     }
 
+    /// Reads `location`, retrying while the fake script is "busy": another
+    /// test spawning a process at the moment a script is written briefly
+    /// holds its write handle (ETXTBSY). Only the test scripts are written;
+    /// the real `/usr/bin/security` never is.
+    async fn read(location: &CredentialsLocation) -> Result<String, UsageSourceError> {
+        for _ in 0..50 {
+            match location.read().await {
+                Err(UsageSourceError::Credentials(msg)) if msg.contains("busy") => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                other => return other,
+            }
+        }
+        location.read().await
+    }
+
     fn keychain(security: PathBuf, fallback: PathBuf) -> CredentialsLocation {
         CredentialsLocation::Keychain(Keychain {
             service: "Claude Code-credentials".into(),
@@ -549,7 +565,7 @@ mod keychain_tests {
 printf '%s\n' '{JSON}'"#
         );
         let location = keychain(fake_security(dir.path(), &script), dir.path().join("none"));
-        assert_eq!(location.read().await.unwrap(), JSON);
+        assert_eq!(read(&location).await.unwrap(), JSON);
     }
 
     #[tokio::test]
@@ -558,7 +574,7 @@ printf '%s\n' '{JSON}'"#
         let file = dir.path().join(".credentials.json");
         std::fs::write(&file, JSON).unwrap();
         let location = keychain(fake_security(dir.path(), "exit 44"), file);
-        assert_eq!(location.read().await.unwrap(), JSON);
+        assert_eq!(read(&location).await.unwrap(), JSON);
     }
 
     #[tokio::test]
@@ -568,7 +584,7 @@ printf '%s\n' '{JSON}'"#
             fake_security(dir.path(), "exit 44"),
             dir.path().join("none"),
         );
-        let Err(UsageSourceError::Credentials(msg)) = location.read().await else {
+        let Err(UsageSourceError::Credentials(msg)) = read(&location).await else {
             panic!("expected a Credentials error");
         };
         assert!(msg.contains("no Claude Code login"), "{msg}");
@@ -579,7 +595,7 @@ printf '%s\n' '{JSON}'"#
         let dir = tempfile::tempdir().unwrap();
         let script = format!("printf '%s' '{JSON}'; echo 'sk-ant-oat01-secret' >&2; exit 51");
         let location = keychain(fake_security(dir.path(), &script), dir.path().join("none"));
-        let Err(UsageSourceError::Credentials(msg)) = location.read().await else {
+        let Err(UsageSourceError::Credentials(msg)) = read(&location).await else {
             panic!("expected a Credentials error");
         };
         assert!(msg.contains("51"), "{msg}");
@@ -594,7 +610,7 @@ printf '%s\n' '{JSON}'"#
             dir.path().join("none"),
         );
         let started = std::time::Instant::now();
-        let Err(UsageSourceError::Credentials(msg)) = location.read().await else {
+        let Err(UsageSourceError::Credentials(msg)) = read(&location).await else {
             panic!("expected a Credentials error");
         };
         assert!(msg.contains("timed out"), "{msg}");
@@ -606,7 +622,7 @@ printf '%s\n' '{JSON}'"#
         let dir = tempfile::tempdir().unwrap();
         let location = keychain(dir.path().join("no-such-tool"), dir.path().join("none"));
         assert!(matches!(
-            location.read().await,
+            read(&location).await,
             Err(UsageSourceError::Credentials(_))
         ));
     }
