@@ -383,4 +383,17 @@ mod tests {
         assert!(html.contains("syncSource"));
         assert!(html.contains(".disabled = consoleSource"));
     }
+
+    /// Opening the PI must show the saved range: a saved (console, session)
+    /// tile draws "5H N/A", so the PI keeps Session selected and only moves
+    /// off it - and saves - when the user switches the source.
+    #[test]
+    fn property_inspector_only_moves_off_session_when_the_user_switches_source() {
+        let html = include_str!("../assets/propertyInspector/metrictile.html");
+        let apply = &html[html.find("function applySettings").unwrap()..];
+        let apply = &apply[..apply.find("\n\t\t}").unwrap()];
+        assert!(apply.contains("syncSource(false);"), "{apply}");
+        assert!(html.contains("syncSource(true);"));
+        assert!(!html.contains("syncSource();"));
+    }
 }

@@ -78,7 +78,7 @@
 			document.getElementById("metric").value = settings.metric || "tokens";
 			document.getElementById("range").value = settings.range || "today";
 			document.getElementById("refresh_seconds").value = settings.refresh_seconds || 60;
-			syncSource();
+			syncSource(false);
 		}
 
 		function sendSettings() {
@@ -95,17 +95,19 @@
 			}));
 		}
 
-		// Console data only has whole UTC days - no 5-hour session.
-		function syncSource() {
+		// Console data only has whole UTC days - no 5-hour session. A saved
+		// Session range stays selected (the tile shows "5H N/A"); only the
+		// user switching to Console moves it to Today, and that gets saved.
+		function syncSource(moveOffSession) {
 			const consoleSource = document.getElementById("source").value === "console";
 			const range = document.getElementById("range");
 			range.querySelector('option[value="session"]').disabled = consoleSource;
-			if (consoleSource && range.value === "session") range.value = "today";
+			if (moveOffSession && consoleSource && range.value === "session") range.value = "today";
 			document.getElementById("consoleHint").classList.toggle("hidden", !consoleSource);
 		}
 
 		document.getElementById("source").addEventListener("change", () => {
-			syncSource();
+			syncSource(true);
 			sendSettings();
 		});
 
