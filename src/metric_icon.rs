@@ -1,58 +1,101 @@
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
+//! Keypad tile for Metric Tile: the label on top with an accent underline,
+//! the value large, the range underneath - all drawn inside the SVG like
+//! every other tile (see tile.rs for why the native title isn't used).
 
-const CARD_COLOR: &str = "#111827";
+use crate::metric::MetricDisplay;
+use crate::tile::{self, MUTED_TEXT_COLOR, TEXT_COLOR};
+
+const LABEL_BASELINE: f64 = 24.0;
+const LABEL_SIZE: f64 = 13.0;
 const UNDERLINE_WIDTH: f64 = 24.0;
 const UNDERLINE_X: f64 = (100.0 - UNDERLINE_WIDTH) / 2.0;
-const UNDERLINE_Y: f64 = 24.0;
+const UNDERLINE_Y: f64 = 30.0;
+const VALUE_BASELINE: f64 = 64.0;
+const VALUE_SIZE: f64 = 28.0;
+const SUBTITLE_BASELINE: f64 = 86.0;
+const SUBTITLE_SIZE: f64 = 14.0;
 
-fn render_svg(accent_color: &str) -> String {
+fn render_svg(display: &MetricDisplay) -> String {
+    let card = tile::card();
+    let label = tile::text_line(
+        LABEL_BASELINE,
+        LABEL_SIZE,
+        true,
+        MUTED_TEXT_COLOR,
+        &display.label.to_uppercase(),
+    );
+    let accent = display.accent_color;
+    let underline = format!(
+        r#"<rect x="{UNDERLINE_X}" y="{UNDERLINE_Y}" width="{UNDERLINE_WIDTH}" height="3" rx="1.5" fill="{accent}" />"#
+    );
+    let value = tile::text_line(
+        VALUE_BASELINE,
+        VALUE_SIZE,
+        true,
+        TEXT_COLOR,
+        &display.value_text,
+    );
+    let subtitle = tile::text_line(
+        SUBTITLE_BASELINE,
+        SUBTITLE_SIZE,
+        false,
+        MUTED_TEXT_COLOR,
+        display.subtitle,
+    );
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect x="0" y="0" width="100" height="100" rx="12" fill="{CARD_COLOR}" /><rect x="{UNDERLINE_X}" y="{UNDERLINE_Y}" width="{UNDERLINE_WIDTH}" height="3" rx="1.5" fill="{accent_color}" /></svg>"#
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">{card}{label}{underline}{value}{subtitle}</svg>"#
     )
 }
 
-/// Builds the `image` string OpenDeck's `setImage` event expects, same
-/// base64 data-URI convention as `icon::build_icon` /
-/// `clock_icon::build_clock_icon`. The label/value/subtitle text itself
-/// renders as the tile's native title (crisper, consistent with the
-/// other two tiles - see `icon.rs`'s rationale) - this SVG only draws
-/// the card background and a colored underline accent beneath where the
-/// label line sits.
-pub fn build_metric_icon(accent_color: &str) -> String {
-    let svg = render_svg(accent_color);
-    let encoded = STANDARD.encode(svg.as_bytes());
-    format!("data:image/svg+xml;base64,{encoded}")
+/// The `image` string OpenDeck's `setImage` expects.
+pub fn build_metric_icon(display: &MetricDisplay) -> String {
+    tile::data_uri(&render_svg(display))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metric::{COST_ACCENT, TOKENS_ACCENT, error_display};
 
-    fn decode(uri: &str) -> String {
-        let prefix = "data:image/svg+xml;base64,";
-        assert!(uri.starts_with(prefix), "got: {uri}");
-        let bytes = STANDARD.decode(&uri[prefix.len()..]).unwrap();
-        String::from_utf8(bytes).unwrap()
+    fn tokens() -> MetricDisplay {
+        MetricDisplay {
+            label: "Tokens",
+            value_text: "318.5K".to_string(),
+            subtitle: "today",
+            accent_color: TOKENS_ACCENT,
+        }
     }
 
     #[test]
-    fn builds_a_valid_svg_data_uri() {
-        let svg = decode(&build_metric_icon("#38bdf8"));
+    fn draws_label_value_and_subtitle_on_the_shared_card() {
+        let svg = render_svg(&tokens());
         assert!(svg.starts_with("<svg"), "got: {svg}");
-        assert!(svg.contains(CARD_COLOR));
+        assert!(svg.contains(&tile::card()), "got: {svg}");
+        assert!(svg.contains(">TOKENS</text>"), "got: {svg}");
+        assert!(svg.contains(">318.5K</text>"), "got: {svg}");
+        assert!(svg.contains(">today</text>"), "got: {svg}");
     }
 
     #[test]
-    fn draws_the_passed_accent_color() {
-        let svg = decode(&build_metric_icon("#fb923c"));
-        assert!(svg.contains("#fb923c"));
+    fn the_underline_takes_the_accent_color() {
+        assert!(render_svg(&tokens()).contains(TOKENS_ACCENT));
+        let cost = MetricDisplay {
+            label: "Cost",
+            value_text: "$8.40".to_string(),
+            subtitle: "7 days",
+            accent_color: COST_ACCENT,
+        };
+        assert!(render_svg(&cost).contains(COST_ACCENT));
     }
 
     #[test]
-    fn different_accent_colors_produce_different_icons() {
-        let a = build_metric_icon("#38bdf8");
-        let b = build_metric_icon("#fb923c");
-        assert_ne!(a, b);
+    fn no_data_is_drawn_too() {
+        let svg = render_svg(&error_display());
+        assert!(svg.contains(">no data</text>"), "got: {svg}");
+    }
+
+    #[test]
+    fn builds_an_svg_data_uri() {
+        assert!(build_metric_icon(&tokens()).starts_with("data:image/svg+xml;base64,"));
     }
 }

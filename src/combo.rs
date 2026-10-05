@@ -14,22 +14,6 @@ pub enum ComboLayout {
     Vertical,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(from = "LayoutSettingsWire", into = "LayoutSettingsWire")]
-pub struct LayoutSettings {
-    /// Changed only by a short press on the key.
-    pub layout: ComboLayout,
-}
-
-/// Raw `Value` for the same reason as `level::ColorSettingsWire`: a bad
-/// value must fall back on its own rather than make openaction reset the
-/// key's whole settings struct.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct LayoutSettingsWire {
-    layout: Value,
-}
-
 impl ComboLayout {
     pub fn flipped(self) -> Self {
         match self {
@@ -39,26 +23,10 @@ impl ComboLayout {
     }
 }
 
-impl From<LayoutSettingsWire> for LayoutSettings {
-    fn from(w: LayoutSettingsWire) -> Self {
-        Self {
-            layout: serde_json::from_value(w.layout).unwrap_or_default(),
-        }
-    }
-}
-
-impl From<LayoutSettings> for LayoutSettingsWire {
-    fn from(s: LayoutSettings) -> Self {
-        Self {
-            layout: json!(s.layout),
-        }
-    }
-}
-
 /// "46% · 6h 12m"; just "—" when there's no data at all, rather than a
 /// dangling "— · no data".
 fn strip_value(display: &UsageDisplay) -> String {
-    if display.percent_text == "\u{2014}" {
+    if !display.has_data {
         "\u{2014}".to_string()
     } else {
         format!("{} \u{b7} {}", display.percent_text, display.tile_detail)
@@ -83,41 +51,13 @@ mod tests {
     use crate::styles::bar::tests::display;
 
     #[test]
-    fn empty_json_is_horizontal() {
-        let s: LayoutSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(s.layout, ComboLayout::Horizontal);
-    }
-
-    #[test]
-    fn vertical_parses() {
-        let s: LayoutSettings = serde_json::from_str(r#"{"layout":"vertical"}"#).unwrap();
-        assert_eq!(s.layout, ComboLayout::Vertical);
-    }
-
-    #[test]
-    fn garbage_layout_falls_back() {
-        for json in [
-            r#"{"layout":7}"#,
-            r#"{"layout":"diagonal"}"#,
-            r#"{"layout":null}"#,
-        ] {
-            let s: LayoutSettings = serde_json::from_str(json).unwrap();
-            assert_eq!(s.layout, ComboLayout::Horizontal, "for {json}");
-        }
-    }
-
-    #[test]
-    fn flipped_toggles_and_round_trips() {
+    fn flipped_toggles_and_serializes_lowercase() {
         assert_eq!(ComboLayout::Horizontal.flipped(), ComboLayout::Vertical);
         assert_eq!(
             ComboLayout::Vertical.flipped().flipped(),
             ComboLayout::Vertical
         );
-        let v = serde_json::to_value(LayoutSettings {
-            layout: ComboLayout::Vertical,
-        })
-        .unwrap();
-        assert_eq!(v, json!({"layout": "vertical"}));
+        assert_eq!(json!(ComboLayout::Vertical), json!("vertical"));
     }
 
     #[test]

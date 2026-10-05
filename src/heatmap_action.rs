@@ -1,16 +1,21 @@
-use crate::heatmap::{HeatmapDisplay, HeatmapSettings, build_heatmap};
-use crate::hub::Output;
-use crate::press::{LatestSettings, Press, PressTimer, Release, on_release};
-use crate::source::logs::{LogEntry, LogUsageSource};
-use crate::styles::heatmap::{render_key, render_strip};
-use crate::surface::{Surface, for_each_tracked};
-use crate::tile;
+//! Usage Heatmap: daily Tokens or Cost from Claude Code's transcripts, as
+//! 7 days or a 4-week grid; a short press (key or dial) flips the view.
+
+use std::future::Future;
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use openaction::{Action, Instance, OpenActionResult};
 use serde_json::{Value, json};
-use std::future::Future;
-use std::sync::Arc;
-use std::time::Duration;
+use tokio::sync::Notify;
+
+use crate::heatmap::{HeatmapDisplay, HeatmapSettings, build_heatmap};
+use crate::press::{PressCycler, Release};
+use crate::source::logs::{LogEntry, LogUsageSource};
+use crate::styles::heatmap::{render_key, render_strip};
+use crate::surface::{Frames, Output, Surface, for_each_tracked};
+use crate::tasks::{park_while_empty, sleep_to_next_minute};
+use crate::tile;
 
 /// Dial payload for `layouts/chart.json`: the whole strip is one image.
 pub fn heatmap_feedback(display: &HeatmapDisplay) -> Value {
@@ -28,40 +33,34 @@ fn output_from(entries: &[LogEntry], settings: &HeatmapSettings, keypad: bool) -
     }
 }
 
-/// Logs only change as Claude Code writes them; a minute keeps "today"
-/// fresh without rescanning constantly (unchanged files come from the
-/// shared mtime cache anyway).
-const REFRESH: Duration = Duration::from_secs(60);
-
-fn flipped(settings: &HeatmapSettings) -> HeatmapSettings {
+/// These settings with the other view - what a short press (key or dial)
+/// switches to. Both controllers share the gesture: the view is otherwise
+/// only reachable by pressing, so a dial that only refreshed would be
+/// stuck on 7 days.
+fn flipped(settings: &HeatmapSettings) -> Option<HeatmapSettings> {
     let mut updated = settings.clone();
     updated.view = settings.view.flipped();
-    updated
-}
-
-/// What a key or dial release does. Both controllers share one gesture:
-/// the view is otherwise only reachable by pressing, so a dial that only
-/// refreshed would be stuck on 7 days.
-fn release(press: Press, settings: &HeatmapSettings) -> Release<HeatmapSettings> {
-    on_release(press, || Some(flipped(settings)))
+    Some(updated)
 }
 
 #[derive(Clone)]
 pub struct HeatmapAction {
     logs: Arc<LogUsageSource>,
-    /// Each visible instance's last-set settings: what the tick redraws,
-    /// and what a press starts from (see `LatestSettings`).
-    registry: Arc<LatestSettings<HeatmapSettings>>,
-    /// Tells a short press (flip 7 days / 4 weeks) from a long one (refresh).
-    presses: Arc<PressTimer>,
+    /// Each visible instance's last-set settings - what the tick redraws,
+    /// and what a press starts from (KI-07, KI-08).
+    presses: Arc<PressCycler<HeatmapSettings>>,
+    frames: Arc<Frames>,
+    /// Pinged when an instance appears, so a parked tick loop resumes.
+    wake: Arc<Notify>,
 }
 
 impl HeatmapAction {
     pub fn new(logs: Arc<LogUsageSource>) -> Self {
         Self {
             logs,
-            registry: Arc::new(LatestSettings::default()),
-            presses: Arc::new(PressTimer::default()),
+            presses: Arc::new(PressCycler::default()),
+            frames: Arc::new(Frames::default()),
+            wake: Arc::new(Notify::new()),
         }
     }
 
@@ -70,25 +69,29 @@ impl HeatmapAction {
         output_from(&self.logs.entries().await, settings, keypad)
     }
 
-    async fn render(
+    async fn render<S: Surface + ?Sized>(
         &self,
-        instance: &impl Surface,
+        surface: &S,
         settings: &HeatmapSettings,
     ) -> OpenActionResult<()> {
-        instance
-            .push(self.output(settings, instance.is_keypad()).await)
-            .await
+        let output = self.output(settings, surface.is_keypad()).await;
+        self.frames.push(surface, output).await
     }
 
     fn track(&self, instance_id: &str, settings: &HeatmapSettings) {
-        self.registry.set(instance_id, settings);
+        self.presses.set(instance_id, settings);
+        self.wake.notify_one();
     }
 
-    /// Runs forever: every minute, re-renders every visible heatmap.
-    /// Spawned once from `main.rs`.
-    pub async fn tick_loop(&self) {
+    /// Runs forever: just after every minute boundary, re-renders every
+    /// visible heatmap (the logs only change as Claude Code writes them,
+    /// and only appended lines are read; unchanged frames aren't resent).
+    /// Parks while none is visible. Spawned once from `main.rs`,
+    /// supervised.
+    pub async fn tick_loop(self) {
         loop {
-            tokio::time::sleep(REFRESH).await;
+            park_while_empty(|| self.presses.is_empty(), &self.wake).await;
+            sleep_to_next_minute().await;
             self.render_tracked(openaction::get_instance).await;
         }
     }
@@ -106,12 +109,12 @@ impl HeatmapAction {
         let entries = self.logs.entries().await;
         let entries = &entries;
         for_each_tracked(
-            self.registry.ids(),
-            |id| self.registry.get(id),
+            self.presses.ids(),
+            |id| self.presses.get(id),
             lookup,
-            |instance, settings| async move {
-                let output = output_from(entries, &settings, instance.is_keypad());
-                if let Err(e) = instance.push(output).await {
+            |surface, settings| async move {
+                let output = output_from(entries, &settings, surface.is_keypad());
+                if let Err(e) = self.frames.push(&surface, output).await {
                     log::warn!("heatmap render failed: {e}");
                 }
             },
@@ -119,46 +122,31 @@ impl HeatmapAction {
         .await;
     }
 
-    /// What a release does, decided from the last-set settings rather than
-    /// the event's, and kept when it flips (see `LatestSettings`).
-    fn release(
-        &self,
-        instance_id: &str,
-        settings: &HeatmapSettings,
-        press: Press,
-    ) -> Release<HeatmapSettings> {
-        self.registry
-            .release(instance_id, settings, |s| release(press, s))
-    }
-
     /// Short press (key or dial) flips 7 days / 4 weeks; a long press
     /// re-reads the logs.
-    async fn released(
+    async fn released<S: Surface + ?Sized>(
         &self,
-        instance: &Instance,
+        surface: &S,
         settings: &HeatmapSettings,
     ) -> OpenActionResult<()> {
-        let press = self.presses.up(&instance.instance_id);
-        match self.release(&instance.instance_id, settings, press) {
+        match self.presses.up(surface.id(), settings, flipped) {
             Release::Refresh => {
-                let current = self.registry.current(&instance.instance_id, settings);
-                self.render(instance, &current).await
+                let current = self.presses.current(surface.id(), settings);
+                self.render(surface, &current).await
             }
-            Release::Switch(updated) => self.show_view(instance, updated).await,
+            Release::Switch(updated) => {
+                // Already kept by `up`, so a tick meanwhile draws it.
+                let saved = match serde_json::to_value(&updated) {
+                    Ok(value) => surface.persist(value).await,
+                    Err(e) => Err(e.into()),
+                };
+                if let Err(e) = saved {
+                    log::warn!("could not save the heatmap view: {e}");
+                }
+                self.render(surface, &updated).await
+            }
             Release::Stay => Ok(()),
         }
-    }
-
-    async fn show_view(
-        &self,
-        instance: &Instance,
-        updated: HeatmapSettings,
-    ) -> OpenActionResult<()> {
-        // Already kept by `release`, so a tick meanwhile draws it.
-        if let Err(e) = instance.set_settings(&updated).await {
-            log::warn!("could not persist heatmap view: {e}");
-        }
-        self.render(instance, &updated).await
     }
 }
 
@@ -172,6 +160,7 @@ impl Action for HeatmapAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
+        self.frames.forget(&instance.instance_id);
         self.track(&instance.instance_id, settings);
         self.render(instance, settings).await
     }
@@ -191,7 +180,7 @@ impl Action for HeatmapAction {
         _settings: &Self::Settings,
     ) -> OpenActionResult<()> {
         self.presses.forget(&instance.instance_id);
-        self.registry.forget(&instance.instance_id);
+        self.frames.forget(&instance.instance_id);
         Ok(())
     }
 
@@ -230,16 +219,12 @@ impl Action for HeatmapAction {
 mod tests {
     use super::*;
     use crate::heatmap::HeatmapView;
+    use crate::surface::test_support::FakeSurface;
+    use crate::test_support::{assert_feedback_matches_layout, manifest_entry};
 
     #[test]
     fn action_uuid_matches_the_shipped_manifest() {
-        let manifest: Value =
-            serde_json::from_str(include_str!("../assets/manifest.json")).unwrap();
-        let entry = &manifest["Actions"][5];
-        assert_eq!(
-            entry["UUID"].as_str().unwrap(),
-            <HeatmapAction as Action>::UUID
-        );
+        let entry = manifest_entry(<HeatmapAction as Action>::UUID);
         assert_eq!(entry["Encoder"]["layout"], "layouts/chart.json");
         assert_eq!(
             entry["PropertyInspectorPath"],
@@ -250,7 +235,7 @@ mod tests {
     #[test]
     fn feedback_keys_match_the_shipped_layout() {
         let d = build_heatmap(&[], &HeatmapSettings::default(), chrono::Utc::now());
-        crate::test_support::assert_feedback_matches_layout(
+        assert_feedback_matches_layout(
             include_str!("../assets/layouts/chart.json"),
             &heatmap_feedback(&d),
             &[],
@@ -274,8 +259,8 @@ mod tests {
             color: "#123456".to_string(),
             ..HeatmapSettings::default()
         };
-        let f = flipped(&s);
-        assert_eq!(f.view, crate::heatmap::HeatmapView::FourWeeks);
+        let f = flipped(&s).unwrap();
+        assert_eq!(f.view, HeatmapView::FourWeeks);
         assert_eq!(f.color, "#123456");
         assert_eq!(f.metric, s.metric);
     }
@@ -288,16 +273,7 @@ mod tests {
         assert!(html.contains(r#"<option value="tokens">"#));
         assert!(html.contains(r#"<option value="cost">"#));
         assert!(html.contains(r#"type="color""#));
-        assert!(html.contains("storedView"));
-    }
-
-    /// Keys and dials share one gesture - a dial used to only refresh, so
-    /// a dial could never reach the 4-week view.
-    #[test]
-    fn a_release_flips_when_short_and_refreshes_when_long() {
-        let s = HeatmapSettings::default();
-        assert_eq!(release(Press::Short, &s), Release::Switch(flipped(&s)));
-        assert_eq!(release(Press::Long, &s), Release::Refresh);
+        assert!(html.contains(r#"passThrough: ["view"]"#));
     }
 
     #[test]
@@ -307,32 +283,6 @@ mod tests {
             html.contains("Short press (key or dial)"),
             "hint must mention dials"
         );
-    }
-
-    /// KI-14: the PI re-reads the stored settings before saving, in case
-    /// OpenDeck didn't forward the plugin's press-driven `setSettings`.
-    #[test]
-    fn property_inspector_refreshes_before_saving() {
-        let html = include_str!("../assets/propertyInspector/heatmap.html");
-        assert!(html.contains(r#"event: "getSettings""#));
-        assert!(html.contains("pendingSave"));
-    }
-
-    #[derive(Clone, Default)]
-    struct FakeSurface {
-        pushed: Arc<std::sync::Mutex<Vec<Output>>>,
-    }
-
-    #[async_trait]
-    impl Surface for FakeSurface {
-        fn is_keypad(&self) -> bool {
-            true
-        }
-
-        async fn push(&self, output: Output) -> OpenActionResult<()> {
-            self.pushed.lock().unwrap().push(output);
-            Ok(())
-        }
     }
 
     fn action() -> HeatmapAction {
@@ -346,9 +296,9 @@ mod tests {
     async fn a_view_flipped_during_the_lookup_is_the_one_drawn() {
         let action = action();
         let seven = HeatmapSettings::default();
-        let four = flipped(&seven);
+        let four = flipped(&seven).unwrap();
         action.track("ctx1", &seven);
-        let surface = FakeSurface::default();
+        let surface = FakeSurface::new("ctx1", true);
         action
             .render_tracked(|id| {
                 action.track(&id, &four); // the press lands here
@@ -357,25 +307,45 @@ mod tests {
             .await;
         let expected = action.output(&four, true).await;
         assert!(
-            *surface.pushed.lock().unwrap() == vec![expected],
+            surface.frames() == vec![expected],
             "drew the old 7-day view"
         );
     }
 
     /// KI-08: the second of two fast presses gets OpenDeck's settings from
     /// before the first - it must flip back, not land on 4 weeks again.
-    #[test]
-    fn two_fast_presses_flip_twice() {
+    #[tokio::test]
+    async fn two_fast_presses_flip_twice() {
         let a = action();
         let stale = HeatmapSettings::default();
         a.track("ctx1", &stale);
-        let Release::Switch(first) = a.release("ctx1", &stale, Press::Short) else {
-            panic!("expected a flip");
-        };
-        let Release::Switch(second) = a.release("ctx1", &stale, Press::Short) else {
-            panic!("expected a flip");
-        };
-        assert_eq!(first.view, HeatmapView::FourWeeks);
-        assert_eq!(second.view, HeatmapView::SevenDays);
+        let key = FakeSurface::new("ctx1", true);
+        a.released(&key, &stale).await.unwrap();
+        a.released(&key, &stale).await.unwrap();
+        let views: Vec<_> = key
+            .persisted
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|v| v["view"].clone())
+            .collect();
+        assert_eq!(views, ["fourWeeks", "sevenDays"]);
+    }
+
+    /// While the flipped view is being saved, the tick already draws it.
+    #[tokio::test]
+    async fn a_flip_is_kept_before_its_save_is_awaited() {
+        let a = action();
+        let stale = HeatmapSettings::default();
+        a.track("ctx1", &stale);
+        let key = FakeSurface::new("ctx1", true);
+        let presses = Arc::clone(&a.presses);
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let seen_in_hook = Arc::clone(&seen);
+        *key.on_persist.lock().unwrap() = Some(Box::new(move || {
+            *seen_in_hook.lock().unwrap() = presses.get("ctx1").map(|s| s.view);
+        }));
+        a.released(&key, &stale).await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), Some(HeatmapView::FourWeeks));
     }
 }

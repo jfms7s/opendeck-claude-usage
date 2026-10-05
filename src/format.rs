@@ -63,6 +63,9 @@ fn format_countdown_short(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> Strin
 /// up drawing it - both surfaces render from the same computed values so
 /// they can never drift apart.
 pub struct UsageDisplay {
+    /// False for the "no data" state - so callers branch on this rather
+    /// than on the placeholder text.
+    pub has_data: bool,
     pub percent_text: String,
     pub color: String,
     pub detail_text: String,
@@ -82,10 +85,7 @@ pub struct UsageDisplay {
     pub palette: Palette,
 }
 
-/// Computes what to show for one instance's current state, independent of
-/// which controller ends up rendering it. `feedback_for_display` below turns
-/// this into an Encoder's `setFeedback` payload; `styles::build_styled_icon` and a
-/// two-line title turn it into a Keypad tile.
+/// The uppercase caption for `window`.
 fn window_label(window: WindowKind) -> &'static str {
     match window {
         WindowKind::Session => "SESSION",
@@ -94,6 +94,10 @@ fn window_label(window: WindowKind) -> &'static str {
     }
 }
 
+/// Computes what to show for one window's current state, independent of
+/// which controller ends up rendering it: `feedback_for_display` turns it
+/// into a dial's `setFeedback` payload, `styles::build_styled_icon` into a
+/// keypad image. Shared by the gauge, combo and styles.
 pub fn build_display(
     snapshot: &UsageSnapshot,
     window: WindowKind,
@@ -137,6 +141,7 @@ fn window_display(
 fn monthly_display(monthly: &MonthlyUsage, colors: &ColorSettings) -> UsageDisplay {
     if !monthly.enabled {
         return UsageDisplay {
+            has_data: true,
             percent_text: "\u{2014}".to_string(),
             color: DISABLED_COLOR.to_string(),
             detail_text: "not enabled".to_string(),
@@ -177,6 +182,7 @@ fn make_display(
 ) -> UsageDisplay {
     let percent_text = format_percent(percent);
     UsageDisplay {
+        has_data: true,
         number_text: percent_text.trim_end_matches('%').to_string(),
         percent_text,
         color,
@@ -189,25 +195,36 @@ fn make_display(
     }
 }
 
-/// Converts an already-computed `UsageDisplay` into an Encoder's
-/// `setFeedback` payload: a flat object keyed by each layout item's `key`
-/// (see assets/layouts/usage.json) - "percent" and "detail" are plain
-/// strings (Text items), "bar" is an object updating both the fill value
-/// and its color in one push (Bar items accept either a bare number/string
-/// for just `value`, or an object for `value` plus other fields like
-/// `bar_fill_c`).
-pub fn feedback_for_display(display: &UsageDisplay) -> Value {
+/// The payload for the shared `layouts/usage.json` dial strip (Usage Gauge
+/// and Burn Rate): a flat object keyed by each layout item's `key` -
+/// "percent" and "detail" are plain strings (Text items), "bar" is an
+/// object updating both the fill value and its color in one push (Bar
+/// items accept either a bare number/string for just `value`, or an object
+/// for `value` plus other fields like `bar_fill_c`). Built in one place so
+/// the two actions can't drift apart.
+pub fn usage_feedback(bar: f64, color: &str, percent: &str, detail: &str) -> Value {
     json!({
-        "bar": { "value": display.bar_value, "bar_fill_c": display.color },
-        "percent": display.percent_text,
-        "detail": display.detail_text,
+        "bar": { "value": bar, "bar_fill_c": color },
+        "percent": percent,
+        "detail": detail,
     })
+}
+
+/// A gauge's dial feedback (see `usage_feedback`).
+pub fn feedback_for_display(display: &UsageDisplay) -> Value {
+    usage_feedback(
+        display.bar_value,
+        &display.color,
+        &display.percent_text,
+        &display.detail_text,
+    )
 }
 
 /// Computed when `UsageSource::read()` fails - a clearly-labeled "no data"
 /// state, never a blank or stale display.
 pub fn error_display() -> UsageDisplay {
     UsageDisplay {
+        has_data: false,
         percent_text: "\u{2014}".to_string(),
         color: DISABLED_COLOR.to_string(),
         detail_text: "no data".to_string(),
@@ -331,10 +348,9 @@ mod tests {
         }
     }
 
-    // `build_feedback`/`error_feedback` aren't kept as production functions
-    // (nothing outside tests calls them since `render()` in action.rs
-    // dispatches through `UsageDisplay` instead) - these two just compose
-    // the same pipeline for the JSON-shape assertions below.
+    // Not production functions - the views go through `UsageDisplay` -
+    // these two just compose the same pipeline for the JSON-shape
+    // assertions below.
     fn build_feedback(snapshot: &UsageSnapshot, window: WindowKind, now: DateTime<Utc>) -> Value {
         feedback_for_display(&build_display(
             snapshot,

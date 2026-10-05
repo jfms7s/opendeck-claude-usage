@@ -11,7 +11,7 @@ pub const DEFAULT_PEAK_DAYS: [&str; 5] = ["mon", "tue", "wed", "thu", "fri"];
 /// Parses "HH:MM" into minutes since midnight (0..=1439). Malformed input
 /// (wrong shape, non-numeric, or an out-of-range hour/minute) yields `None`
 /// rather than an error - callers fall back to a default per field, the same
-/// "malformed becomes a fallback, not a hard failure" pattern `source/file.rs`
+/// "malformed becomes a fallback, not a hard failure" pattern `source/api.rs`
 /// uses for `resets_at`.
 pub fn parse_hhmm(s: &str) -> Option<u32> {
     let (h, m) = s.split_once(':')?;

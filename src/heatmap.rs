@@ -4,11 +4,12 @@
 
 use chrono::{DateTime, Datelike, Days, TimeZone, Weekday};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use crate::level::DEFAULT_NORMAL;
+use crate::level::{DEFAULT_NORMAL, is_hex_color};
 use crate::metric::{MetricKind, format_cost, format_tokens};
-use crate::pricing::cost_for_entry;
+use crate::pricing::{CostTotal, cost_for_entry};
+use crate::settings::lenient;
 use crate::source::logs::LogEntry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -19,13 +20,29 @@ pub enum HeatmapView {
     FourWeeks,
 }
 
+/// Each field falls back alone (see `settings::lenient`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(from = "HeatmapSettingsWire", into = "HeatmapSettingsWire")]
 pub struct HeatmapSettings {
+    #[serde(default, deserialize_with = "lenient")]
     pub metric: MetricKind,
     /// Changed only by a short press on the key.
+    #[serde(default, deserialize_with = "lenient")]
     pub view: HeatmapView,
+    #[serde(default = "default_color", deserialize_with = "hex_color")]
     pub color: String,
+}
+
+fn default_color() -> String {
+    DEFAULT_NORMAL.to_string()
+}
+
+/// A `#rrggbb` color, lowercased; anything else is the default.
+fn hex_color<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(value
+        .as_str()
+        .filter(|s| is_hex_color(s))
+        .map_or_else(default_color, str::to_ascii_lowercase))
 }
 
 impl Default for HeatmapSettings {
@@ -36,16 +53,6 @@ impl Default for HeatmapSettings {
             color: DEFAULT_NORMAL.to_string(),
         }
     }
-}
-
-/// Raw `Value`s for the same reason as `level::ColorSettingsWire`: a bad
-/// field falls back alone instead of making openaction reset everything.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HeatmapSettingsWire {
-    metric: Value,
-    view: Value,
-    color: Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,41 +90,30 @@ impl HeatmapView {
     }
 }
 
-fn is_hex_color(s: &str) -> bool {
-    s.len() == 7 && s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_hexdigit())
-}
-
-impl From<HeatmapSettingsWire> for HeatmapSettings {
-    fn from(w: HeatmapSettingsWire) -> Self {
-        Self {
-            metric: serde_json::from_value(w.metric).unwrap_or_default(),
-            view: serde_json::from_value(w.view).unwrap_or_default(),
-            color: w
-                .color
-                .as_str()
-                .filter(|s| is_hex_color(s))
-                .map(str::to_ascii_lowercase)
-                .unwrap_or_else(|| DEFAULT_NORMAL.to_string()),
-        }
-    }
-}
-
-impl From<HeatmapSettings> for HeatmapSettingsWire {
-    fn from(s: HeatmapSettings) -> Self {
-        Self {
-            metric: json!(s.metric),
-            view: json!(s.view),
-            color: json!(s.color),
-        }
-    }
-}
-
 fn entry_value(entry: &LogEntry, metric: MetricKind) -> f64 {
     match metric {
         MetricKind::Tokens => entry.total_tokens() as f64,
         // Unknown models contribute nothing, as on Metric Tile.
         MetricKind::Cost => cost_for_entry(entry).unwrap_or(0.0),
     }
+}
+
+/// Each entry from the `days` local calendar days ending today (in `now`'s
+/// time zone), with its day's index, oldest first.
+fn entries_by_day<'a, Tz: TimeZone>(
+    entries: &'a [LogEntry],
+    now: &DateTime<Tz>,
+    days: usize,
+) -> impl Iterator<Item = (usize, &'a LogEntry)> {
+    let tz = now.timezone();
+    let today = now.date_naive();
+    let first = today - Days::new(days.saturating_sub(1) as u64);
+    entries.iter().filter_map(move |entry| {
+        let day = entry.timestamp.with_timezone(&tz).date_naive();
+        (first..=today)
+            .contains(&day)
+            .then(|| ((day - first).num_days() as usize, entry))
+    })
 }
 
 /// Totals for the `days` local calendar days ending today (in `now`'s time
@@ -128,16 +124,9 @@ pub fn daily_totals<Tz: TimeZone>(
     now: DateTime<Tz>,
     days: usize,
 ) -> Vec<f64> {
-    let tz = now.timezone();
-    let today = now.date_naive();
-    let first = today - Days::new(days.saturating_sub(1) as u64);
     let mut totals = vec![0.0; days];
-    for entry in entries {
-        let day = entry.timestamp.with_timezone(&tz).date_naive();
-        if day < first || day > today {
-            continue;
-        }
-        totals[(day - first).num_days() as usize] += entry_value(entry, metric);
+    for (day, entry) in entries_by_day(entries, &now, days) {
+        totals[day] += entry_value(entry, metric);
     }
     totals
 }
@@ -171,7 +160,7 @@ pub fn build_heatmap<Tz: TimeZone>(
             color: settings.color.clone(),
         };
     }
-    let totals = daily_totals(entries, settings.metric, now, days);
+    let totals = daily_totals(entries, settings.metric, now.clone(), days);
     let max = totals.iter().copied().fold(0.0, f64::max);
     let cells = totals
         .iter()
@@ -180,7 +169,12 @@ pub fn build_heatmap<Tz: TimeZone>(
     let sum: f64 = totals.iter().sum();
     let total_text = match settings.metric {
         MetricKind::Tokens => format_tokens(sum.round() as u64),
-        MetricKind::Cost => caption_cost(sum),
+        MetricKind::Cost => {
+            // A trailing "+" when some usage in view couldn't be priced.
+            let cost = CostTotal::of(entries_by_day(entries, &now, days).map(|(_, e)| e));
+            let marker = if cost.partial { "+" } else { "" };
+            format!("{}{marker}", caption_cost(sum))
+        }
     };
     HeatmapDisplay {
         caption: format!("{} \u{b7} {total_text}", settings.view.caption()),
@@ -204,14 +198,16 @@ fn caption_cost(total: f64) -> String {
 mod tests {
     use super::*;
     use chrono::{FixedOffset, Utc};
+    use serde_json::json;
 
     fn entry(ts: &str, tokens: u64) -> LogEntry {
         LogEntry {
             timestamp: ts.parse::<DateTime<Utc>>().unwrap(),
-            model: "claude-sonnet-5".to_string(),
+            model: "claude-sonnet-5".into(),
             input_tokens: tokens,
             output_tokens: 0,
             cache_creation_input_tokens: 0,
+            cache_creation_1h_input_tokens: 0,
             cache_read_input_tokens: 0,
         }
     }
@@ -339,6 +335,23 @@ mod tests {
             "got {}",
             d.caption
         );
+    }
+
+    /// Usage from a model the price table doesn't know makes the Cost
+    /// caption a lower bound, and says so.
+    #[test]
+    fn a_cost_caption_with_unpriced_usage_is_marked() {
+        let settings = HeatmapSettings {
+            metric: MetricKind::Cost,
+            ..HeatmapSettings::default()
+        };
+        let mut unpriced = entry("2026-09-30T09:00:00Z", 1_000_000);
+        unpriced.model = "some-future-model".into();
+        let priced = entry("2026-09-30T08:00:00Z", 1_000_000);
+        let d = build_heatmap(&[priced.clone(), unpriced], &settings, now());
+        assert_eq!(d.caption, "7 DAYS \u{b7} $2.00+");
+        let d = build_heatmap(&[priced], &settings, now());
+        assert_eq!(d.caption, "7 DAYS \u{b7} $2.00");
     }
 
     #[test]

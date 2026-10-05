@@ -138,6 +138,7 @@ mod tests {
 
     fn display(bar_value: f64) -> UsageDisplay {
         UsageDisplay {
+            has_data: true,
             percent_text: format!("{bar_value}%"),
             color: DEFAULT_NORMAL.to_string(),
             detail_text: "resets in 1h".to_string(),
@@ -258,6 +259,7 @@ mod tests {
     #[test]
     fn disabled_color_still_renders_a_valid_icon() {
         let d = UsageDisplay {
+            has_data: true,
             percent_text: "\u{2014}".to_string(),
             color: "#6b7280".to_string(),
             detail_text: "not enabled".to_string(),

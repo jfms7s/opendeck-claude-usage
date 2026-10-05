@@ -3,7 +3,7 @@
 
 use crate::heatmap::HeatmapDisplay;
 use crate::styles::{TRACK_COLOR, svg};
-use crate::tile::{self, Anchor, CARD_COLOR, MUTED_TEXT_COLOR, TEXT_COLOR};
+use crate::tile::{self, Anchor, MUTED_TEXT_COLOR, TEXT_COLOR};
 
 /// Cell geometry for one surface: column x of the first cell and the step,
 /// cell width, and (y, height, row step) for the 1-row vs 4-row views.
@@ -83,15 +83,14 @@ pub fn render_key(display: &HeatmapDisplay) -> String {
     svg(&format!("{caption}{}{letters}", cells(display, &KEY_GRID)))
 }
 
-/// The dial strip is 200 wide, so it can't use `styles::svg` or
-/// `tile::text_at` (both assume a 100-wide key - `text_at` would squeeze
-/// a caption that fits easily here).
+/// The dial strip is 200 wide: `tile::strip_svg`, with its text placed
+/// directly (see there).
 pub fn render_strip(display: &HeatmapDisplay) -> String {
     let caption = tile::escape_xml(&display.caption);
-    format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"><rect x="0" y="0" width="200" height="100" fill="{CARD_COLOR}" /><text x="10" y="18" text-anchor="start" font-family="sans-serif" font-size="14" font-weight="700" fill="{TEXT_COLOR}">{caption}</text>{}</svg>"#,
+    tile::strip_svg(&format!(
+        r#"<text x="10" y="18" text-anchor="start" font-family="sans-serif" font-size="14" font-weight="700" fill="{TEXT_COLOR}">{caption}</text>{}"#,
         cells(display, &STRIP_GRID)
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -171,7 +170,10 @@ mod tests {
     fn strip_is_200_wide_with_bigger_cells() {
         let s = render_strip(&display(week()));
         assert!(s.contains(r#"viewBox="0 0 200 100""#));
-        assert!(s.contains(&format!(r#"width="200" height="100" fill="{CARD_COLOR}""#)));
+        assert!(s.contains(&format!(
+            r#"width="200" height="100" fill="{}""#,
+            tile::CARD_COLOR
+        )));
         assert!(
             s.contains(r#"<rect x="12.00" y="26.00" width="20" height="64" rx="2""#),
             "got: {s}"

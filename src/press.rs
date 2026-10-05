@@ -106,6 +106,10 @@ impl<S: Clone> LatestSettings<S> {
         self.by_instance.iter().map(|e| e.key().clone()).collect()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.by_instance.is_empty()
+    }
+
     pub fn forget(&self, instance_id: &str) {
         self.by_instance.remove(instance_id);
     }
@@ -132,9 +136,126 @@ impl<S: Clone> LatestSettings<S> {
     }
 }
 
+/// The press handling every action whose short press switches what it
+/// shows: when each key went down, and the settings each instance was last
+/// given. `up` classifies the press and decides from - and keeps - the
+/// plugin's own last settings, so two fast presses advance twice (KI-08)
+/// and a periodic redraw meanwhile already draws the new choice (KI-06,
+/// KI-07). Every such action goes through this, so the race fixes live in
+/// one place.
+pub struct PressCycler<S> {
+    presses: PressTimer,
+    latest: LatestSettings<S>,
+}
+
+impl<S> Default for PressCycler<S> {
+    fn default() -> Self {
+        Self {
+            presses: PressTimer::default(),
+            latest: LatestSettings::default(),
+        }
+    }
+}
+
+impl<S: Clone> PressCycler<S> {
+    /// An instance appeared or got new settings (from OpenDeck or its PI).
+    pub fn set(&self, instance_id: &str, settings: &S) {
+        self.latest.set(instance_id, settings);
+    }
+
+    /// An instance disappeared: forget its settings and any pending press.
+    pub fn forget(&self, instance_id: &str) {
+        self.presses.forget(instance_id);
+        self.latest.forget(instance_id);
+    }
+
+    pub fn down(&self, instance_id: &str) {
+        self.presses.down(instance_id);
+    }
+
+    /// What a release does: a long press refreshes; a short one switches
+    /// to `next` of the kept settings (`event_settings` when none are kept),
+    /// keeping the switched-to settings before returning.
+    pub fn up(
+        &self,
+        instance_id: &str,
+        event_settings: &S,
+        next: impl FnOnce(&S) -> Option<S>,
+    ) -> Release<S> {
+        let press = self.presses.up(instance_id);
+        self.latest.release(instance_id, event_settings, |s| {
+            on_release(press, || next(s))
+        })
+    }
+
+    /// The kept settings, or `fallback` (the event's) when none are kept.
+    pub fn current(&self, instance_id: &str, fallback: &S) -> S {
+        self.latest.current(instance_id, fallback)
+    }
+
+    pub fn get(&self, instance_id: &str) -> Option<S> {
+        self.latest.get(instance_id)
+    }
+
+    pub fn ids(&self) -> Vec<String> {
+        self.latest.ids()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.latest.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn next_up(n: &i32) -> Option<i32> {
+        Some(n + 1)
+    }
+
+    /// KI-08: OpenDeck can hand the second of two fast presses the settings
+    /// from before the first; both presses must still count.
+    #[test]
+    fn a_cycler_advances_once_per_press_from_stale_event_settings() {
+        let cycler = PressCycler::default();
+        cycler.set("a", &1);
+        assert_eq!(cycler.up("a", &1, next_up), Release::Switch(2));
+        assert_eq!(cycler.up("a", &1, next_up), Release::Switch(3));
+        assert_eq!(cycler.current("a", &1), 3);
+    }
+
+    #[test]
+    fn a_cycler_refreshes_on_a_long_press_without_switching() {
+        let cycler = PressCycler::default();
+        cycler.set("a", &1);
+        cycler
+            .presses
+            .pressed_at
+            .insert("a".to_string(), Instant::now() - Duration::from_millis(600));
+        assert_eq!(
+            cycler.up("a", &1, |_| unreachable!("a long press never switches")),
+            Release::Refresh
+        );
+        assert_eq!(cycler.current("a", &1), 1);
+    }
+
+    #[test]
+    fn a_cycler_stays_when_there_is_nothing_to_switch_to() {
+        let cycler = PressCycler::default();
+        assert_eq!(cycler.up("a", &1, |_| None), Release::Stay);
+    }
+
+    #[test]
+    fn forgetting_drops_the_settings_and_a_pending_press() {
+        let cycler = PressCycler::default();
+        cycler.set("a", &5);
+        cycler.down("a");
+        cycler.forget("a");
+        assert!(cycler.is_empty());
+        assert!(cycler.presses.pressed_at.is_empty());
+        assert_eq!(cycler.current("a", &1), 1);
+    }
 
     #[test]
     fn press_threshold_is_500ms() {

@@ -38,91 +38,35 @@
 
 		<div id="colors"></div>
 	</main>
+	<script src="pi-common.js"></script>
 	<script src="colors.js"></script>
 
 	<script>
-		window.connectOpenActionSocketData = new Promise((resolve) => {
-			window.connectOpenActionSocket = (...args) => resolve(args);
-			window.connectElgatoStreamDeckSocket = window.connectOpenActionSocket;
-		});
-
-		let websocket;
-		let uuid;
-		let storedStyle;
-
 		const styleBoxes = () => [...document.querySelectorAll("#cycleStyles input")];
-		styleBoxes().forEach((box) => box.addEventListener("change", sendSettings));
 
-		mountColorSection(document.getElementById("colors"), { showMode: true, onChange: sendSettings });
-
-		window.connectOpenActionSocketData.then(([inPort, inUUID, inRegisterEvent, inInfo, inActionInfo]) => {
-			uuid = inUUID;
-			const actionInfo = JSON.parse(inActionInfo);
-			websocket = new WebSocket(`ws://127.0.0.1:${inPort}`);
-
-			websocket.onopen = () => {
-				websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
-				applySettings(actionInfo.payload.settings || {});
-			};
-
-			websocket.onmessage = (event) => {
-				const message = JSON.parse(event.data);
-				if (message.event === "didReceiveSettings") {
-					const settings = message.payload.settings || {};
-					if (pendingSave) {
-						// The reply to our getSettings: only the pass-through
-						// value is refreshed, so the edit being saved is kept.
-						storedStyle = settings.style;
-						saveSettings();
-					} else {
-						applySettings(settings);
-					}
-				}
-			};
+		const pi = connectPI({
+			apply(settings) {
+				selectKnown(document.getElementById("window"), settings.window, "session");
+				applyColorSettings(settings);
+				// Mirrors the plugin: no list yet means all ticked; an explicit
+				// (even empty) list is shown as saved.
+				const cycle = Array.isArray(settings.cycleStyles)
+					? settings.cycleStyles
+					: styleBoxes().map((box) => box.value);
+				styleBoxes().forEach((box) => { box.checked = cycle.includes(box.value); });
+			},
+			read: () => ({
+				window: document.getElementById("window").value,
+				...readColorSettings(),
+				cycleStyles: styleBoxes().filter((box) => box.checked).map((box) => box.value),
+			}),
+			// The current style changes only by pressing the key.
+			passThrough: ["style"],
 		});
 
-		function applySettings(settings) {
-			document.getElementById("window").value = settings.window || "session";
-			applyColorSettings(settings);
-			storedStyle = settings.style;
-			// Mirrors the plugin: no list yet means all ticked; an explicit
-			// (even empty) list is shown as saved.
-			const cycle = Array.isArray(settings.cycleStyles)
-				? settings.cycleStyles
-				: styleBoxes().map((box) => box.value);
-			styleBoxes().forEach((box) => { box.checked = cycle.includes(box.value); });
-		}
-
-		// OpenDeck may not forward the plugin's own setSettings (a press
-		// changing the gauge style) to an open PI, so the gauge style held here can be
-		// stale. Re-read the stored settings before saving; if no reply
-		// comes, save with what we have.
-		let pendingSave = null;
-
-		function sendSettings() {
-			if (pendingSave) return; // the pending save reads the form when it sends
-			pendingSave = setTimeout(saveSettings, 500);
-			websocket.send(JSON.stringify({ event: "getSettings", context: uuid }));
-		}
-
-		function saveSettings() {
-			clearTimeout(pendingSave);
-			pendingSave = null;
-			websocket.send(JSON.stringify({
-				event: "setSettings",
-				context: uuid,
-				payload: {
-					window: document.getElementById("window").value,
-					...readColorSettings(),
-					// The current style changes only by pressing the key; pass
-					// it through untouched so saving here doesn't reset it.
-					...(storedStyle ? { style: storedStyle } : {}),
-					cycleStyles: styleBoxes().filter((box) => box.checked).map((box) => box.value),
-				},
-			}));
-		}
-
-		document.getElementById("window").addEventListener("change", sendSettings);
+		mountColorSection(document.getElementById("colors"), { showMode: true, onChange: pi.changed });
+		styleBoxes().forEach((box) => box.addEventListener("change", pi.changed));
+		document.getElementById("window").addEventListener("change", pi.changed);
 	</script>
 </body>
 </html>
