@@ -89,6 +89,18 @@
 			"Encoder": {
 				"layout": "layouts/chart.json"
 			}
+		},
+		{
+			"UUID": "com.jfms7s.claudeusage.apispend",
+			"Name": "API Spend",
+			"Icon": "icons/apispend",
+			"Tooltip": "Shows billed Claude Console (API) spend for your organization today, over 7 days or this month, from the Usage & Cost Admin API",
+			"Controllers": ["Encoder", "Keypad"],
+			"PropertyInspectorPath": "propertyInspector/apispend.html",
+			"States": [{ "Image": "icons/apispend" }],
+			"Encoder": {
+				"layout": "layouts/usage.json"
+			}
 		}
 	]
 }

@@ -24,6 +24,8 @@ mod source;
 mod sparkline;
 mod sparkline_action;
 mod spend;
+mod spend_action;
+mod spend_icon;
 mod style;
 mod styles;
 mod surface;
@@ -42,8 +44,10 @@ use metric_action::MetricTileAction;
 use openaction::{OpenActionResult, register_action, run};
 use source::api::ApiUsageSource;
 use source::cached::{CachePolicy, CachedSource};
+use source::console::{ConsoleData, ConsoleSource};
 use source::logs::LogUsageSource;
 use sparkline_action::SparklineAction;
+use spend_action::ApiSpendAction;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -65,6 +69,19 @@ async fn main() -> OpenActionResult<()> {
             stale_after: Duration::from_secs(15 * 60),
         },
     );
+
+    // Console spend (Admin API) gets its own cache: a different key and
+    // rate limit from the OAuth endpoint above, so neither can starve or
+    // break the other. Its data lags ~5 min, so fetching more often buys
+    // nothing; a missing key file is re-checked every read with no request.
+    let console: Arc<dyn ConsoleData> = Arc::new(CachedSource::new(
+        ConsoleSource::default(),
+        CachePolicy {
+            min_interval: Duration::from_secs(5 * 60),
+            max_backoff: Duration::from_secs(30 * 60),
+            stale_after: Duration::from_secs(60 * 60),
+        },
+    ));
 
     // Every usage-driven action (gauge, burn rate, combo, sparkline) registers its instances
     // in this one hub, so a single poll loop serves them all.
@@ -98,6 +115,10 @@ async fn main() -> OpenActionResult<()> {
     let heatmap_ticker = heatmap.clone();
     tokio::spawn(async move { heatmap_ticker.tick_loop().await });
 
+    let api_spend = ApiSpendAction::new(console);
+    let spend_ticker = api_spend.clone();
+    tokio::spawn(async move { spend_ticker.tick_loop().await });
+
     register_action(action).await;
     register_action(clock).await;
     register_action(metric_tile).await;
@@ -105,5 +126,6 @@ async fn main() -> OpenActionResult<()> {
     register_action(combo).await;
     register_action(heatmap).await;
     register_action(sparkline).await;
+    register_action(api_spend).await;
     run(std::env::args().collect()).await
 }
