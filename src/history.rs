@@ -7,10 +7,10 @@
 //! and any directory created for it are owner-only.
 
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::PathBuf;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
@@ -130,7 +130,9 @@ impl HistoryStore {
     /// Loads, prunes and sorts the recorded readings, rewriting the file
     /// pruned so it never grows beyond a few days of readings across
     /// restarts. A missing file just starts empty; unreadable lines (e.g.
-    /// a crash mid-append) are skipped.
+    /// a crash mid-append) are skipped. A file that can't be read at all,
+    /// or in which not one line parses (a newer version's format), is
+    /// never rewritten: that would wipe readings this version can't see.
     pub fn load(path: PathBuf, now: DateTime<Utc>) -> Arc<Self> {
         let mut store = Self {
             readings: Mutex::new(Vec::new()),
@@ -140,15 +142,29 @@ impl HistoryStore {
             read_warned: AtomicBool::new(false),
             write_warned: AtomicBool::new(false),
         };
+        tighten_dir(&path);
         // Bytes, decoded lossily: one corrupt byte must only cost its own
         // line, not fail the whole read.
         let read = match std::fs::read(&path) {
-            Ok(bytes) => Some(
-                String::from_utf8_lossy(&bytes)
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
+                let parsed: Vec<Reading> = text
                     .lines()
                     .filter_map(|l| serde_json::from_str(l).ok())
-                    .collect::<Vec<Reading>>(),
-            ),
+                    .collect();
+                if lines > 0 && parsed.is_empty() {
+                    log::warn!(
+                        "usage history {} has {lines} lines but none this version can read \
+                         (written by a newer version?); leaving it untouched",
+                        path.display()
+                    );
+                    store.rewritable = false;
+                    None
+                } else {
+                    Some(parsed)
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
                 if !store.read_warned.swap(true, Ordering::Relaxed) {
@@ -168,11 +184,20 @@ impl HistoryStore {
         readings.sort_by_key(|r| r.at);
         // Only rewrite what was actually read - rewriting after a failed
         // read would wipe the file.
-        if loaded {
-            store.rewrite(&readings);
+        if loaded && let Err(e) = store.rewrite(&readings) {
+            store.warn_write(&path, &e);
         }
-        *store.readings.lock().unwrap() = readings;
+        *store
+            .readings
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner) = readings;
         Arc::new(store)
+    }
+
+    /// The readings, even after a panic elsewhere while they were locked:
+    /// a reading is inserted in one step, so the list is never half-done.
+    fn lock(&self) -> MutexGuard<'_, Vec<Reading>> {
+        self.readings.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Adds a reading and appends it to the file - or, once enough old
@@ -188,7 +213,7 @@ impl HistoryStore {
         let day = |at: DateTime<Utc>| at.with_timezone(&tz).date_naive();
         let now = now.with_timezone(&Utc);
         let reading = Reading::from_snapshot(snapshot, now);
-        let mut readings = self.readings.lock().unwrap();
+        let mut readings = self.lock();
         // Inserted in time order: two racing refreshes or a clock jump
         // can hand us a reading older than the last one kept. The file
         // is still appended to; `load` sorts it.
@@ -206,15 +231,24 @@ impl HistoryStore {
         let pruned = before - readings.len();
         let stale = self.stale_lines.fetch_add(pruned, Ordering::Relaxed) + pruned;
         if stale >= COMPACT_AFTER && self.rewritable {
-            self.stale_lines.store(0, Ordering::Relaxed);
-            self.rewrite(&readings);
+            match self.rewrite(&readings) {
+                Ok(()) => self.stale_lines.store(0, Ordering::Relaxed),
+                Err(e) => {
+                    // The old file is intact: add this reading to it, and
+                    // try compacting again next time.
+                    if let Some(path) = &self.path {
+                        self.warn_write(path, &e);
+                    }
+                    self.append(&reading);
+                }
+            }
         } else {
             self.append(&reading);
         }
     }
 
     pub fn readings(&self) -> Vec<Reading> {
-        self.readings.lock().unwrap().clone()
+        self.lock().clone()
     }
 
     fn append(&self, reading: &Reading) {
@@ -229,10 +263,13 @@ impl HistoryStore {
                     .create(dir)?;
             }
             let line = serde_json::to_string(reading).map_err(std::io::Error::other)?;
+            // O_NOFOLLOW: a symlink planted at the path is an error, not a
+            // redirect (same as the rewrite's O_EXCL temp file, KI-27).
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
                 .open(path)?;
             writeln!(file, "{line}")
         })();
@@ -241,13 +278,15 @@ impl HistoryStore {
         }
     }
 
-    /// Write-then-rename, so a crash mid-rewrite leaves the old file. The
-    /// temp file is always freshly created (`create_new`, i.e. `O_EXCL`),
-    /// so a symlink left at its path is never followed; a leftover from a
-    /// crash is removed first (removing a symlink removes only the link).
-    fn rewrite(&self, readings: &[Reading]) {
+    /// Write-then-rename, so a crash mid-rewrite leaves the old file; the
+    /// data is synced before the rename, so a power loss can't leave an
+    /// empty one. The temp file is always freshly created (`create_new`,
+    /// i.e. `O_EXCL`), so a symlink left at its path is never followed; a
+    /// leftover from a crash is removed first (removing a symlink removes
+    /// only the link).
+    fn rewrite(&self, readings: &[Reading]) -> std::io::Result<()> {
         let Some(path) = &self.path else {
-            return;
+            return Ok(());
         };
         let body: String = readings
             .iter()
@@ -255,25 +294,21 @@ impl HistoryStore {
             .map(|l| l + "\n")
             .collect();
         let tmp = path.with_extension("jsonl.tmp");
-        let result = match std::fs::remove_file(&tmp) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
+        match std::fs::remove_file(&tmp) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
         }
-        .and_then(|_| {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&tmp)
-        })
-        .and_then(|mut file| file.write_all(body.as_bytes()))
-        .and_then(|_| std::fs::rename(&tmp, path));
-        if let Err(e) = result {
-            self.warn_write(path, &e);
-        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(body.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
     }
 
-    fn warn_write(&self, path: &std::path::Path, e: &std::io::Error) {
+    fn warn_write(&self, path: &Path, e: &std::io::Error) {
         if !self.write_warned.swap(true, Ordering::Relaxed) {
             log::warn!(
                 "could not save usage history to {}: {e}; new readings are kept in memory \
@@ -281,6 +316,21 @@ impl HistoryStore {
                 path.display()
             );
         }
+    }
+}
+
+/// Makes an existing state directory owner-only. A directory created
+/// before KI-26 kept its umask mode; one created now already is 0700.
+fn tighten_dir(path: &Path) {
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    if let Ok(meta) = std::fs::metadata(dir)
+        && meta.is_dir()
+        && meta.permissions().mode() & 0o077 != 0
+        && let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    {
+        log::warn!("could not make {} owner-only: {e}", dir.display());
     }
 }
 
@@ -645,5 +695,100 @@ mod tests {
         assert!(!store.write_warned.load(Ordering::Relaxed));
         store.record(&snapshot(40.0, 20.0), at(10));
         assert!(store.write_warned.load(Ordering::Relaxed));
+    }
+
+    /// A file in which no line parses (a newer version's format, after a
+    /// downgrade) is not this version's to rewrite: it's left as it is.
+    #[test]
+    fn a_file_where_no_line_parses_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let future = "{\"at\":\"2026-09-30T09:00:00Z\",\"v\":2}\n";
+        std::fs::write(&path, future).unwrap();
+        let store = HistoryStore::load(path.clone(), at(10));
+        assert!(store.readings().is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), future);
+        // And nothing compacts it later either.
+        assert!(!store.rewritable);
+    }
+
+    /// The `rewritable` guard: a file that couldn't be read is never
+    /// overwritten from memory, however many readings get pruned.
+    #[test]
+    fn an_unreadable_file_is_never_compacted_over() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let original = format!("{}\n", line(&reading(at(9), 20.0)));
+        std::fs::write(&path, &original).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let store = HistoryStore::load(path.clone(), at(10));
+        // Each reading is a day after the last, so after the first eight
+        // every one prunes one - well past COMPACT_AFTER.
+        for i in 0..COMPACT_AFTER + 10 {
+            store.record(&snapshot(i as f64, 1.0), at(10) + Duration::days(i as i64));
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    /// A compaction that can't write must not lose the reading that
+    /// triggered it: it's appended instead, and compaction is retried.
+    #[test]
+    fn a_failed_compaction_still_saves_the_reading() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let path = state.join("history.jsonl");
+        let start = at(10) - Duration::days(7);
+        let old: String = (0..COMPACT_AFTER)
+            .map(|i| line(&reading(start + Duration::minutes(i as i64), i as f64)) + "\n")
+            .collect();
+        std::fs::write(&path, old).unwrap();
+        let store = HistoryStore::load(path.clone(), at(10));
+        // The temp file can't be created next to the history file.
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o500)).unwrap();
+        store.record(&snapshot(55.5, 20.0), at(10) + Duration::days(2));
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("\"session\":55.5")
+        );
+        // Still due: the next reading compacts.
+        store.record(
+            &snapshot(56.5, 20.0),
+            at(10) + Duration::days(2) + Duration::hours(1),
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+    }
+
+    /// A state directory created by a version before KI-26 (with the
+    /// default umask) is made owner-only on load.
+    #[test]
+    fn an_existing_state_directory_becomes_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
+        HistoryStore::load(state.join("history.jsonl"), at(10));
+        assert_eq!(mode(&state), 0o700);
+    }
+
+    /// Appending never follows a symlink planted at the history path
+    /// (the KI-27 hardening, on the more frequent write path).
+    #[test]
+    fn an_append_does_not_follow_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "keep me").unwrap();
+        let store = HistoryStore::load(path.clone(), at(10));
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+        store.record(&snapshot(40.0, 20.0), at(10));
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+        assert_eq!(store.readings().len(), 1, "still kept in memory");
     }
 }

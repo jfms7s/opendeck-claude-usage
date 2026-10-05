@@ -1,12 +1,12 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::pricing::cost_for_entry;
+use crate::format::DISABLED_COLOR;
+use crate::pricing::CostTotal;
 use crate::source::logs::LogEntry;
 
 pub const TOKENS_ACCENT: &str = "#38bdf8";
 pub const COST_ACCENT: &str = "#fb923c";
-const NO_DATA_ACCENT: &str = "#6b7280";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -33,20 +33,30 @@ pub struct MetricDisplay {
     pub accent_color: &'static str,
 }
 
-/// `[start, end]` bounds for `range`, in UTC. `Today`/`SevenDay` are
-/// rolling windows ending at `now` (not calendar-aligned). `Session`
+/// `[start, end]` bounds for `range`, in UTC. `Today` runs from local
+/// midnight (in `now`'s time zone, like the Heatmap's days and the
+/// Sparkline's "Today"); `SevenDay` is a rolling 7x24h ending at `now`.
+/// `Session`
 /// mirrors the existing Usage Gauge's 5-hour rate-limit window:
 /// `[resets_at - 5h, resets_at]` when `session_resets_at` is known
 /// (from the same usage fetch the gauge renders), falling
 /// back to a rolling last-5h window when it isn't - a fallback, not an
 /// error, matching this plugin's existing convention.
-pub fn range_bounds(
+pub fn range_bounds<Tz: TimeZone>(
     range: RangeKind,
-    now: DateTime<Utc>,
+    now: DateTime<Tz>,
     session_resets_at: Option<DateTime<Utc>>,
 ) -> (DateTime<Utc>, DateTime<Utc>) {
+    let local_midnight = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|m| now.timezone().from_local_datetime(&m).earliest())
+        .map(|m| m.with_timezone(&Utc));
+    let now = now.with_timezone(&Utc);
     match range {
-        RangeKind::Today => (now - Duration::hours(24), now),
+        // A zone with no 00:00 that day (a DST jump at midnight) falls back
+        // to the last 24 hours.
+        RangeKind::Today => (local_midnight.unwrap_or(now - Duration::hours(24)), now),
         RangeKind::SevenDay => (now - Duration::hours(24 * 7), now),
         RangeKind::Session => {
             let end = session_resets_at.unwrap_or(now);
@@ -90,17 +100,24 @@ pub fn format_cost(total: f64) -> String {
     format!("${total:.2}")
 }
 
+/// `format_cost`, plus a trailing `+` when some usage couldn't be priced
+/// (a model missing from `pricing.rs`): the real total is at least this.
+pub fn format_cost_total(total: CostTotal) -> String {
+    let marker = if total.partial { "+" } else { "" };
+    format!("{}{marker}", format_cost(total.dollars))
+}
+
 /// Computes what to show for one instance's current metric/range
 /// selection from the full set of parsed log entries. Always produces a
 /// real number (possibly zero) - callers decide separately whether "no
 /// entries at all were found anywhere" warrants `error_display()`
 /// instead (see `metric_action.rs`), since a legitimate zero-usage range
 /// is a different situation from no log data existing at all.
-pub fn build_metric_display(
+pub fn build_metric_display<Tz: TimeZone>(
     entries: &[LogEntry],
     metric: MetricKind,
     range: RangeKind,
-    now: DateTime<Utc>,
+    now: DateTime<Tz>,
     session_resets_at: Option<DateTime<Utc>>,
 ) -> MetricDisplay {
     let (start, end) = range_bounds(range, now, session_resets_at);
@@ -125,15 +142,12 @@ pub fn build_metric_display(
                 accent_color: TOKENS_ACCENT,
             }
         }
-        MetricKind::Cost => {
-            let total: f64 = in_range.iter().filter_map(|e| cost_for_entry(e)).sum();
-            MetricDisplay {
-                label: "Cost",
-                value_text: format_cost(total),
-                subtitle,
-                accent_color: COST_ACCENT,
-            }
-        }
+        MetricKind::Cost => MetricDisplay {
+            label: "Cost",
+            value_text: format_cost_total(CostTotal::of(in_range.iter().copied())),
+            subtitle,
+            accent_color: COST_ACCENT,
+        },
     }
 }
 
@@ -145,7 +159,7 @@ pub fn error_display() -> MetricDisplay {
         label: "\u{2014}",
         value_text: "\u{2014}".to_string(),
         subtitle: "no data",
-        accent_color: NO_DATA_ACCENT,
+        accent_color: DISABLED_COLOR,
     }
 }
 
@@ -158,12 +172,17 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 9, 13, hour, minute, 0).unwrap()
     }
 
+    /// "Today" is the local calendar day, as on the Heatmap and the
+    /// Sparkline - not the last 24 hours.
     #[test]
-    fn today_is_a_rolling_24h_window_ending_now() {
-        let now = dt(20, 0);
+    fn today_starts_at_local_midnight() {
+        let plus2 = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+        // 09:00 local on the 13th = 07:00 UTC.
+        let now = dt(7, 0).with_timezone(&plus2);
         let (start, end) = range_bounds(RangeKind::Today, now, None);
-        assert_eq!(start, now - Duration::hours(24));
-        assert_eq!(end, now);
+        // Local midnight on the 13th = 22:00 UTC on the 12th.
+        assert_eq!(start, dt(7, 0) - Duration::hours(9));
+        assert_eq!(end, dt(7, 0));
     }
 
     #[test]
@@ -241,10 +260,11 @@ mod tests {
     fn entry(timestamp: DateTime<Utc>, model: &str, input: u64, output: u64) -> LogEntry {
         LogEntry {
             timestamp,
-            model: model.to_string(),
+            model: model.into(),
             input_tokens: input,
             output_tokens: output,
             cache_creation_input_tokens: 0,
+            cache_creation_1h_input_tokens: 0,
             cache_read_input_tokens: 0,
         }
     }
@@ -253,8 +273,8 @@ mod tests {
     fn build_metric_display_sums_tokens_only_within_range() {
         let now = dt(20, 0);
         let entries = vec![
-            entry(now - Duration::hours(1), "claude-sonnet-5", 100, 50), // within last 24h
-            entry(now - Duration::hours(30), "claude-sonnet-5", 999, 999), // outside the Today (24h) window
+            entry(now - Duration::hours(1), "claude-sonnet-5", 100, 50), // today
+            entry(now - Duration::hours(21), "claude-sonnet-5", 999, 999), // yesterday, within 24h
         ];
         let display =
             build_metric_display(&entries, MetricKind::Tokens, RangeKind::Today, now, None);
@@ -265,15 +285,19 @@ mod tests {
     }
 
     #[test]
-    fn build_metric_display_cost_skips_entries_with_an_unrecognized_model() {
+    fn build_metric_display_cost_marks_entries_with_an_unrecognized_model() {
         let now = dt(20, 0);
         let entries = vec![
-            entry(now - Duration::hours(1), "claude-sonnet-5", 1_000_000, 0), // $3.00 at sonnet input rate
-            entry(now - Duration::hours(1), "some-future-model", 1_000_000, 0), // unrecognized - excluded
+            entry(now - Duration::hours(1), "claude-sonnet-5", 1_000_000, 0), // $2.00 at Sonnet 5's input rate
+            entry(now - Duration::hours(1), "some-future-model", 1_000_000, 0), // unpriced
         ];
         let display = build_metric_display(&entries, MetricKind::Cost, RangeKind::Today, now, None);
         assert_eq!(display.label, "Cost");
-        assert_eq!(display.value_text, "$3.00");
+        // At least $2.00: one entry couldn't be priced.
+        assert_eq!(display.value_text, "$2.00+");
+        let priced = &entries[..1];
+        let display = build_metric_display(priced, MetricKind::Cost, RangeKind::Today, now, None);
+        assert_eq!(display.value_text, "$2.00");
     }
 
     #[test]
@@ -296,6 +320,6 @@ mod tests {
     fn error_display_is_a_clear_no_data_state() {
         let display = error_display();
         assert_eq!(display.subtitle, "no data");
-        assert_eq!(display.accent_color, NO_DATA_ACCENT);
+        assert_eq!(display.accent_color, DISABLED_COLOR);
     }
 }

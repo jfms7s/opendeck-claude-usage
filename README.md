@@ -38,13 +38,15 @@ expired, the dials show "no data" until Claude Code next runs and renews it.
 
 That endpoint is undocumented and rate-limited per account - and the limit
 is shared with anything else that calls it (Claude Code's `/usage`, editor
-extensions that show your limits). The plugin makes at most one request a
-minute however many dials, tiles, and taps are involved. When a request fails
-(a 429 because something else used the minute's allowance, a network blip,
-an expired token), it retries after 2, 4, 8... minutes (capped at 10) and
-keeps showing the last good numbers meanwhile; only once those are more
-than 15 minutes old does each dial switch to a "no data" state - never a
-crash or a blank display.
+extensions that show your limits). The plugin makes at most one request
+every three minutes or so (randomly ±10%, so it doesn't stay in step with
+anything else that polls) however many dials, tiles, and taps are involved,
+and none at all while no usage key or dial is on screen. When a request
+fails (a 429 because something else used the allowance, a network blip, an
+expired token), it retries after 6 minutes, then every 10 (or later, if the
+429 says so) and keeps showing the last good numbers meanwhile; only once
+those are more than 15 minutes old does each dial switch to a "no data"
+state - never a crash or a blank display.
 
 There is no native monthly rate-limit window in Claude's usage data - only
 session and weekly exist. The "Monthly" setting shows `extra_usage`
@@ -59,25 +61,35 @@ since the account used to build this plugin has never had `extra_usage`
 enabled. The `currency` field in `extra_usage` is currently ignored
 entirely; the `$` sign is hardcoded regardless of account currency.
 
-## Where the Tokens/Cost tile's data comes from
+## Where the Tokens/Cost data comes from
 
-The **Metric Tile** action reads a different source: Claude Code's own
-per-session transcript logs at `~/.claude/projects/<project>/<session-id>.jsonl`,
-one file per session, across every project. Each assistant turn in these
-files carries token usage (input/output/cache-read/cache-write) but
-**no cost figure at all** - Cost is estimated by multiplying tokens by a
-hardcoded per-model-family price table in `src/pricing.rs`.
+**Metric Tile** and **Usage Heatmap** read a different source: Claude
+Code's own transcripts under `~/.claude/projects/` - one file per session in
+each project's folder, plus the transcripts of subagents
+(`<session>/subagents/*.jsonl`), across every project. Each assistant
+message carries token usage (input/output/cache-read/cache-write) but **no
+cost figure at all**.
 
-That price table is a **best-effort, unverified snapshot** - it isn't
-sourced from Claude Code, isn't fetched from any live pricing API, and
-hasn't been re-checked against a real invoice. If Anthropic changes
-pricing, the Cost tile's numbers will drift until the table is updated
-by hand. Treat Cost as an estimate; treat Tokens (a direct sum from the
-logs) as exact.
+- **Tokens** counts every API message once. Claude Code writes a message as
+  several lines (one per thinking/text/tool-use block), each repeating the
+  message and request ids and its usage, and a resumed session can copy
+  messages into a new file; the plugin keeps one copy of each message (the
+  fullest one), across files.
+- **Cost** is estimated from those tokens with an exact per-model price
+  table in `src/pricing.rs`: Anthropic's published API list prices (input,
+  output, 5-minute and 1-hour cache writes, cache reads), checked on
+  2026-10-05. It's what the same tokens would cost on the API - not what a
+  Pro/Max subscription is billed. A model missing from the table (a model
+  released after this version) is counted in Tokens but not in Cost, and
+  the Cost shows a trailing `+` (e.g. `$12.40+`): the real figure is at
+  least that. Update the table when that happens.
 
 Entries with `model == "<synthetic>"` (Claude Code's placeholder for
 locally-generated content like compaction summaries) are excluded
 entirely, since they represent no real API call.
+
+Transcripts only grow, so after the first scan only the lines added since
+are read.
 
 The tile's **Session** range reuses the Usage Gauge's 5-hour rate-limit
 window (the same `resets_at` the gauge fetches) rather than a fixed
@@ -87,11 +99,20 @@ erroring.
 
 ## Installing
 
-Download the latest `.streamDeckPlugin` from
+Download the latest `.streamDeckPlugin` and `SHA256SUMS` from
 [Releases](https://github.com/jfms7s/opendeck-claude-usage/releases), then
 either double-click it (if your file manager associates the extension with
 OpenDeck) or unzip it into `~/.config/opendeck/plugins/` and restart OpenDeck
 (plugins are only loaded at startup).
+
+The plugin can read your Claude login, so check the download is the one CI
+built before installing it - either against the checksum, or against the
+build provenance GitHub recorded for it:
+
+```bash
+sha256sum -c SHA256SUMS
+gh attestation verify opendeck-claude-usage.streamDeckPlugin --repo jfms7s/opendeck-claude-usage
+```
 
 **Upgrading from 0.6.0:** existing Usage Gauge keys switch from
 green/yellow/red at 50/80% to copper with Watch 50, Risk 75 and Critical
@@ -101,27 +122,45 @@ green/yellow/red at 50/80% to copper with Watch 50, Risk 75 and Critical
 
 1. Add a **Usage Gauge** key on a dial or a keypad tile.
 2. Pick which window to show: Session, Weekly, or Monthly (extra usage).
-3. It updates automatically roughly every 20 seconds. On a dial, press for
-   an immediate refresh. On a keypad tile, a short press switches to the
-   next style (see below) and holding for half a second refreshes.
+3. It redraws every minute (the numbers behind it are fetched about every
+   three minutes - see above). On a dial, press for an immediate refresh.
+   On a keypad tile, a short press switches to the next style (see below)
+   and holding for half a second refreshes.
 
 ## Using a Metric Tile
 
 1. Add a **Metric Tile** key on a keypad tile (no dial/Encoder variant).
-2. Pick the metric (Tokens or Cost), the range (Today/7 days/Session),
-   and how often it refreshes (in seconds).
+2. Pick the metric (Tokens or Cost), the range, and how often it refreshes
+   (5 to 3600 seconds). **Today** is since local midnight (the same day as
+   the Heatmap's and the Sparkline's "today"); **7 days** is the last 7×24
+   hours; **Session** is the current 5-hour usage window.
 3. It updates automatically on that schedule; tap the tile for an
    immediate refresh (this doesn't reset the schedule - the next
    automatic refresh still happens on time).
 
+## Using Peak Clock
+
+1. Add a **Peak Clock** key on a keypad tile.
+2. Set the peak hours (start and end, `HH:MM`; a window may cross
+   midnight) and the days they apply to (weekdays by default; unticking
+   every day means no peak hours at all).
+3. The tile shows a 24-hour clock face with the peak hours marked in red
+   (dimmed on a day they don't apply to) and a pointer at the current
+   time, and under it **Peak** (red, with `ends in HH:MM`) or **Off-peak**
+   (green, with `peak in HH:MM`, or `no peak set`). It redraws every
+   minute; tap it to redraw now. The clock uses local time and has no data
+   source, so it never says "no data".
+
 ## Colors & thresholds
 
-Usage Gauge and Burn Rate keys stay a calm copper until usage crosses one
-of three marks you set per key (in % used): **Watch** (default 50),
-**Risk** (75), **Critical** (90), each with its own editable color. Marks
-must increase; if they don't, the defaults are used.
+Usage Gauge, Burn Rate, Session + Weekly and Usage Sparkline keys stay a
+calm copper until usage crosses one of three marks you set per key (in %
+used): **Watch** (default 50), **Risk** (75), **Critical** (90), each with
+its own editable color. Marks must increase; if they don't, the defaults
+are used (the settings page warns about it).
 
-On a Usage Gauge you can also color by **pace**: the key warns at
+On a Usage Gauge, Session + Weekly or Usage Sparkline you can also color by
+**pace**: the key warns at
 whichever level is worse, current usage or the usage you'd reach at reset
 if you keep burning at the current rate. Pace is only computed after 10%
 of the window has passed (earlier projections are noise), and never for
@@ -196,86 +235,47 @@ plugin records them itself: each successful poll whose numbers changed (plus the
 first poll of each day, to mark midnight) is appended to `~/.local/state/opendeck-claude-usage/history.jsonl` (or under
 `$XDG_STATE_HOME`). It holds only session/weekly/extra-usage percentages and reset
 times - no tokens, credentials or account data - and anything older than 8
-days is dropped when OpenDeck starts. Delete the file any time to reset the
-history. If the folder can't be written, the plugin logs one warning and
-keeps the history in memory until OpenDeck restarts.
+days is dropped as it goes. The file and its folder are owner-only. Delete
+the file any time to reset the history. If the folder can't be written, the
+plugin logs one warning and keeps the history in memory until OpenDeck
+restarts. A file this version can't read (say, written by a newer version
+before a downgrade) is left untouched rather than overwritten.
 
 ## Manual smoke-test checklist
 
-Run this against a live OpenDeck + Stream Deck XL+ session before cutting a
-release. None of these have been verified on real hardware as of this
-version - the manual smoke test was deliberately not run in this
-development environment, which has no OpenDeck/Stream Deck to test against:
+The unit tests (Rust) and the settings-page tests (`node --test tests/`)
+cover the logic; these are the things only a live OpenDeck + Stream Deck
+XL+ session can show. Run them before cutting a release and record the
+version you checked them on:
 
-- [ ] Session/Weekly/Monthly dials each show a percent, bar, and detail line
-      shortly after appearing. *(not yet verified)*
-- [ ] Session/Weekly/Monthly keypad tiles each show a gauge icon with the
-      percent and countdown drawn in with the needle at the right position shortly
-      after appearing. *(not yet verified)*
-- [ ] Display refreshes within ~20s without any interaction, on both a dial
-      and a tile. *(not yet verified)*
-- [ ] Pressing a dial or tapping a tile refreshes it immediately. *(not yet verified)*
-- [ ] Monthly dial/tile shows "not enabled" cleanly when extra usage is off. *(not yet verified)*
-- [ ] Removing a dial or tile doesn't error on the next poll tick. *(not yet verified)*
-- [ ] Dials keep updating with only the Claude desktop app open (no CLI
-      session, no editor extension). *(not yet verified)*
-- [ ] Metric Tile shows the right label/value/subtitle for each metric
-      (Tokens/Cost) × range (Today/7 days/Session) combination.
-      *(not yet verified)*
-- [ ] Metric Tile's configured refresh interval actually changes how
-      often it updates (e.g. set to 5s, confirm faster updates than the
-      default 60s). *(not yet verified)*
-- [ ] Tapping a Metric Tile refreshes it immediately without disrupting
-      its next scheduled refresh. *(not yet verified)*
-- [ ] Changing a Usage Gauge's marks/colors updates both a dial's bar
-      color and a tile's speedometer zones immediately. *(not yet verified)*
-- [ ] Color-by-pace on a Usage Gauge turns it Watch/Risk earlier during a
-      fast burn, and not during the first 10% of a window. *(not yet verified)*
-- [ ] Burn Rate shows Pace / Even burn / Runway on a key and on a dial for
-      Session and Weekly. *(not yet verified)*
-- [ ] A key upgraded from 0.6.0 keeps its window setting. *(not yet verified)*
-- [ ] Each of the six styles renders on a keypad tile with tick marks at
-      the key's marks. *(not yet verified)*
-- [ ] A short press cycles only the ticked styles and the chosen style
-      survives an OpenDeck restart. *(not yet verified)*
-- [ ] Holding a key ~0.5s refreshes it without changing its style.
-      *(not yet verified)*
-- [ ] With fewer than two styles ticked, a short press does nothing.
-      *(not yet verified)*
-- [ ] Session + Weekly shows both layouts on a key with each bar in its
-      own level color and tick marks at the marks. *(not yet verified)*
-- [ ] A short press flips the layout and it survives an OpenDeck restart;
-      holding refreshes. *(not yet verified)*
-- [ ] On a dial the touch strip shows the 5h and 7d bars with percent and
-      reset time. *(not yet verified)*
-- [ ] Usage Heatmap shows 7 days and 4 weeks on a key with today's cell on
-      the right and the correct weekday letters. *(not yet verified)*
-- [ ] A short press flips the view and it survives an OpenDeck restart.
-      *(not yet verified)*
-- [ ] On a dial the heatmap image fills the touch strip, including the
-      caption text (confirms OpenDeck renders an SVG image with text in a
-      pixmap item), and a dial press flips the view. *(not yet verified)*
-- [ ] Usage Sparkline says "collecting…" at first, then draws a line after
-      a few polls; a short press on the key or dial cycles all four series.
-      *(not yet verified)*
-- [ ] `~/.local/state/opendeck-claude-usage/history.jsonl` is created, only
-      grows when usage changes, and survives an OpenDeck restart (the line
-      is still there). *(not yet verified)*
-- [ ] On a dial the sparkline image fills the touch strip, headline and
-      caption visible. *(not yet verified)*
-- [ ] A Monthly Usage Sparkline draws extra usage when it's enabled, and
-      says "off · not enabled" when it isn't. *(not yet verified)*
+| Check | Last verified |
+|---|---|
+| Every action's keypad tile and dial strip is readable (text not clipped or overlapping, colors right) for each style/view/series. | not recorded |
+| Keys and dials redraw every minute without interaction, and a key that appears shows numbers straight away. | not recorded |
+| A short press on Usage Gauge, Session + Weekly, Usage Heatmap or Usage Sparkline switches what it shows, and the choice survives an OpenDeck restart; two fast presses advance twice. | not recorded |
+| Holding a key for half a second (or pressing a dial on Gauge/Burn Rate/Combo) refreshes without switching. | not recorded |
+| Editing a settings page while a key's style/layout/view/series was changed by a press doesn't undo the press. | not recorded |
+| Removing a key or dial causes no error in the plugin log on the next minute's redraw. | not recorded |
+| Usage keeps updating with only the Claude desktop app open (no CLI session, no editor extension). | not recorded |
+| Metric Tile and Usage Heatmap totals match `ccusage` (or another transcript tool) for the same day. | not recorded |
+| `~/.local/state/opendeck-claude-usage/history.jsonl` is created owner-only, only grows when usage changes, and survives a restart. | not recorded |
 
 ## Development
 
 ```bash
-cargo test                                   # unit tests (no live OpenDeck needed)
-cargo test -- --ignored live_                # one real request to the usage API with your login
-cargo build --release --target <triple>
-node build.mjs <triple>                      # assembles dist/<uuid>.sdPlugin
+cargo test --locked                          # unit tests (no live OpenDeck needed)
+node --test tests/                           # settings-page (Property Inspector) tests
+cargo test -- --ignored live_ --nocapture    # one real usage-API request + a scan of your transcripts
+cargo build --release --locked
+node build.mjs                               # assembles dist/<uuid>.sdPlugin from what was built
 cp -r dist/com.jfms7s.claudeusage.sdPlugin ~/.config/opendeck/plugins/
 # restart OpenDeck, then work through the smoke-test checklist above
 ```
+
+Releases are cut by pushing a `vX.Y.Z` tag matching the version in
+`Cargo.toml` and `assets/manifest.json`: the Release workflow tests, builds
+both architectures, and publishes the release with the bundle, its
+`SHA256SUMS` and a build-provenance attestation.
 
 ## License
 

@@ -75,6 +75,7 @@ pub(crate) mod tests {
 
     pub(crate) fn display(v: f64) -> UsageDisplay {
         UsageDisplay {
+            has_data: true,
             percent_text: format!("{v}%"),
             color: "#d97757".to_string(),
             detail_text: "resets in 1h".to_string(),

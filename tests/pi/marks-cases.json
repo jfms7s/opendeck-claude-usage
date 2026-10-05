@@ -1,0 +1,15 @@
+{
+	"comment": "Threshold marks [watch, risk, critical] and whether the plugin uses them as given (after clamping to 0..=100). Checked against Marks::sanitized (src/level.rs) and colors.js's updateMarksWarning, so the two can't disagree.",
+	"cases": [
+		{ "marks": [50, 75, 90], "used": true },
+		{ "marks": [10, 20, 30], "used": true },
+		{ "marks": [0, 1, 100], "used": true },
+		{ "marks": [-5, 60, 150], "used": true },
+		{ "marks": [80, 60, 90], "used": false },
+		{ "marks": [50, 50, 90], "used": false },
+		{ "marks": [50, 90, 90], "used": false },
+		{ "marks": [90, 75, 50], "used": false },
+		{ "marks": [-10, -5, 50], "used": false },
+		{ "marks": [100, 120, 150], "used": false }
+	]
+}

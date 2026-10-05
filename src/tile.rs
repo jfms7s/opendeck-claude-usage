@@ -26,6 +26,15 @@ pub fn card() -> String {
     format!(r#"<rect x="0" y="0" width="100" height="100" fill="{CARD_COLOR}" />"#)
 }
 
+/// A 200x100 dial touch-strip image on the same dark card. Strip text is
+/// placed directly (`text_at`/`text_line` assume a 100-wide key and would
+/// squeeze text that fits easily here).
+pub fn strip_svg(body: &str) -> String {
+    format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"><rect x="0" y="0" width="200" height="100" fill="{CARD_COLOR}" />{body}</svg>"#
+    )
+}
+
 /// Where `x` sits on a text line - SVG's `text-anchor`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Anchor {

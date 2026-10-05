@@ -37,61 +37,32 @@
 			</div>
 		</section>
 	</main>
+	<script src="pi-common.js"></script>
 
 	<script>
-		window.connectOpenActionSocketData = new Promise((resolve) => {
-			window.connectOpenActionSocket = (...args) => resolve(args);
-			window.connectElgatoStreamDeckSocket = window.connectOpenActionSocket;
-		});
-
-		let websocket;
-		let uuid;
-
-		window.connectOpenActionSocketData.then(([inPort, inUUID, inRegisterEvent, inInfo, inActionInfo]) => {
-			uuid = inUUID;
-			const actionInfo = JSON.parse(inActionInfo);
-			websocket = new WebSocket(`ws://127.0.0.1:${inPort}`);
-
-			websocket.onopen = () => {
-				websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
-				applySettings(actionInfo.payload.settings || {});
-			};
-
-			websocket.onmessage = (event) => {
-				const message = JSON.parse(event.data);
-				if (message.event === "didReceiveSettings") {
-					applySettings(message.payload.settings || {});
-				}
-			};
-		});
-
 		const DEFAULT_PEAK_DAYS = ["mon", "tue", "wed", "thu", "fri"];
 		const dayBoxes = document.querySelectorAll("#peak_days input");
+		const isTime = (value) => typeof value === "string" && /^\d{2}:\d{2}$/.test(value);
 
-		function applySettings(settings) {
-			document.getElementById("peak_start").value = settings.peak_start || "13:00";
-			document.getElementById("peak_end").value = settings.peak_end || "18:00";
-			// Only a missing key falls back to weekdays - an empty list means
-			// the user unticked every day.
-			const days = Array.isArray(settings.peak_days) ? settings.peak_days : DEFAULT_PEAK_DAYS;
-			dayBoxes.forEach((box) => { box.checked = days.includes(box.value); });
-		}
+		const pi = connectPI({
+			apply(settings) {
+				document.getElementById("peak_start").value = isTime(settings.peak_start) ? settings.peak_start : "13:00";
+				document.getElementById("peak_end").value = isTime(settings.peak_end) ? settings.peak_end : "18:00";
+				// Only a missing key falls back to weekdays - an empty list means
+				// the user unticked every day.
+				const days = Array.isArray(settings.peak_days) ? settings.peak_days : DEFAULT_PEAK_DAYS;
+				dayBoxes.forEach((box) => { box.checked = days.includes(box.value); });
+			},
+			read: () => ({
+				peak_start: document.getElementById("peak_start").value,
+				peak_end: document.getElementById("peak_end").value,
+				peak_days: Array.from(dayBoxes).filter((box) => box.checked).map((box) => box.value),
+			}),
+		});
 
-		function sendSettings() {
-			websocket.send(JSON.stringify({
-				event: "setSettings",
-				context: uuid,
-				payload: {
-					peak_start: document.getElementById("peak_start").value,
-					peak_end: document.getElementById("peak_end").value,
-					peak_days: Array.from(dayBoxes).filter((box) => box.checked).map((box) => box.value),
-				},
-			}));
-		}
-
-		document.getElementById("peak_start").addEventListener("change", sendSettings);
-		document.getElementById("peak_end").addEventListener("change", sendSettings);
-		dayBoxes.forEach((box) => box.addEventListener("change", sendSettings));
+		document.getElementById("peak_start").addEventListener("change", pi.changed);
+		document.getElementById("peak_end").addEventListener("change", pi.changed);
+		dayBoxes.forEach((box) => box.addEventListener("change", pi.changed));
 	</script>
 </body>
 </html>

@@ -1,6 +1,9 @@
-//! Keypad renderers for the Usage Gauge's styles, plus the SVG helpers they
-//! share. Each renderer returns a bare SVG string; `build_styled_icon`
-//! wraps the chosen one as the data URI OpenDeck's `setImage` expects.
+//! SVG renderers that return a bare SVG string, plus the helpers they
+//! share: the Usage Gauge's six keypad styles (`build_styled_icon` picks one
+//! and wraps it as the data URI `setImage` expects), and the Combo, Heatmap
+//! and Sparkline key and dial-strip renderers (wrapped by their views).
+//! Single-layout keypad tiles - Burn Rate, Peak Clock, Metric Tile - live
+//! in `<feature>_icon.rs` instead and return the data URI themselves.
 
 pub mod bar;
 pub mod combo;
@@ -11,7 +14,7 @@ pub mod sparkline;
 pub mod speedometer;
 
 use crate::format::UsageDisplay;
-use crate::style::GaugeStyle;
+use crate::gauge_style::GaugeStyle;
 use crate::tile::{self, TEXT_COLOR};
 
 /// The keypad image for a Usage Gauge in `style`, as the data URI
@@ -138,7 +141,7 @@ mod tests {
 
     #[test]
     fn every_style_builds_a_data_uri() {
-        use crate::style::ALL_STYLES;
+        use crate::gauge_style::ALL_STYLES;
         let d = crate::styles::bar::tests::display(42.0);
         for style in ALL_STYLES {
             assert!(
@@ -150,7 +153,7 @@ mod tests {
 
     #[test]
     fn styles_render_differently() {
-        use crate::style::GaugeStyle;
+        use crate::gauge_style::GaugeStyle;
         let d = crate::styles::bar::tests::display(42.0);
         assert_ne!(
             build_styled_icon(&d, GaugeStyle::Bar),

@@ -37,56 +37,26 @@
 			</div>
 		</section>
 	</main>
+	<script src="pi-common.js"></script>
 
 	<script>
-		window.connectOpenActionSocketData = new Promise((resolve) => {
-			window.connectOpenActionSocket = (...args) => resolve(args);
-			window.connectElgatoStreamDeckSocket = window.connectOpenActionSocket;
+		const pi = connectPI({
+			apply(settings) {
+				selectKnown(document.getElementById("metric"), settings.metric, "tokens");
+				selectKnown(document.getElementById("range"), settings.range, "today");
+				const seconds = Number(settings.refresh_seconds);
+				document.getElementById("refresh_seconds").value = Number.isInteger(seconds) && seconds > 0 ? seconds : 60;
+			},
+			read: () => ({
+				metric: document.getElementById("metric").value,
+				range: document.getElementById("range").value,
+				refresh_seconds: Math.min(3600, Math.max(5, parseInt(document.getElementById("refresh_seconds").value, 10) || 60)),
+			}),
 		});
 
-		let websocket;
-		let uuid;
-
-		window.connectOpenActionSocketData.then(([inPort, inUUID, inRegisterEvent, inInfo, inActionInfo]) => {
-			uuid = inUUID;
-			const actionInfo = JSON.parse(inActionInfo);
-			websocket = new WebSocket(`ws://127.0.0.1:${inPort}`);
-
-			websocket.onopen = () => {
-				websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
-				applySettings(actionInfo.payload.settings || {});
-			};
-
-			websocket.onmessage = (event) => {
-				const message = JSON.parse(event.data);
-				if (message.event === "didReceiveSettings") {
-					applySettings(message.payload.settings || {});
-				}
-			};
-		});
-
-		function applySettings(settings) {
-			document.getElementById("metric").value = settings.metric || "tokens";
-			document.getElementById("range").value = settings.range || "today";
-			document.getElementById("refresh_seconds").value = settings.refresh_seconds || 60;
+		for (const id of ["metric", "range", "refresh_seconds"]) {
+			document.getElementById(id).addEventListener("change", pi.changed);
 		}
-
-		function sendSettings() {
-			const refreshSeconds = Math.min(3600, Math.max(5, parseInt(document.getElementById("refresh_seconds").value, 10) || 60));
-			websocket.send(JSON.stringify({
-				event: "setSettings",
-				context: uuid,
-				payload: {
-					metric: document.getElementById("metric").value,
-					range: document.getElementById("range").value,
-					refresh_seconds: refreshSeconds,
-				},
-			}));
-		}
-
-		document.getElementById("metric").addEventListener("change", sendSettings);
-		document.getElementById("range").addEventListener("change", sendSettings);
-		document.getElementById("refresh_seconds").addEventListener("change", sendSettings);
 	</script>
 </body>
 </html>

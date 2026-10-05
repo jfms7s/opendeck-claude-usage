@@ -1,32 +1,71 @@
-use crate::clock_icon::build_clock_icon;
-use crate::peak::{PeakDays, PeakSchedule, PeakWindow, peak_status};
-use async_trait::async_trait;
-use chrono::{Datelike, Local, Timelike};
-use dashmap::DashMap;
-use openaction::{Action, Instance, OpenActionResult};
-use serde::{Deserialize, Serialize};
+//! Peak Clock: a 24-hour clock face with the configured peak hours marked,
+//! whether it's peak now, and how long until that changes. Keypad only; a
+//! tap redraws it.
+
+use std::future::Future;
 use std::sync::Arc;
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+use async_trait::async_trait;
+use chrono::{Datelike, Local, NaiveDateTime, Timelike};
+use openaction::{Action, Instance, OpenActionResult};
+use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
+
+use crate::clock_icon::build_clock_icon;
+use crate::peak::{
+    DEFAULT_PEAK_DAYS, DEFAULT_PEAK_END, DEFAULT_PEAK_START, PeakDays, PeakSchedule, PeakWindow,
+    peak_status,
+};
+use crate::press::LatestSettings;
+use crate::surface::{Frames, Output, Surface, for_each_tracked};
+use crate::tasks::{park_while_empty, sleep_to_next_minute};
+
+/// Each field falls back alone (see `settings::lenient`); a *missing* key
+/// gets its default from `Default`, so an empty `peak_days` list (every box
+/// unticked) is kept.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct PeakClockSettings {
+    #[serde(deserialize_with = "lenient_or_start")]
     pub peak_start: String,
+    #[serde(deserialize_with = "lenient_or_end")]
     pub peak_end: String,
     /// Lowercase three-letter day keys (see `peak::DAY_KEYS`).
+    #[serde(deserialize_with = "lenient_or_weekdays")]
     pub peak_days: Vec<String>,
 }
 
 impl Default for PeakClockSettings {
     fn default() -> Self {
         Self {
-            peak_start: crate::peak::DEFAULT_PEAK_START.to_string(),
-            peak_end: crate::peak::DEFAULT_PEAK_END.to_string(),
-            peak_days: crate::peak::DEFAULT_PEAK_DAYS
-                .iter()
-                .map(|d| d.to_string())
-                .collect(),
+            peak_start: DEFAULT_PEAK_START.to_string(),
+            peak_end: DEFAULT_PEAK_END.to_string(),
+            peak_days: DEFAULT_PEAK_DAYS.iter().map(|d| d.to_string()).collect(),
         }
     }
+}
+
+/// `settings::lenient`, but falling back to the field's real default
+/// rather than an empty string or list.
+fn lenient_or<'de, D, T>(deserializer: D, fallback: impl FnOnce() -> T) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_else(|_| fallback()))
+}
+
+fn lenient_or_start<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    lenient_or(d, || DEFAULT_PEAK_START.to_string())
+}
+
+fn lenient_or_end<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    lenient_or(d, || DEFAULT_PEAK_END.to_string())
+}
+
+fn lenient_or_weekdays<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    lenient_or(d, || PeakClockSettings::default().peak_days)
 }
 
 fn schedule_from(settings: &PeakClockSettings) -> PeakSchedule {
@@ -36,79 +75,89 @@ fn schedule_from(settings: &PeakClockSettings) -> PeakSchedule {
     }
 }
 
+/// The tile for `schedule` at local time `now`. A clock tile has no
+/// external data source, so it's always computed fresh.
+fn output_at(schedule: PeakSchedule, now: NaiveDateTime) -> Output {
+    let now_minutes = now.time().num_seconds_from_midnight() / 60;
+    let status = peak_status(schedule, now);
+    // Dim the arcs on a day the window doesn't apply to, unless a
+    // previous day's overnight window is still running.
+    let arcs_active = status.is_peak || schedule.days.includes(now.weekday());
+    Output::Image(build_clock_icon(
+        schedule.window,
+        now_minutes,
+        arcs_active,
+        &status,
+    ))
+}
+
 #[derive(Clone)]
 pub struct PeakClockAction {
-    registry: Arc<DashMap<String, PeakSchedule>>,
+    registry: Arc<LatestSettings<PeakSchedule>>,
+    frames: Arc<Frames>,
+    wake: Arc<Notify>,
 }
 
 impl PeakClockAction {
     pub fn new() -> Self {
         Self {
-            registry: Arc::new(DashMap::new()),
+            registry: Arc::new(LatestSettings::default()),
+            frames: Arc::new(Frames::default()),
+            wake: Arc::new(Notify::new()),
         }
     }
 
     fn track(&self, instance_id: &str, settings: &PeakClockSettings) {
-        self.registry
-            .insert(instance_id.to_string(), schedule_from(settings));
+        self.registry.set(instance_id, &schedule_from(settings));
+        self.wake.notify_one();
     }
 
     fn untrack(&self, instance_id: &str) {
-        self.registry.remove(instance_id);
+        self.registry.forget(instance_id);
+        self.frames.forget(instance_id);
     }
 
-    /// Renders one instance from `schedule` and the current local time - a
-    /// clock tile has no external data source, so unlike the usage gauge
-    /// this is always computed fresh, never cached.
-    async fn render(instance: &Instance, schedule: PeakSchedule) -> OpenActionResult<()> {
-        let now = Local::now().naive_local();
-        let now_minutes = now.time().num_seconds_from_midnight() / 60;
-        let status = peak_status(schedule, now);
-        // Dim the arcs on a day the window doesn't apply to, unless a
-        // previous day's overnight window is still running.
-        let arcs_active = status.is_peak || schedule.days.includes(now.weekday());
-        // The text is drawn inside the icon (see tile.rs); clear the native
-        // title so OpenDeck doesn't paint a second copy on top.
-        instance.set_title(Some(String::new()), None).await?;
-        instance
-            .set_image(
-                Some(build_clock_icon(
-                    schedule.window,
-                    now_minutes,
-                    arcs_active,
-                    &status,
-                )),
-                None,
-            )
-            .await
+    async fn render<S: Surface + ?Sized>(
+        &self,
+        surface: &S,
+        schedule: PeakSchedule,
+    ) -> OpenActionResult<()> {
+        let output = output_at(schedule, Local::now().naive_local());
+        self.frames.push(surface, output).await
     }
 
-    /// Runs forever: every ~20s, re-renders every currently-registered
-    /// instance so its pointer and countdown stay current. Mirrors
-    /// `UsageGaugeAction::poll_loop`'s cadence but is fully independent -
-    /// this action has no shared state or data source with the usage gauge.
-    pub async fn tick_loop(&self) {
+    /// Runs forever: just after every minute boundary - the face has
+    /// minute resolution - redraws every visible clock. Parks while none is
+    /// visible. Spawned once from `main.rs`, supervised; independent of the
+    /// usage hub (a clock has no data source).
+    pub async fn tick_loop(self) {
         loop {
-            self.refresh_all().await;
-            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            park_while_empty(|| self.registry.is_empty(), &self.wake).await;
+            sleep_to_next_minute().await;
+            self.render_tracked(openaction::get_instance).await;
         }
     }
 
-    async fn refresh_all(&self) {
-        let entries: Vec<(String, PeakSchedule)> = self
-            .registry
-            .iter()
-            .map(|e| (e.key().clone(), *e.value()))
-            .collect();
-
-        for (instance_id, schedule) in entries {
-            let Some(instance) = openaction::get_instance(instance_id).await else {
-                continue;
-            };
-            if let Err(e) = Self::render(&instance, schedule).await {
-                log::warn!("clock render failed: {e}");
-            }
-        }
+    /// Redraws every tracked clock, reading each one's schedule only once
+    /// its instance has been looked up (see `for_each_tracked`), so a
+    /// schedule saved meanwhile isn't drawn over with the old one.
+    async fn render_tracked<S, L, LF>(&self, lookup: L)
+    where
+        S: Surface,
+        L: FnMut(String) -> LF,
+        LF: Future<Output = Option<S>>,
+    {
+        for_each_tracked(
+            self.registry.ids(),
+            |id| self.registry.get(id),
+            lookup,
+            |surface, schedule| async move {
+                if let Err(e) = self.render(&surface, schedule).await {
+                    log::warn!("clock render failed: {e}");
+                }
+            },
+        )
+        .await;
     }
 }
 
@@ -122,8 +171,9 @@ impl Action for PeakClockAction {
         instance: &Instance,
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
+        self.frames.forget(&instance.instance_id);
         self.track(&instance.instance_id, settings);
-        Self::render(instance, schedule_from(settings)).await
+        self.render(instance, schedule_from(settings)).await
     }
 
     async fn did_receive_settings(
@@ -132,7 +182,7 @@ impl Action for PeakClockAction {
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
         self.track(&instance.instance_id, settings);
-        Self::render(instance, schedule_from(settings)).await
+        self.render(instance, schedule_from(settings)).await
     }
 
     async fn will_disappear(
@@ -144,16 +194,17 @@ impl Action for PeakClockAction {
         Ok(())
     }
 
-    /// A tap forces an immediate refresh of just that tile, same as
-    /// `UsageGaugeAction::key_up`.
+    /// A tap redraws just that tile now.
     async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-        Self::render(instance, schedule_from(settings)).await
+        self.render(instance, schedule_from(settings)).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::surface::test_support::FakeSurface;
+    use crate::test_support::manifest_entry;
 
     #[test]
     fn default_settings_use_the_default_peak_window() {
@@ -173,12 +224,22 @@ mod tests {
 
     #[test]
     fn default_matches_missing_key_deserialization() {
-        // Same footgun UsageGaugeSettings' own test guards against: openaction
-        // falls back to Default::default() when settings JSON fails to
-        // deserialize at all, not just on missing fields - confirm both
-        // paths land on the same value.
+        // openaction falls back to Default::default() when settings JSON
+        // fails to deserialize at all, not just on missing fields - confirm
+        // both paths land on the same value.
         let from_missing_keys: PeakClockSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(from_missing_keys, PeakClockSettings::default());
+    }
+
+    /// KI-10 class: a bad value falls back to that field's default alone.
+    #[test]
+    fn a_bad_field_keeps_the_others() {
+        let s: PeakClockSettings =
+            serde_json::from_str(r#"{"peak_days":5,"peak_start":"09:30","peak_end":null}"#)
+                .unwrap();
+        assert_eq!(s.peak_start, "09:30");
+        assert_eq!(s.peak_end, "18:00");
+        assert_eq!(s.peak_days, PeakClockSettings::default().peak_days);
     }
 
     #[test]
@@ -191,13 +252,13 @@ mod tests {
         };
         action.track("ctx1", &settings);
         assert_eq!(
-            *action.registry.get("ctx1").unwrap(),
+            action.registry.get("ctx1").unwrap(),
             PeakSchedule {
                 window: PeakWindow {
                     start_minutes: 600,
                     end_minutes: 1200
                 },
-                days: PeakDays::from_settings(&crate::peak::DEFAULT_PEAK_DAYS),
+                days: PeakDays::from_settings(&DEFAULT_PEAK_DAYS),
             }
         );
 
@@ -205,39 +266,35 @@ mod tests {
         assert!(action.registry.get("ctx1").is_none());
     }
 
-    #[test]
-    fn tracking_the_same_instance_twice_overwrites_its_window() {
+    /// The KI-07 race, on the clock: a schedule saved while the tick awaits
+    /// the instance lookup is the one drawn.
+    #[tokio::test]
+    async fn a_schedule_saved_during_the_lookup_is_the_one_drawn() {
         let action = PeakClockAction::new();
-        action.track(
-            "ctx1",
-            &PeakClockSettings {
-                peak_start: "01:00".to_string(),
-                peak_end: "02:00".to_string(),
-                ..Default::default()
-            },
-        );
-        action.track(
-            "ctx1",
-            &PeakClockSettings {
-                peak_start: "03:00".to_string(),
-                peak_end: "04:00".to_string(),
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            action.registry.get("ctx1").unwrap().window,
-            PeakWindow {
-                start_minutes: 180,
-                end_minutes: 240
-            }
-        );
+        let old = PeakClockSettings::default();
+        let new = PeakClockSettings {
+            peak_start: "01:00".to_string(),
+            peak_end: "02:00".to_string(),
+            ..Default::default()
+        };
+        action.track("ctx1", &old);
+        let key = FakeSurface::new("ctx1", true);
+        action
+            .render_tracked(|id| {
+                action.track(&id, &new); // the PI saves here
+                std::future::ready(Some(key.clone()))
+            })
+            .await;
+        let expected = output_at(schedule_from(&new), Local::now().naive_local());
+        assert_eq!(key.frames(), vec![expected]);
     }
 
     #[test]
     fn action_uuid_matches_the_shipped_manifest() {
-        let manifest: serde_json::Value =
-            serde_json::from_str(include_str!("../assets/manifest.json")).unwrap();
-        let manifest_uuid = manifest["Actions"][1]["UUID"].as_str().unwrap();
-        assert_eq!(manifest_uuid, <PeakClockAction as Action>::UUID);
+        let entry = manifest_entry(<PeakClockAction as Action>::UUID);
+        assert_eq!(
+            entry["PropertyInspectorPath"],
+            "propertyInspector/peakclock.html"
+        );
     }
 }

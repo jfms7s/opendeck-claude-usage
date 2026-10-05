@@ -1,6 +1,8 @@
-// Shared "Colors & thresholds" cards for the Usage Gauge and Burn Rate
-// property inspectors. Field names and defaults mirror src/level.rs's wire
-// format (a Rust test checks the defaults stay in sync).
+// Shared "Colors & thresholds" cards for the Usage Gauge, Burn Rate,
+// Session + Weekly and Usage Sparkline property inspectors. Field names and
+// defaults mirror src/level.rs's wire format (a Rust test checks the
+// defaults stay in sync; tests/pi/ runs this file under node). Load
+// pi-common.js first: it provides isHexColor.
 const COLOR_DEFAULTS = {
 	watch: 50,
 	risk: 75,
@@ -89,10 +91,6 @@ function mountColorSection(container, { showMode, onChange }) {
 // default, so a key that never set a field follows future defaults.
 const touchedColorFields = new Set();
 
-function isHexColor(value) {
-	return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value);
-}
-
 // A stored value the field can't show falls back to the default: an
 // <input type=color> would show (and later save) #000000, and a <select>
 // would go blank and save "".
@@ -146,9 +144,24 @@ function readColorSettings() {
 }
 
 // Mirrors Marks::sanitized in src/level.rs: clamp to 0..=100, then the
-// marks must be strictly increasing or the plugin uses the defaults.
+// marks must be strictly increasing or the plugin uses the defaults. Both
+// are checked against the same cases in tests/pi/marks-cases.json.
 function updateMarksWarning() {
 	const clamp = (n) => Math.min(100, Math.max(0, n));
 	const [watch, risk, critical] = ["watch", "risk", "critical"].map((key) => clamp(readColorValue(key)));
 	document.getElementById("marksWarning").classList.toggle("hidden", watch < risk && risk < critical);
+}
+
+if (typeof module !== "undefined" && module.exports) {
+	module.exports = {
+		COLOR_DEFAULTS,
+		touchedColorFields,
+		mountColorSection,
+		validColorValue,
+		applyColorSettings,
+		readColorValue,
+		readColorSettings,
+		isDefaultColorValue,
+		updateMarksWarning,
+	};
 }

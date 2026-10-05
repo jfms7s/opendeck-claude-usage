@@ -25,83 +25,28 @@
 			<p class="hint">Short press (key or dial) flips between 7 days and 4 weeks. Hold to refresh.</p>
 		</section>
 	</main>
+	<script src="pi-common.js"></script>
 
 	<script>
 		const DEFAULT_COLOR = "#d97757";
 
-		window.connectOpenActionSocketData = new Promise((resolve) => {
-			window.connectOpenActionSocket = (...args) => resolve(args);
-			window.connectElgatoStreamDeckSocket = window.connectOpenActionSocket;
+		const pi = connectPI({
+			apply(settings) {
+				selectKnown(document.getElementById("metric"), settings.metric, "tokens");
+				document.getElementById("color").value = isHexColor(settings.color)
+					? settings.color.toLowerCase()
+					: DEFAULT_COLOR;
+			},
+			read: () => ({
+				metric: document.getElementById("metric").value,
+				color: document.getElementById("color").value,
+			}),
+			// The view changes only by pressing the key.
+			passThrough: ["view"],
 		});
 
-		let websocket;
-		let uuid;
-		let storedView;
-
-		window.connectOpenActionSocketData.then(([inPort, inUUID, inRegisterEvent, inInfo, inActionInfo]) => {
-			uuid = inUUID;
-			const actionInfo = JSON.parse(inActionInfo);
-			websocket = new WebSocket(`ws://127.0.0.1:${inPort}`);
-
-			websocket.onopen = () => {
-				websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
-				applySettings(actionInfo.payload.settings || {});
-			};
-
-			websocket.onmessage = (event) => {
-				const message = JSON.parse(event.data);
-				if (message.event === "didReceiveSettings") {
-					const settings = message.payload.settings || {};
-					if (pendingSave) {
-						// The reply to our getSettings: only the pass-through
-						// value is refreshed, so the edit being saved is kept.
-						storedView = settings.view;
-						saveSettings();
-					} else {
-						applySettings(settings);
-					}
-				}
-			};
-		});
-
-		function applySettings(settings) {
-			storedView = settings.view;
-			document.getElementById("metric").value = settings.metric === "cost" ? "cost" : "tokens";
-			document.getElementById("color").value = /^#[0-9a-f]{6}$/i.test(settings.color || "")
-				? settings.color
-				: DEFAULT_COLOR;
-		}
-
-		// OpenDeck may not forward the plugin's own setSettings (a press
-		// changing the view) to an open PI, so the view held here can be
-		// stale. Re-read the stored settings before saving; if no reply
-		// comes, save with what we have.
-		let pendingSave = null;
-
-		function sendSettings() {
-			if (pendingSave) return; // the pending save reads the form when it sends
-			pendingSave = setTimeout(saveSettings, 500);
-			websocket.send(JSON.stringify({ event: "getSettings", context: uuid }));
-		}
-
-		function saveSettings() {
-			clearTimeout(pendingSave);
-			pendingSave = null;
-			websocket.send(JSON.stringify({
-				event: "setSettings",
-				context: uuid,
-				payload: {
-					metric: document.getElementById("metric").value,
-					color: document.getElementById("color").value,
-					// The view changes only by pressing the key; pass it
-					// through untouched so saving here doesn't reset it.
-					...(storedView ? { view: storedView } : {}),
-				},
-			}));
-		}
-
-		document.getElementById("metric").addEventListener("change", sendSettings);
-		document.getElementById("color").addEventListener("change", sendSettings);
+		document.getElementById("metric").addEventListener("change", pi.changed);
+		document.getElementById("color").addEventListener("change", pi.changed);
 	</script>
 </body>
 </html>

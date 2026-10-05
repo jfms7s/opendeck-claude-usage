@@ -38,3 +38,28 @@ pub fn assert_feedback_matches_layout(layout_json: &str, feedback: &Value, stati
         "feedback never sets layout items {unfed:?}"
     );
 }
+
+/// The shipped manifest.
+pub fn manifest() -> Value {
+    serde_json::from_str(include_str!("../assets/manifest.json")).unwrap()
+}
+
+/// The manifest entry for action `uuid`, found by UUID (not by position,
+/// so reordering the manifest's action list breaks nothing) and asserted
+/// to be the only one.
+pub fn manifest_entry(uuid: &str) -> Value {
+    let manifest = manifest();
+    let matches: Vec<&Value> = manifest["Actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["UUID"] == uuid)
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "manifest has {} entries for {uuid}",
+        matches.len()
+    );
+    matches[0].clone()
+}

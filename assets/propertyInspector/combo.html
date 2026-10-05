@@ -17,77 +17,18 @@
 
 		<div id="colors"></div>
 	</main>
+	<script src="pi-common.js"></script>
 	<script src="colors.js"></script>
 
 	<script>
-		window.connectOpenActionSocketData = new Promise((resolve) => {
-			window.connectOpenActionSocket = (...args) => resolve(args);
-			window.connectElgatoStreamDeckSocket = window.connectOpenActionSocket;
+		const pi = connectPI({
+			apply: applyColorSettings,
+			read: () => ({ ...readColorSettings() }),
+			// The layout changes only by pressing the key.
+			passThrough: ["layout"],
 		});
 
-		let websocket;
-		let uuid;
-		let storedLayout;
-
-		mountColorSection(document.getElementById("colors"), { showMode: true, onChange: sendSettings });
-
-		window.connectOpenActionSocketData.then(([inPort, inUUID, inRegisterEvent, inInfo, inActionInfo]) => {
-			uuid = inUUID;
-			const actionInfo = JSON.parse(inActionInfo);
-			websocket = new WebSocket(`ws://127.0.0.1:${inPort}`);
-
-			websocket.onopen = () => {
-				websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
-				applySettings(actionInfo.payload.settings || {});
-			};
-
-			websocket.onmessage = (event) => {
-				const message = JSON.parse(event.data);
-				if (message.event === "didReceiveSettings") {
-					const settings = message.payload.settings || {};
-					if (pendingSave) {
-						// The reply to our getSettings: only the pass-through
-						// value is refreshed, so the edit being saved is kept.
-						storedLayout = settings.layout;
-						saveSettings();
-					} else {
-						applySettings(settings);
-					}
-				}
-			};
-		});
-
-		function applySettings(settings) {
-			storedLayout = settings.layout;
-			applyColorSettings(settings);
-		}
-
-		// OpenDeck may not forward the plugin's own setSettings (a press
-		// changing the layout) to an open PI, so the layout held here can be
-		// stale. Re-read the stored settings before saving; if no reply
-		// comes, save with what we have.
-		let pendingSave = null;
-
-		function sendSettings() {
-			if (pendingSave) return; // the pending save reads the form when it sends
-			pendingSave = setTimeout(saveSettings, 500);
-			websocket.send(JSON.stringify({ event: "getSettings", context: uuid }));
-		}
-
-		function saveSettings() {
-			clearTimeout(pendingSave);
-			pendingSave = null;
-			websocket.send(JSON.stringify({
-				event: "setSettings",
-				context: uuid,
-				payload: {
-					...readColorSettings(),
-					// The layout changes only by pressing the key; pass it
-					// through untouched so saving here doesn't reset it.
-					...(storedLayout ? { layout: storedLayout } : {}),
-				},
-			}));
-		}
+		mountColorSection(document.getElementById("colors"), { showMode: true, onChange: pi.changed });
 	</script>
 </body>
 </html>
