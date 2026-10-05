@@ -107,7 +107,7 @@ async fn main() -> OpenActionResult<()> {
 
     // One log scanner (and mtime cache) shared by every log-reading action.
     let logs = Arc::new(LogUsageSource::default());
-    let metric_tile = MetricTileAction::new(logs.clone(), usage);
+    let metric_tile = MetricTileAction::new(logs.clone(), usage, console.clone());
     let metric_ticker = metric_tile.clone();
     tokio::spawn(async move { metric_ticker.tick_loop().await });
 

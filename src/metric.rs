@@ -1,8 +1,10 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::pricing::cost_for_entry;
+use crate::source::console::{ConsoleError, ConsoleSnapshot};
 use crate::source::logs::LogEntry;
+use crate::spend::{SpendRange, error_label, totals};
 
 pub const TOKENS_ACCENT: &str = "#38bdf8";
 pub const COST_ACCENT: &str = "#fb923c";
@@ -24,6 +26,16 @@ pub enum RangeKind {
     #[serde(rename = "sevenday")]
     SevenDay,
     Session,
+}
+
+/// Where a Metric Tile's numbers come from: Claude Code's local logs
+/// (estimated cost), or the Console Admin API (billed, whole org, UTC days).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MetricSource {
+    #[default]
+    Logs,
+    Console,
 }
 
 pub struct MetricDisplay {
@@ -156,6 +168,51 @@ pub fn error_display() -> MetricDisplay {
         value_text: "\u{2014}".to_string(),
         subtitle: "no data",
         accent_color: NO_DATA_ACCENT,
+    }
+}
+
+/// What a Console-sourced Metric Tile shows: billed Tokens or Cost over
+/// whole UTC days. Session has no Console equivalent (the Admin API has
+/// only daily buckets), so it says so rather than guessing.
+pub fn build_console_metric_display(
+    outcome: Result<&ConsoleSnapshot, &ConsoleError>,
+    metric: MetricKind,
+    range: RangeKind,
+    today: NaiveDate,
+) -> MetricDisplay {
+    let label = match metric {
+        MetricKind::Tokens => "Tokens",
+        MetricKind::Cost => "Cost",
+    };
+    let unavailable = |value_text: &str| MetricDisplay {
+        label,
+        value_text: value_text.to_string(),
+        subtitle: "console",
+        accent_color: NO_DATA_ACCENT,
+    };
+    let (spend_range, subtitle) = match range {
+        RangeKind::Today => (SpendRange::Today, "UTC day · billed"),
+        RangeKind::SevenDay => (SpendRange::SevenDay, "7 days · billed"),
+        RangeKind::Session => return unavailable("5H N/A"),
+    };
+    let snapshot = match outcome {
+        Ok(snapshot) => snapshot,
+        Err(error) => return unavailable(error_label(error)),
+    };
+    let t = totals(snapshot, spend_range, today);
+    match metric {
+        MetricKind::Tokens => MetricDisplay {
+            label,
+            value_text: format_tokens(t.tokens),
+            subtitle,
+            accent_color: TOKENS_ACCENT,
+        },
+        MetricKind::Cost => MetricDisplay {
+            label,
+            value_text: format_cost(t.cost_dollars),
+            subtitle,
+            accent_color: COST_ACCENT,
+        },
     }
 }
 
@@ -315,5 +372,84 @@ mod tests {
         assert_eq!(format_cost_compact(999.99), "$999.99");
         assert_eq!(format_cost_compact(1000.0), "$1000");
         assert_eq!(format_cost_compact(5177.06), "$5177");
+    }
+
+    use crate::source::console::{ConsoleDay, ConsoleError, ConsoleSnapshot};
+    use chrono::NaiveDate;
+
+    fn console_snapshot() -> ConsoleSnapshot {
+        let day = |d: u32, cost_dollars: f64, tokens: u64| ConsoleDay {
+            date: NaiveDate::from_ymd_opt(2026, 10, d).unwrap(),
+            cost_dollars,
+            tokens,
+        };
+        ConsoleSnapshot {
+            days: vec![day(1, 2.0, 1_000), day(5, 10.34, 318_500)],
+        }
+    }
+
+    fn oct(d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 10, d).unwrap()
+    }
+
+    #[test]
+    fn console_cost_today_is_billed_for_the_utc_day() {
+        let d = build_console_metric_display(
+            Ok(&console_snapshot()),
+            MetricKind::Cost,
+            RangeKind::Today,
+            oct(5),
+        );
+        assert_eq!(d.label, "Cost");
+        assert_eq!(d.value_text, "$10.34");
+        assert_eq!(d.subtitle, "UTC day · billed");
+        assert_eq!(d.accent_color, COST_ACCENT);
+    }
+
+    #[test]
+    fn console_tokens_over_seven_days() {
+        let d = build_console_metric_display(
+            Ok(&console_snapshot()),
+            MetricKind::Tokens,
+            RangeKind::SevenDay,
+            oct(5),
+        );
+        assert_eq!(d.value_text, "319.5K");
+        assert_eq!(d.subtitle, "7 days · billed");
+        assert_eq!(d.accent_color, TOKENS_ACCENT);
+    }
+
+    #[test]
+    fn console_has_no_session_range() {
+        let d = build_console_metric_display(
+            Ok(&console_snapshot()),
+            MetricKind::Cost,
+            RangeKind::Session,
+            oct(5),
+        );
+        assert_eq!(d.value_text, "5H N/A");
+        assert_eq!(d.accent_color, NO_DATA_ACCENT);
+    }
+
+    #[test]
+    fn console_errors_show_their_label() {
+        let d = build_console_metric_display(
+            Err(&ConsoleError::Unauthorized(401)),
+            MetricKind::Tokens,
+            RangeKind::Today,
+            oct(5),
+        );
+        assert_eq!(d.value_text, "NOT ADMIN");
+        assert_eq!(d.subtitle, "console");
+        assert_eq!(d.accent_color, NO_DATA_ACCENT);
+    }
+
+    #[test]
+    fn metric_source_defaults_to_logs() {
+        assert_eq!(MetricSource::default(), MetricSource::Logs);
+        assert_eq!(
+            serde_json::from_str::<MetricSource>(r#""console""#).unwrap(),
+            MetricSource::Console
+        );
     }
 }

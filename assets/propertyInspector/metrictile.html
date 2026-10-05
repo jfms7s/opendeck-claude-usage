@@ -25,7 +25,15 @@
 						<option value="session">Session (5 hour)</option>
 					</select>
 				</div>
+				<div class="field">
+					<label for="source">Source</label>
+					<select id="source">
+						<option value="logs">Claude Code logs (estimated)</option>
+						<option value="console">Console API (billed)</option>
+					</select>
+				</div>
 			</div>
+			<p class="hint hidden" id="consoleHint">Console shows your organization's billed numbers using the Admin key set up for API Spend. It only has whole UTC days, so Session isn't available.</p>
 		</section>
 
 		<section class="card">
@@ -66,9 +74,11 @@
 		});
 
 		function applySettings(settings) {
+			document.getElementById("source").value = settings.source === "console" ? "console" : "logs";
 			document.getElementById("metric").value = settings.metric || "tokens";
 			document.getElementById("range").value = settings.range || "today";
 			document.getElementById("refresh_seconds").value = settings.refresh_seconds || 60;
+			syncSource();
 		}
 
 		function sendSettings() {
@@ -80,9 +90,24 @@
 					metric: document.getElementById("metric").value,
 					range: document.getElementById("range").value,
 					refresh_seconds: refreshSeconds,
+					source: document.getElementById("source").value,
 				},
 			}));
 		}
+
+		// Console data only has whole UTC days - no 5-hour session.
+		function syncSource() {
+			const consoleSource = document.getElementById("source").value === "console";
+			const range = document.getElementById("range");
+			range.querySelector('option[value="session"]').disabled = consoleSource;
+			if (consoleSource && range.value === "session") range.value = "today";
+			document.getElementById("consoleHint").classList.toggle("hidden", !consoleSource);
+		}
+
+		document.getElementById("source").addEventListener("change", () => {
+			syncSource();
+			sendSettings();
+		});
 
 		document.getElementById("metric").addEventListener("change", sendSettings);
 		document.getElementById("range").addEventListener("change", sendSettings);

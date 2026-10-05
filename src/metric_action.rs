@@ -1,5 +1,7 @@
-use crate::metric::{MetricKind, RangeKind};
+use crate::metric::{MetricDisplay, MetricKind, MetricSource, RangeKind};
+use crate::serde_util::or_default;
 use crate::source::UsageSource;
+use crate::source::console::ConsoleData;
 use crate::source::logs::{LogEntry, LogUsageSource};
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -14,6 +16,9 @@ pub struct MetricTileSettings {
     pub metric: MetricKind,
     pub range: RangeKind,
     pub refresh_seconds: u64,
+    /// Unknown values fall back to Logs alone (see `serde_util`).
+    #[serde(deserialize_with = "or_default")]
+    pub source: MetricSource,
 }
 
 impl Default for MetricTileSettings {
@@ -22,6 +27,7 @@ impl Default for MetricTileSettings {
             metric: MetricKind::default(),
             range: RangeKind::default(),
             refresh_seconds: 60,
+            source: MetricSource::Logs,
         }
     }
 }
@@ -35,6 +41,7 @@ struct TrackedInstance {
 pub struct MetricTileAction {
     log_source: Arc<LogUsageSource>,
     session_source: Arc<dyn UsageSource>,
+    console: Arc<dyn ConsoleData>,
     registry: Arc<DashMap<String, TrackedInstance>>,
 }
 
@@ -42,10 +49,12 @@ impl MetricTileAction {
     pub fn new(
         log_source: Arc<LogUsageSource>,
         session_source: impl UsageSource + 'static,
+        console: Arc<dyn ConsoleData>,
     ) -> Self {
         Self {
             log_source,
             session_source: Arc::new(session_source),
+            console,
             registry: Arc::new(DashMap::new()),
         }
     }
@@ -67,36 +76,59 @@ impl MetricTileAction {
         self.registry.remove(instance_id);
     }
 
+    /// Log entries for `settings` - none are scanned for a Console tile.
+    async fn entries_for(&self, settings: &MetricTileSettings) -> Arc<Vec<LogEntry>> {
+        match settings.source {
+            MetricSource::Logs => self.log_source.entries().await,
+            MetricSource::Console => Arc::new(Vec::new()),
+        }
+    }
+
+    /// The tile's numbers from the logs, as before the Console source.
+    async fn log_display(
+        &self,
+        entries: &[LogEntry],
+        settings: &MetricTileSettings,
+    ) -> MetricDisplay {
+        if entries.is_empty() {
+            return crate::metric::error_display();
+        }
+        let session_resets_at = if settings.range == RangeKind::Session {
+            self.session_source
+                .read()
+                .await
+                .ok()
+                .and_then(|s| s.session.resets_at)
+        } else {
+            None
+        };
+        crate::metric::build_metric_display(
+            entries,
+            settings.metric,
+            settings.range,
+            chrono::Utc::now(),
+            session_resets_at,
+        )
+    }
+
     /// Renders one instance from already-scanned log entries (so a tick
-    /// scans once for all its due instances) and, for the Session range,
-    /// the shared usage source's session reset time - used by `will_appear`/`did_receive_settings` (so a tile shows
-    /// real data immediately), `key_up` (tap-to-refresh), and the tick
-    /// loop.
+    /// scans once for all its due instances), or from the Console cache
+    /// for a Console-sourced tile - used by `will_appear` /
+    /// `did_receive_settings`, `key_up` (tap-to-refresh) and the tick loop.
     async fn render(
+        &self,
         instance: &Instance,
         entries: &[LogEntry],
-        session_source: &dyn UsageSource,
         settings: &MetricTileSettings,
     ) -> OpenActionResult<()> {
-        let display = if entries.is_empty() {
-            crate::metric::error_display()
-        } else {
-            let session_resets_at = if settings.range == crate::metric::RangeKind::Session {
-                session_source
-                    .read()
-                    .await
-                    .ok()
-                    .and_then(|s| s.session.resets_at)
-            } else {
-                None
-            };
-            crate::metric::build_metric_display(
-                entries,
+        let display = match settings.source {
+            MetricSource::Logs => self.log_display(entries, settings).await,
+            MetricSource::Console => crate::metric::build_console_metric_display(
+                self.console.snapshot().await.as_ref(),
                 settings.metric,
                 settings.range,
-                chrono::Utc::now(),
-                session_resets_at,
-            )
+                chrono::Utc::now().date_naive(),
+            ),
         };
         let title = format!(
             "{}\n{}\n{}",
@@ -145,13 +177,14 @@ impl MetricTileAction {
             let Some(instance) = openaction::get_instance(instance_id).await else {
                 continue; // instance disappeared between the snapshot and now
             };
-            let entries = match &scanned {
-                Some(entries) => Arc::clone(entries),
-                None => Arc::clone(scanned.insert(self.log_source.entries().await)),
+            let entries = match settings.source {
+                MetricSource::Console => Arc::new(Vec::new()),
+                MetricSource::Logs => match &scanned {
+                    Some(entries) => Arc::clone(entries),
+                    None => Arc::clone(scanned.insert(self.log_source.entries().await)),
+                },
             };
-            if let Err(e) =
-                Self::render(&instance, &entries, &*self.session_source, &settings).await
-            {
+            if let Err(e) = self.render(&instance, &entries, &settings).await {
                 log::warn!("metric tile render failed: {e}");
             }
         }
@@ -180,8 +213,8 @@ impl Action for MetricTileAction {
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
         self.track(&instance.instance_id, settings.clone());
-        let entries = self.log_source.entries().await;
-        Self::render(instance, &entries, &*self.session_source, settings).await
+        let entries = self.entries_for(settings).await;
+        self.render(instance, &entries, settings).await
     }
 
     async fn did_receive_settings(
@@ -190,8 +223,8 @@ impl Action for MetricTileAction {
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
         self.track(&instance.instance_id, settings.clone());
-        let entries = self.log_source.entries().await;
-        Self::render(instance, &entries, &*self.session_source, settings).await
+        let entries = self.entries_for(settings).await;
+        self.render(instance, &entries, settings).await
     }
 
     async fn will_disappear(
@@ -208,8 +241,8 @@ impl Action for MetricTileAction {
     /// `next_due`, since a tap is a bonus refresh, not a reason to skip
     /// the next one.
     async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-        let entries = self.log_source.entries().await;
-        Self::render(instance, &entries, &*self.session_source, settings).await
+        let entries = self.entries_for(settings).await;
+        self.render(instance, &entries, settings).await
     }
 }
 
@@ -238,10 +271,7 @@ mod tests {
 
     #[test]
     fn track_then_untrack_round_trips_through_the_registry() {
-        let action = MetricTileAction::new(
-            Arc::new(LogUsageSource::default()),
-            ApiUsageSource::default(),
-        );
+        let action = action();
         action.track("ctx1", MetricTileSettings::default());
         assert!(action.registry.contains_key("ctx1"));
 
@@ -251,16 +281,14 @@ mod tests {
 
     #[test]
     fn tracking_the_same_instance_twice_overwrites_its_settings() {
-        let action = MetricTileAction::new(
-            Arc::new(LogUsageSource::default()),
-            ApiUsageSource::default(),
-        );
+        let action = action();
         action.track(
             "ctx1",
             MetricTileSettings {
                 metric: MetricKind::Tokens,
                 range: RangeKind::Today,
                 refresh_seconds: 60,
+                ..MetricTileSettings::default()
             },
         );
         action.track(
@@ -269,6 +297,7 @@ mod tests {
                 metric: MetricKind::Cost,
                 range: RangeKind::Session,
                 refresh_seconds: 30,
+                ..MetricTileSettings::default()
             },
         );
         let tracked = action.registry.get("ctx1").unwrap();
@@ -298,5 +327,60 @@ mod tests {
             serde_json::from_str(include_str!("../assets/manifest.json")).unwrap();
         let manifest_uuid = manifest["Actions"][2]["UUID"].as_str().unwrap();
         assert_eq!(manifest_uuid, <MetricTileAction as Action>::UUID);
+    }
+
+    use crate::metric::MetricSource;
+    use crate::source::console::{ConsoleData, ConsoleError, ConsoleSnapshot};
+
+    struct NoConsole;
+
+    #[async_trait]
+    impl ConsoleData for NoConsole {
+        async fn snapshot(&self) -> Result<ConsoleSnapshot, ConsoleError> {
+            Err(ConsoleError::NoKey)
+        }
+    }
+
+    fn action() -> MetricTileAction {
+        MetricTileAction::new(
+            Arc::new(LogUsageSource::default()),
+            ApiUsageSource::default(),
+            Arc::new(NoConsole),
+        )
+    }
+
+    #[test]
+    fn existing_tiles_without_a_source_stay_on_logs() {
+        let s: MetricTileSettings =
+            serde_json::from_str(r#"{"metric": "cost", "range": "sevenday"}"#).unwrap();
+        assert_eq!(s.source, MetricSource::Logs);
+        assert_eq!(s.metric, MetricKind::Cost);
+    }
+
+    #[test]
+    fn an_unknown_source_falls_back_without_resetting_the_rest() {
+        let s: MetricTileSettings = serde_json::from_str(
+            r#"{"source": "billing", "metric": "cost", "refresh_seconds": 30}"#,
+        )
+        .unwrap();
+        assert_eq!(s.source, MetricSource::Logs);
+        assert_eq!(s.metric, MetricKind::Cost);
+        assert_eq!(s.refresh_seconds, 30);
+    }
+
+    #[test]
+    fn console_source_round_trips() {
+        let s: MetricTileSettings = serde_json::from_str(r#"{"source": "console"}"#).unwrap();
+        assert_eq!(s.source, MetricSource::Console);
+        assert_eq!(serde_json::to_value(&s).unwrap()["source"], "console");
+    }
+
+    #[test]
+    fn property_inspector_offers_console_and_disables_session_for_it() {
+        let html = include_str!("../assets/propertyInspector/metrictile.html");
+        assert!(html.contains(r#"<option value="logs">"#));
+        assert!(html.contains(r#"<option value="console">"#));
+        assert!(html.contains("syncSource"));
+        assert!(html.contains(".disabled = consoleSource"));
     }
 }
