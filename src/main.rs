@@ -39,7 +39,7 @@ use hub::UsageHub;
 use metric_action::MetricTileAction;
 use openaction::{OpenActionResult, register_action, run};
 use source::api::ApiUsageSource;
-use source::cached::{CachePolicy, CachedUsageSource};
+use source::cached::{CachePolicy, CachedSource};
 use source::logs::LogUsageSource;
 use sparkline_action::SparklineAction;
 use std::sync::Arc;
@@ -55,7 +55,7 @@ async fn main() -> OpenActionResult<()> {
     // Anthropic's usage endpoint at most once a minute - its rate limit is
     // per account and shared with Claude Code's own `/usage`, so failures
     // back off and keep showing the last good numbers for a while.
-    let usage = CachedUsageSource::new(
+    let usage = CachedSource::new(
         ApiUsageSource::default(),
         CachePolicy {
             min_interval: Duration::from_secs(60),

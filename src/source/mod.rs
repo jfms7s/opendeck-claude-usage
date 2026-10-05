@@ -41,7 +41,7 @@ pub enum WindowKind {
 }
 
 /// Errors carry only their message (not the underlying `io::Error` /
-/// `reqwest::Error`), so they're `Clone` - `CachedUsageSource` hands the
+/// `reqwest::Error`), so they're `Clone` - `CachedSource` hands the
 /// same failed outcome to every caller within its throttle window instead
 /// of re-requesting on each one.
 #[derive(Debug, Clone, Error)]
