@@ -42,6 +42,7 @@ Shared plumbing: `surface.rs` (`Surface` trait abstracts an `Instance` so render
 
 - **Version lives in two places**: `Cargo.toml` and `assets/manifest.json` must match (`build.mjs` refuses to build otherwise); a release bumps both plus `Cargo.lock` in a `chore: release X.Y.Z` commit. The Release workflow builds x86_64 + aarch64 on a published GitHub release.
 - Conventional Commits (`feat:`, `fix:`, `chore:`, `test:`); PRs squash-merged to `master`.
-- `docs/known-issues.md` tracks deferred issues by ID (`KI-NN`) with a status column; reference the ID in fix commits and update its status when it lands.
-- New features are designed in `docs/superpowers/specs/` and planned in `docs/superpowers/plans/` (dated filenames) before implementation.
+- Project docs live in the Obsidian vault at `~/git/obsidian-vault/personal/projects/opendeck-claude-usage/`, not in this repo. Follow the vault's `CLAUDE.md` conventions (frontmatter `title` + `tags` including `projects` and `opendeck-claude-usage`; add each new note to the folder note it lives in).
+- `~/git/obsidian-vault/personal/projects/opendeck-claude-usage/known-issues.md` tracks deferred issues by ID (`KI-NN`) with a status column; record new ones there, reference the ID in fix commits, and update its status when it lands.
+- New features are designed in the vault's `specs/` and planned in its `plans/` (dated filenames) before implementation.
 - User-visible behavior changes should be reflected in the README (action usage section and smoke-test checklist).
