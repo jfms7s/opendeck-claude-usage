@@ -13,7 +13,7 @@ cargo fmt --check                                      # CI gate (rustfmt.toml: 
 cargo clippy --all-targets --locked -- -D warnings     # CI gate - warnings fail the build
 cargo test --locked                                    # all unit tests; no OpenDeck needed
 cargo test heatmap::                                   # tests in one module
-node --test tests/                                     # Property Inspector tests (runs the real PI pages against a stub DOM)
+node --test tests/pi/*.test.mjs                        # Property Inspector tests (runs the real PI pages against a stub DOM)
 cargo test -- --ignored live_ --nocapture              # one real usage-API request + a scan of your real transcripts
 cargo build --release --locked                         # or --target <triple>
 node build.mjs                                         # bundles every built target into dist/com.jfms7s.claudeusage.sdPlugin
