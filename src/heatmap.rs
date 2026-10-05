@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::level::DEFAULT_NORMAL;
-use crate::metric::{MetricKind, format_cost, format_tokens};
+use crate::metric::{MetricKind, format_cost_compact, format_tokens};
 use crate::pricing::cost_for_entry;
 use crate::source::logs::LogEntry;
 
@@ -180,7 +180,7 @@ pub fn build_heatmap<Tz: TimeZone>(
     let sum: f64 = totals.iter().sum();
     let total_text = match settings.metric {
         MetricKind::Tokens => format_tokens(sum.round() as u64),
-        MetricKind::Cost => caption_cost(sum),
+        MetricKind::Cost => format_cost_compact(sum),
     };
     HeatmapDisplay {
         caption: format!("{} \u{b7} {total_text}", settings.view.caption()),
@@ -192,14 +192,6 @@ pub fn build_heatmap<Tz: TimeZone>(
 
 /// Cost for the caption: cents only below $1000, so a big month still
 /// fits on a key without being squeezed.
-fn caption_cost(total: f64) -> String {
-    if total >= 1000.0 {
-        format!("${total:.0}")
-    } else {
-        format_cost(total)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,14 +284,6 @@ mod tests {
 
     /// KI-02: "4 WEEKS · $5177.06" gets squeezed on a key; cents don't
     /// matter at that size.
-    #[test]
-    fn caption_cost_drops_cents_from_1000() {
-        assert_eq!(caption_cost(38.2), "$38.20");
-        assert_eq!(caption_cost(999.99), "$999.99");
-        assert_eq!(caption_cost(1000.0), "$1000");
-        assert_eq!(caption_cost(5177.06), "$5177");
-    }
-
     #[test]
     fn cost_uses_the_price_table() {
         let e = entry("2026-09-30T08:00:00Z", 1_000_000);

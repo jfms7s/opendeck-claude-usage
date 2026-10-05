@@ -1,6 +1,7 @@
 use crate::burn::{BurnMetric, burn_window};
 use crate::hub::{UsageHub, View};
 use crate::level::ColorSettings;
+use crate::serde_util::or_default;
 use crate::source::WindowKind;
 use async_trait::async_trait;
 use openaction::{Action, Instance, OpenActionResult};
@@ -17,17 +18,6 @@ pub struct BurnRateSettings {
     /// pace-based, so a stored `colorMode` is ignored.
     #[serde(flatten)]
     pub colors: ColorSettings,
-}
-
-/// An unknown value falls back to that field's default. A hard error
-/// would make openaction drop every setting, colors included.
-fn or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::de::DeserializeOwned + Default,
-{
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
 impl BurnRateSettings {

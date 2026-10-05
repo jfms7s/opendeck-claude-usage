@@ -6,7 +6,7 @@ use crate::source::logs::LogEntry;
 
 pub const TOKENS_ACCENT: &str = "#38bdf8";
 pub const COST_ACCENT: &str = "#fb923c";
-const NO_DATA_ACCENT: &str = "#6b7280";
+pub const NO_DATA_ACCENT: &str = "#6b7280";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -88,6 +88,16 @@ pub fn format_tokens(total: u64) -> String {
 /// Always two decimal places, e.g. `"$8.40"`.
 pub fn format_cost(total: f64) -> String {
     format!("${total:.2}")
+}
+
+/// `format_cost` without the cents from $1000 up, where they'd only crowd a
+/// key (KI-02).
+pub fn format_cost_compact(total: f64) -> String {
+    if total >= 1000.0 {
+        format!("${total:.0}")
+    } else {
+        format_cost(total)
+    }
 }
 
 /// Computes what to show for one instance's current metric/range
@@ -297,5 +307,13 @@ mod tests {
         let display = error_display();
         assert_eq!(display.subtitle, "no data");
         assert_eq!(display.accent_color, NO_DATA_ACCENT);
+    }
+
+    #[test]
+    fn format_cost_compact_drops_cents_from_1000() {
+        assert_eq!(format_cost_compact(38.2), "$38.20");
+        assert_eq!(format_cost_compact(999.99), "$999.99");
+        assert_eq!(format_cost_compact(1000.0), "$1000");
+        assert_eq!(format_cost_compact(5177.06), "$5177");
     }
 }
