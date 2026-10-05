@@ -70,7 +70,7 @@ test("metric tile: unknown metric and range fall back, refresh is clamped", asyn
 	assert.equal(page.el("range").value, "today");
 	assert.equal(page.el("refresh_seconds").value, "60");
 	page.change("refresh_seconds", "1");
-	assert.deepEqual(page.saves(), [{ metric: "tokens", range: "today", refresh_seconds: 5 }]);
+	assert.deepEqual(page.saves(), [{ metric: "tokens", range: "today", refresh_seconds: 5, source: "logs" }]);
 });
 
 test("peak clock: an empty day list stays empty; bad times fall back", async () => {
@@ -79,4 +79,41 @@ test("peak clock: an empty day list stays empty; bad times fall back", async () 
 	assert.equal(page.el("peak_start").value, "13:00");
 	page.change("peak_end", "19:30");
 	assert.deepEqual(page.saves(), [{ peak_start: "13:00", peak_end: "19:30", peak_days: [] }]);
+});
+
+test("metric tile: a saved Console + Session tile still shows Session (it draws 5H N/A)", async () => {
+	const page = loadPage("metrictile.html");
+	await page.open({ source: "console", range: "session" });
+	assert.equal(page.el("source").value, "console");
+	assert.equal(page.el("range").value, "session");
+	assert.equal(page.el("range").options.find((o) => o.value === "session").disabled, true);
+	assert.equal(page.el("consoleHint").classList.contains("hidden"), false);
+	assert.deepEqual(page.saves(), [], "opening the PI saves nothing");
+});
+
+test("metric tile: switching to Console moves Session to Today and saves it", async () => {
+	const page = loadPage("metrictile.html");
+	await page.open({ range: "session", source: "bogus" });
+	assert.equal(page.el("source").value, "logs");
+	assert.equal(page.el("consoleHint").classList.contains("hidden"), true);
+	page.change("source", "console");
+	assert.deepEqual(page.saves(), [{ metric: "tokens", range: "today", refresh_seconds: 60, source: "console" }]);
+});
+
+test("api spend: the press-picked range passes through; a junk budget shows blank (KI-14, KI-10)", async () => {
+	const page = loadPage("apispend.html");
+	await page.open({ range: "today", budgetDollars: "abc", critical: 95 });
+	assert.equal(page.el("budgetDollars").value, "");
+	page.change("budgetDollars", "50");
+	page.receive({ range: "sevenday" }); // reply to getSettings
+	assert.deepEqual(page.saves(), [{ budgetDollars: 50, critical: 95, range: "sevenday" }]);
+});
+
+test("api spend: clearing the budget saves no budget", async () => {
+	const page = loadPage("apispend.html");
+	await page.open({ budgetDollars: 40 });
+	assert.equal(page.el("budgetDollars").value, "40");
+	page.change("budgetDollars", "");
+	page.runTimers(); // no reply to getSettings
+	assert.deepEqual(page.saves(), [{}]);
 });

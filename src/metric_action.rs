@@ -1,6 +1,7 @@
-//! Metric Tile: total Tokens or estimated Cost from Claude Code's
-//! transcripts over Today / 7 days / the current session, each tile on its
-//! own refresh interval. Keypad only; a tap refreshes.
+//! Metric Tile: total Tokens or Cost over Today / 7 days / the current
+//! session - estimated from Claude Code's transcripts, or billed from the
+//! Console Admin API - each tile on its own refresh interval. Keypad only;
+//! a tap refreshes.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -13,10 +14,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
-use crate::metric::{MetricDisplay, MetricKind, RangeKind, build_metric_display, error_display};
+use crate::metric::{
+    MetricDisplay, MetricKind, MetricSource, RangeKind, build_console_metric_display,
+    build_metric_display, error_display,
+};
 use crate::metric_icon::build_metric_icon;
 use crate::settings::lenient;
 use crate::source::cached::SharedUsage;
+use crate::source::console::ConsoleData;
 use crate::source::logs::{LogEntry, LogUsageSource};
 use crate::surface::{Frames, Output, Surface, for_each_tracked};
 use crate::tasks::park_while_empty;
@@ -34,6 +39,9 @@ pub struct MetricTileSettings {
     pub range: RangeKind,
     #[serde(default = "default_refresh", deserialize_with = "lenient_refresh")]
     pub refresh_seconds: u64,
+    /// Existing tiles have no `source`, so they stay on the logs.
+    #[serde(default, deserialize_with = "lenient")]
+    pub source: MetricSource,
 }
 
 fn default_refresh() -> u64 {
@@ -51,6 +59,7 @@ impl Default for MetricTileSettings {
             metric: MetricKind::default(),
             range: RangeKind::default(),
             refresh_seconds: default_refresh(),
+            source: MetricSource::default(),
         }
     }
 }
@@ -72,6 +81,8 @@ pub struct MetricTileAction {
     /// Only read for the Session range's reset time - through the plugin's
     /// one shared, throttled usage cache.
     usage: Arc<dyn SharedUsage>,
+    /// Billed numbers for Console-sourced tiles, through their own cache.
+    console: Arc<dyn ConsoleData>,
     registry: Arc<DashMap<String, TrackedInstance>>,
     frames: Arc<Frames>,
     /// Pinged on every (re)track, so the tick loop re-plans its next
@@ -80,10 +91,15 @@ pub struct MetricTileAction {
 }
 
 impl MetricTileAction {
-    pub fn new(log_source: Arc<LogUsageSource>, usage: Arc<dyn SharedUsage>) -> Self {
+    pub fn new(
+        log_source: Arc<LogUsageSource>,
+        usage: Arc<dyn SharedUsage>,
+        console: Arc<dyn ConsoleData>,
+    ) -> Self {
         Self {
             log_source,
             usage,
+            console,
             registry: Arc::new(DashMap::new()),
             frames: Arc::new(Frames::default()),
             wake: Arc::new(Notify::new()),
@@ -106,9 +122,18 @@ impl MetricTileAction {
         self.frames.forget(instance_id);
     }
 
-    /// What one instance shows, from already-scanned entries (so a tick
-    /// scans once for all its due instances).
+    /// What one instance shows: from the Console cache for a Console tile,
+    /// otherwise from already-scanned entries (so a tick scans once for all
+    /// its due instances).
     async fn display(&self, entries: &[LogEntry], settings: &MetricTileSettings) -> MetricDisplay {
+        if settings.source == MetricSource::Console {
+            return build_console_metric_display(
+                self.console.snapshot().await.as_ref(),
+                settings.metric,
+                settings.range,
+                chrono::Utc::now().date_naive(),
+            );
+        }
         if entries.is_empty() {
             return error_display();
         }
@@ -260,6 +285,7 @@ impl Action for MetricTileAction {
 mod tests {
     use super::*;
     use crate::source::cached::test_support::shared;
+    use crate::source::console::{ConsoleDay, ConsoleError, ConsoleSnapshot};
     use crate::source::{MonthlyUsage, UsageSnapshot, UsageSource, UsageSourceError, WindowUsage};
     use crate::surface::test_support::FakeSurface;
     use crate::test_support::manifest_entry;
@@ -296,6 +322,7 @@ mod tests {
         MetricTileAction::new(
             Arc::new(LogUsageSource::new("/nonexistent".into())),
             shared(source),
+            Arc::new(NoConsole),
         )
     }
 
@@ -371,6 +398,7 @@ mod tests {
                 metric: MetricKind::Cost,
                 range: RangeKind::Session,
                 refresh_seconds: 30,
+                ..MetricTileSettings::default()
             },
         );
         let tracked = action.registry.get("ctx1").unwrap();
@@ -470,5 +498,79 @@ mod tests {
             entry["PropertyInspectorPath"],
             "propertyInspector/metrictile.html"
         );
+    }
+
+    struct NoConsole;
+
+    #[async_trait]
+    impl ConsoleData for NoConsole {
+        async fn snapshot(&self) -> Result<ConsoleSnapshot, ConsoleError> {
+            Err(ConsoleError::NoKey)
+        }
+    }
+
+    struct FixedConsole(ConsoleSnapshot);
+
+    #[async_trait]
+    impl ConsoleData for FixedConsole {
+        async fn snapshot(&self) -> Result<ConsoleSnapshot, ConsoleError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn existing_tiles_without_a_source_stay_on_logs() {
+        let s: MetricTileSettings =
+            serde_json::from_str(r#"{"metric": "cost", "range": "sevenday"}"#).unwrap();
+        assert_eq!(s.source, MetricSource::Logs);
+        assert_eq!(s.metric, MetricKind::Cost);
+    }
+
+    #[test]
+    fn console_source_round_trips() {
+        let s: MetricTileSettings = serde_json::from_str(r#"{"source": "console"}"#).unwrap();
+        assert_eq!(s.source, MetricSource::Console);
+        assert_eq!(serde_json::to_value(&s).unwrap()["source"], "console");
+    }
+
+    /// A Console tile draws the billed number from the Console cache - and
+    /// never reads the logs' usage source, even on the Session range.
+    #[tokio::test]
+    async fn a_console_tile_draws_billed_numbers() {
+        let today = chrono::Utc::now().date_naive();
+        let snapshot = ConsoleSnapshot {
+            days: vec![ConsoleDay {
+                date: today,
+                cost_dollars: 12.34,
+                tokens: 0,
+            }],
+        };
+        let usage = Counting::default();
+        let action = MetricTileAction::new(
+            Arc::new(LogUsageSource::new("/nonexistent".into())),
+            shared(usage.clone()),
+            Arc::new(FixedConsole(snapshot.clone())),
+        );
+        let settings = MetricTileSettings {
+            metric: MetricKind::Cost,
+            source: MetricSource::Console,
+            ..MetricTileSettings::default()
+        };
+        let tile = FakeSurface::new("tile", true);
+        action.render(&tile, &[], &settings).await.unwrap();
+        let expected =
+            build_console_metric_display(Ok(&snapshot), MetricKind::Cost, RangeKind::Today, today);
+        assert_eq!(expected.value_text, "$12.34");
+        assert_eq!(
+            tile.frames(),
+            vec![Output::Image(build_metric_icon(&expected))]
+        );
+
+        let session = MetricTileSettings {
+            range: RangeKind::Session,
+            ..settings
+        };
+        action.render(&tile, &[], &session).await.unwrap();
+        assert_eq!(usage.0.load(Ordering::SeqCst), 0);
     }
 }

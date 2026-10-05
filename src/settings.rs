@@ -23,6 +23,19 @@ where
     Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
+/// A positive amount sent as a number or a numeric string. Anything else
+/// (blank, zero, negative, junk) is `None` - never an error.
+pub fn positive_or_none<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+        .filter(|n: &f64| n.is_finite() && *n > 0.0))
+}
+
 #[cfg(test)]
 mod tests {
     use serde::de::DeserializeOwned;
@@ -101,6 +114,7 @@ mod tests {
         use crate::heatmap::HeatmapSettings;
         use crate::metric_action::MetricTileSettings;
         use crate::sparkline_action::SparklineSettings;
+        use crate::spend::ApiSpendSettings;
 
         let probe_color = ("colorNormal", json!("#123456"));
         assert_lenient::<UsageGaugeSettings>(
@@ -127,14 +141,43 @@ mod tests {
             |s| s.color == "#123456",
         );
         assert_lenient::<MetricTileSettings>(
-            &["metric", "range", "refresh_seconds"],
+            &["metric", "range", "refresh_seconds", "source"],
             ("refresh_seconds", json!(30)),
             |s| s.refresh_seconds == 30,
+        );
+        assert_lenient::<ApiSpendSettings>(
+            &with_colors(&["range", "budgetDollars"]),
+            ("colorNormal", json!("#123456")),
+            |s| s.colors.palette.normal == "#123456",
         );
         assert_lenient::<PeakClockSettings>(
             &["peak_start", "peak_end", "peak_days"],
             ("peak_start", json!("09:30")),
             |s| s.peak_start == "09:30",
         );
+    }
+
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    struct Budget {
+        #[serde(default, deserialize_with = "super::positive_or_none")]
+        budget: Option<f64>,
+    }
+
+    fn budget(json: &str) -> Option<f64> {
+        serde_json::from_str::<Budget>(json).unwrap().budget
+    }
+
+    #[test]
+    fn positive_numbers_and_numeric_strings_are_kept() {
+        assert_eq!(budget(r#"{"budget": 50}"#), Some(50.0));
+        assert_eq!(budget(r#"{"budget": " 12.5 "}"#), Some(12.5));
+    }
+
+    #[test]
+    fn blank_zero_negative_or_junk_budgets_are_none() {
+        for v in [r#""""#, "0", "-5", r#""abc""#, "null", "true", "[]"] {
+            assert_eq!(budget(&format!(r#"{{"budget": {v}}}"#)), None, "{v}");
+        }
+        assert_eq!(budget("{}"), None);
     }
 }

@@ -25,7 +25,15 @@
 						<option value="session">Session (5 hour)</option>
 					</select>
 				</div>
+				<div class="field">
+					<label for="source">Source</label>
+					<select id="source">
+						<option value="logs">Claude Code logs (estimated)</option>
+						<option value="console">Console API (billed)</option>
+					</select>
+				</div>
 			</div>
+			<p class="hint hidden" id="consoleHint">Console shows your organization's billed numbers using the Admin key set up for API Spend. It only has whole UTC days, so Session isn't available.</p>
 		</section>
 
 		<section class="card">
@@ -40,23 +48,41 @@
 	<script src="pi-common.js"></script>
 
 	<script>
+		// Console data only has whole UTC days - no 5-hour session. A saved
+		// Session range stays selected (the tile shows "5H N/A"); only the
+		// user switching to Console moves it to Today, and that gets saved.
+		function syncSource(moveOffSession) {
+			const consoleSource = document.getElementById("source").value === "console";
+			const range = document.getElementById("range");
+			Array.from(range.options).find((o) => o.value === "session").disabled = consoleSource;
+			if (moveOffSession && consoleSource && range.value === "session") range.value = "today";
+			document.getElementById("consoleHint").classList.toggle("hidden", !consoleSource);
+		}
+
 		const pi = connectPI({
 			apply(settings) {
 				selectKnown(document.getElementById("metric"), settings.metric, "tokens");
 				selectKnown(document.getElementById("range"), settings.range, "today");
+				selectKnown(document.getElementById("source"), settings.source, "logs");
 				const seconds = Number(settings.refresh_seconds);
 				document.getElementById("refresh_seconds").value = Number.isInteger(seconds) && seconds > 0 ? seconds : 60;
+				syncSource(false);
 			},
 			read: () => ({
 				metric: document.getElementById("metric").value,
 				range: document.getElementById("range").value,
 				refresh_seconds: Math.min(3600, Math.max(5, parseInt(document.getElementById("refresh_seconds").value, 10) || 60)),
+				source: document.getElementById("source").value,
 			}),
 		});
 
 		for (const id of ["metric", "range", "refresh_seconds"]) {
 			document.getElementById(id).addEventListener("change", pi.changed);
 		}
+		document.getElementById("source").addEventListener("change", () => {
+			syncSource(true);
+			pi.changed();
+		});
 	</script>
 </body>
 </html>

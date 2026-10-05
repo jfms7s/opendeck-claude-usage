@@ -1,6 +1,7 @@
 use super::{UsageSnapshot, UsageSource, UsageSourceError};
 use async_trait::async_trait;
 use std::collections::hash_map::RandomState;
+use std::fmt::Display;
 use std::hash::BuildHasher;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
@@ -11,7 +12,7 @@ type Outcome = Result<UsageSnapshot, UsageSourceError>;
 
 /// How often to ask, how long to wait before retrying, and how long a
 /// last-good snapshot may stand in for a failing source. See
-/// `CachedUsageSource`.
+/// `CachedSource`.
 #[derive(Debug, Clone, Copy)]
 pub struct CachePolicy {
     /// Time between requests after a success - and the base delay that
@@ -32,10 +33,64 @@ pub struct CachePolicy {
 /// retry is already "no data" on every key.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
 
+/// One upstream read that `CachedSource` throttles. Every `UsageSource` is
+/// one (blanket impl below); the Console Admin API source implements it
+/// directly, with its own snapshot and error types.
+#[async_trait]
+pub trait Fetch: Send + Sync {
+    type Snapshot: Clone + Send + Sync;
+    type Error: Clone + Display + Send + Sync;
+    /// Names the source in log lines.
+    const LABEL: &'static str;
+
+    async fn fetch(&self) -> Result<Self::Snapshot, Self::Error>;
+
+    /// How long the server asked us to wait after this failure, if it did
+    /// (a 429's `Retry-After`). The retry waits at least that long.
+    fn retry_after(_error: &Self::Error) -> Option<Duration> {
+        None
+    }
+
+    /// A failure that costs nothing to re-check (a missing local key
+    /// file): retried on the very next read, with no backoff and no
+    /// warning, so fixing it shows up without waiting out a delay.
+    fn is_local(_error: &Self::Error) -> bool {
+        false
+    }
+
+    /// Whether the source's own input changed since its last fetch (a
+    /// replaced key file): the cache then retries straight away, with a
+    /// fresh backoff, instead of serving the last outcome until the delay
+    /// ends. Must be cheap - it runs on every throttled read.
+    async fn input_changed(&self) -> bool {
+        false
+    }
+}
+
+#[async_trait]
+impl<T: UsageSource> Fetch for T {
+    type Snapshot = UsageSnapshot;
+    type Error = UsageSourceError;
+    const LABEL: &'static str = "usage";
+
+    async fn fetch(&self) -> Outcome {
+        self.read().await
+    }
+
+    fn retry_after(error: &UsageSourceError) -> Option<Duration> {
+        match error {
+            UsageSourceError::RateLimited {
+                retry_after_secs: Some(secs),
+            } => Some(Duration::from_secs(*secs)),
+            _ => None,
+        }
+    }
+}
+
 /// The usage data every action shares: reads go through one throttle, so
 /// however many keys, dials and taps there are, the account's rate limit
 /// (shared with Claude Code's own `/usage`) sees one client. Only
-/// `CachedUsageSource` implements this, so an action can't be handed a raw,
+/// `CachedSource` implements this, so an action can't be handed a raw,
 /// unthrottled `ApiUsageSource` - that doesn't compile.
 #[async_trait]
 pub trait SharedUsage: Send + Sync {
@@ -47,7 +102,7 @@ pub trait SharedUsage: Send + Sync {
     fn peek(&self) -> Option<Outcome>;
 }
 
-/// Wraps a `UsageSource` and throttles it, all in memory - nothing is
+/// Wraps a `Fetch` source and throttles it, all in memory - nothing is
 /// persisted, so the cache lives and dies with the plugin process:
 ///
 /// - After a success, the inner source isn't hit again for `min_interval`
@@ -56,16 +111,23 @@ pub trait SharedUsage: Send + Sync {
 ///   rate limit, a network blip, an expired token), the next attempt waits
 ///   `min_interval * 2^n`, capped at `max_backoff` - or longer, if a 429
 ///   said `Retry-After`.
+/// - A local failure (`Fetch::is_local`) is re-checked on the next read
+///   instead, without growing the backoff - and so is any outcome once the
+///   source reports its input changed (`Fetch::input_changed`).
 /// - While failing, callers keep getting the last successful snapshot until
 ///   it's older than `stale_after`, so one rejected request doesn't flip
 ///   every key to "no data".
 ///
-/// Cloning shares the cache: every action in the plugin reads one clone.
-pub struct CachedUsageSource<S> {
+/// Cloning shares the cache: every action reading one source reads one
+/// clone.
+pub struct CachedSource<S: Fetch> {
     inner: Arc<Inner<S>>,
 }
 
-struct Inner<S> {
+/// The OAuth usage cache - the one `SharedUsage`.
+pub type CachedUsageSource<S> = CachedSource<S>;
+
+struct Inner<S: Fetch> {
     source: S,
     policy: CachePolicy,
     /// Held across the inner read, so concurrent callers that all find the
@@ -73,26 +135,35 @@ struct Inner<S> {
     fetch: Mutex<Schedule>,
     /// What callers are served. Only briefly locked, never across an
     /// await, so `peek` never waits on a slow request.
-    served: std::sync::Mutex<Served>,
+    served: std::sync::Mutex<Served<S::Snapshot, S::Error>>,
 }
 
 #[derive(Default)]
 struct Schedule {
     consecutive_failures: u32,
-    /// `None` until the first read, which always goes to the source.
+    /// `None` until the first read (and after a local failure), meaning the
+    /// next read goes to the source.
     next_attempt: Option<Instant>,
 }
 
-#[derive(Default)]
-struct Served {
-    last_good: Option<(Instant, UsageSnapshot)>,
-    last_error: Option<UsageSourceError>,
+struct Served<T, E> {
+    last_good: Option<(Instant, T)>,
+    last_error: Option<E>,
 }
 
-impl Served {
+impl<T, E> Default for Served<T, E> {
+    fn default() -> Self {
+        Self {
+            last_good: None,
+            last_error: None,
+        }
+    }
+}
+
+impl<T: Clone, E: Clone> Served<T, E> {
     /// The last good snapshot while it's fresh enough, otherwise the most
     /// recent error; `None` before anything was read.
-    fn outcome(&self, now: Instant, stale_after: Duration) -> Option<Outcome> {
+    fn outcome(&self, now: Instant, stale_after: Duration) -> Option<Result<T, E>> {
         match (&self.last_good, &self.last_error) {
             (Some((at, snapshot)), _) if now.duration_since(*at) < stale_after => {
                 Some(Ok(snapshot.clone()))
@@ -107,32 +178,11 @@ impl Served {
     }
 }
 
-impl<S> Clone for CachedUsageSource<S> {
+impl<S: Fetch> Clone for CachedSource<S> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
         }
-    }
-}
-
-impl<S: UsageSource> CachedUsageSource<S> {
-    pub fn new(source: S, policy: CachePolicy) -> Self {
-        Self {
-            inner: Arc::new(Inner {
-                source,
-                policy,
-                fetch: Mutex::new(Schedule::default()),
-                served: std::sync::Mutex::new(Served::default()),
-            }),
-        }
-    }
-
-    fn served(&self) -> std::sync::MutexGuard<'_, Served> {
-        // Plain data, valid after any panic: keep serving it.
-        self.inner
-            .served
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -158,19 +208,40 @@ fn random_unit() -> f64 {
     (bits as f64 / u64::MAX as f64) * 2.0 - 1.0
 }
 
-#[async_trait]
-impl<S: UsageSource> SharedUsage for CachedUsageSource<S> {
-    async fn read(&self) -> Outcome {
+impl<S: Fetch> CachedSource<S> {
+    pub fn new(source: S, policy: CachePolicy) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                source,
+                policy,
+                fetch: Mutex::new(Schedule::default()),
+                served: std::sync::Mutex::new(Served::default()),
+            }),
+        }
+    }
+
+    fn served(&self) -> std::sync::MutexGuard<'_, Served<S::Snapshot, S::Error>> {
+        // Plain data, valid after any panic: keep serving it.
+        self.inner
+            .served
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The current snapshot, fetching only when the throttle allows.
+    pub async fn read(&self) -> Result<S::Snapshot, S::Error> {
         let policy = &self.inner.policy;
         let mut schedule = self.inner.fetch.lock().await;
         let now = Instant::now();
-        if schedule.next_attempt.is_some_and(|at| now < at)
-            && let Some(outcome) = self.served().outcome(now, policy.stale_after)
-        {
-            return outcome;
+        if schedule.next_attempt.is_some_and(|at| now < at) {
+            if self.inner.source.input_changed().await {
+                schedule.consecutive_failures = 0;
+            } else if let Some(outcome) = self.served().outcome(now, policy.stale_after) {
+                return outcome;
+            }
         }
 
-        let result = self.inner.source.read().await;
+        let result = self.inner.source.fetch().await;
         let mut served = self.served();
         match result {
             Ok(snapshot) => {
@@ -181,17 +252,26 @@ impl<S: UsageSource> SharedUsage for CachedUsageSource<S> {
                     Some(now + jittered(policy.min_interval, policy.jitter, random_unit()));
                 Ok(snapshot)
             }
+            Err(error) if S::is_local(&error) => {
+                log::debug!(
+                    "{} unavailable, re-checking on the next read: {error}",
+                    S::LABEL
+                );
+                served.last_error = Some(error.clone());
+                schedule.next_attempt = None;
+                served
+                    .outcome(now, policy.stale_after)
+                    .unwrap_or(Err(error))
+            }
             Err(error) => {
                 schedule.consecutive_failures += 1;
                 let mut delay = backoff(policy, schedule.consecutive_failures);
-                if let UsageSourceError::RateLimited {
-                    retry_after_secs: Some(secs),
-                } = &error
-                {
-                    delay = delay.max(Duration::from_secs(*secs).min(MAX_RETRY_AFTER));
+                if let Some(wait) = S::retry_after(&error) {
+                    delay = delay.max(wait.min(MAX_RETRY_AFTER));
                 }
                 log::warn!(
-                    "usage fetch failed ({} in a row), retrying in {}s: {error}",
+                    "{} fetch failed ({} in a row), retrying in {}s: {error}",
+                    S::LABEL,
                     schedule.consecutive_failures,
                     delay.as_secs()
                 );
@@ -204,9 +284,24 @@ impl<S: UsageSource> SharedUsage for CachedUsageSource<S> {
         }
     }
 
-    fn peek(&self) -> Option<Outcome> {
+    /// What `read` would hand out right now, without ever fetching.
+    pub fn peek(&self) -> Option<Result<S::Snapshot, S::Error>> {
         self.served()
             .outcome(Instant::now(), self.inner.policy.stale_after)
+    }
+}
+
+#[async_trait]
+impl<S> SharedUsage for CachedSource<S>
+where
+    S: Fetch<Snapshot = UsageSnapshot, Error = UsageSourceError>,
+{
+    async fn read(&self) -> Outcome {
+        CachedSource::read(self).await
+    }
+
+    fn peek(&self) -> Option<Outcome> {
+        CachedSource::peek(self)
     }
 }
 
@@ -473,5 +568,83 @@ mod tests {
             let unit = random_unit();
             assert!((-1.0..=1.0).contains(&unit), "{unit}");
         }
+    }
+
+    /// Fails like a missing key file: a local check, no request made.
+    #[derive(Clone, Default)]
+    struct MissingKey {
+        reads: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Fetch for MissingKey {
+        type Snapshot = u32;
+        type Error = String;
+        const LABEL: &'static str = "test";
+
+        async fn fetch(&self) -> Result<u32, String> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Err("no key".to_string())
+        }
+
+        fn is_local(_error: &String) -> bool {
+            true
+        }
+    }
+
+    /// A key added after startup must show up on the next read, not after
+    /// a backoff that has grown to half an hour.
+    #[tokio::test(start_paused = true)]
+    async fn a_local_failure_is_rechecked_on_every_read_without_backoff() {
+        let source = MissingKey::default();
+        let cached = CachedSource::new(source.clone(), POLICY);
+        assert_eq!(cached.read().await, Err("no key".to_string()));
+        assert_eq!(cached.read().await, Err("no key".to_string()));
+        assert_eq!(cached.read().await, Err("no key".to_string()));
+        assert_eq!(source.reads.load(Ordering::SeqCst), 3);
+    }
+
+    /// Fails like a rejected key, until told its input changed.
+    #[derive(Clone, Default)]
+    struct Rotatable {
+        reads: Arc<AtomicUsize>,
+        changed: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl Fetch for Rotatable {
+        type Snapshot = u32;
+        type Error = String;
+        const LABEL: &'static str = "test";
+
+        async fn fetch(&self) -> Result<u32, String> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.changed.store(false, Ordering::SeqCst);
+            Err("HTTP 401".to_string())
+        }
+
+        async fn input_changed(&self) -> bool {
+            self.changed.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Replacing a rejected key must not wait out a backoff that has grown
+    /// to half an hour.
+    #[tokio::test(start_paused = true)]
+    async fn a_changed_input_is_retried_before_the_backoff_ends() {
+        let source = Rotatable::default();
+        let cached = CachedSource::new(source.clone(), POLICY);
+        cached.read().await.unwrap_err(); // failure 1 -> next attempt in 120s
+        cached.read().await.unwrap_err();
+        assert_eq!(source.reads.load(Ordering::SeqCst), 1);
+
+        source.changed.store(true, Ordering::SeqCst);
+        cached.read().await.unwrap_err();
+        assert_eq!(source.reads.load(Ordering::SeqCst), 2);
+
+        // The retry started a fresh backoff (120s, not 240s).
+        advance_secs(120).await;
+        cached.read().await.unwrap_err();
+        assert_eq!(source.reads.load(Ordering::SeqCst), 3);
     }
 }

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<link rel="stylesheet" href="pi.css" />
+	<style>
+		#colors { display: contents; }
+		code { overflow-wrap: anywhere; }
+	</style>
+</head>
+<body>
+	<main class="pi">
+		<section class="card">
+			<h2>Budget</h2>
+			<div class="field">
+				<label for="budgetDollars">Monthly budget ($)</label>
+				<input type="number" id="budgetDollars" min="0" step="1" placeholder="none" />
+				<p class="hint">Optional. With a budget, This month shows a bar and turns Watch / Risk / Critical as spend crosses the marks below. Leave blank for none.</p>
+			</div>
+			<p class="hint">Short press (key or dial) cycles Today (UTC) → 7 days → This month. Hold to refresh.</p>
+		</section>
+
+		<section class="card">
+			<h2>Admin key</h2>
+			<p class="hint">Shows billed spend for your whole Claude Console organization, from the Usage &amp; Cost Admin API. It needs an Admin key (<code>sk-ant-admin01-…</code>): regular API keys can't read usage, and individual accounts can't create Admin keys.</p>
+			<p class="hint">Put the key on one line in <code>~/.config/opendeck-claude-usage/admin-key</code>, then run <code>chmod 600 ~/.config/opendeck-claude-usage/admin-key</code>. The key never passes through OpenDeck or this page.</p>
+			<p class="hint">Numbers lag about 5 minutes, and "today" is a UTC day. The key shows NO KEY, KEY PERMS or NOT ADMIN when something's wrong.</p>
+		</section>
+
+		<div id="colors"></div>
+	</main>
+	<script src="pi-common.js"></script>
+	<script src="colors.js"></script>
+
+	<script>
+		const pi = connectPI({
+			apply(settings) {
+				const budget = Number(settings.budgetDollars);
+				document.getElementById("budgetDollars").value = Number.isFinite(budget) && budget > 0 ? budget : "";
+				applyColorSettings(settings);
+			},
+			read() {
+				const budget = Number(document.getElementById("budgetDollars").value);
+				return {
+					...(Number.isFinite(budget) && budget > 0 ? { budgetDollars: budget } : {}),
+					...readColorSettings(),
+				};
+			},
+			// The range changes only by pressing the key or dial.
+			passThrough: ["range"],
+		});
+
+		mountColorSection(document.getElementById("colors"), { showMode: false, onChange: pi.changed });
+		document.getElementById("budgetDollars").addEventListener("change", pi.changed);
+	</script>
+</body>
+</html>

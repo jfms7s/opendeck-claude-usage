@@ -37,7 +37,7 @@
 			"UUID": "com.jfms7s.claudeusage.metrictile",
 			"Name": "Metric Tile",
 			"Icon": "icons/metrictile",
-			"Tooltip": "Shows total Claude Code tokens or estimated cost, parsed from local transcript logs, for today/7 days/the current session",
+			"Tooltip": "Shows total Claude tokens or cost for today/7 days/the current session, estimated from local Claude Code logs or billed from the Console Admin API",
 			"Controllers": ["Keypad"],
 			"PropertyInspectorPath": "propertyInspector/metrictile.html",
 			"States": [{ "Image": "icons/metrictile" }]
@@ -88,6 +88,18 @@
 			"States": [{ "Image": "icons/sparkline" }],
 			"Encoder": {
 				"layout": "layouts/chart.json"
+			}
+		},
+		{
+			"UUID": "com.jfms7s.claudeusage.apispend",
+			"Name": "API Spend",
+			"Icon": "icons/apispend",
+			"Tooltip": "Shows billed Claude Console (API) spend for your organization today, over 7 days or this month, from the Usage & Cost Admin API",
+			"Controllers": ["Encoder", "Keypad"],
+			"PropertyInspectorPath": "propertyInspector/apispend.html",
+			"States": [{ "Image": "icons/apispend" }],
+			"Encoder": {
+				"layout": "layouts/usage.json"
 			}
 		}
 	]

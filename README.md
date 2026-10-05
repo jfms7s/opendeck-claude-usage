@@ -1,8 +1,8 @@
 # OpenDeck Claude Usage
 
-An [OpenDeck](https://github.com/nekename/OpenDeck) plugin with seven actions
+An [OpenDeck](https://github.com/nekename/OpenDeck) plugin with eight actions
 - **Usage Gauge**, **Session + Weekly**, **Burn Rate**, **Usage Heatmap**,
-**Usage Sparkline**, **Peak Clock**, and **Metric Tile**. Usage Gauge is
+**Usage Sparkline**, **Peak Clock**, **Metric Tile**, and **API Spend**. Usage Gauge is
 assignable to a Stream Deck dial or a keypad tile and shows percent used and
 time until reset for one of Claude's usage windows - **Session** (5 hour),
 **Weekly** (7 day), or **Monthly** (pay-as-you-go extra usage spend, if
@@ -97,6 +97,37 @@ rolling window, so it lines up with what "session" means elsewhere in
 this plugin. If that fetch fails or has no `resets_at`, it falls back to a rolling last-5-hour window instead of
 erroring.
 
+## Where the API Spend data comes from
+
+**API Spend** (and a Metric Tile set to **Source: Console**) shows *billed*
+spend for your Claude Console organization - API usage paid per token, not
+your Pro/Max subscription. It comes from Anthropic's
+[Usage & Cost Admin API](https://platform.claude.com/docs/en/manage-claude/usage-cost-api)
+(`/v1/organizations/cost_report` and `/v1/organizations/usage_report/messages`).
+
+That API needs an **Admin key** (`sk-ant-admin01-…`), created in the Console
+under Settings → Admin keys. A regular API key (`sk-ant-api…`) can't read
+usage, and individual (non-organization) accounts can't create Admin keys
+at all - the key then shows **NOT ADMIN**.
+
+Put the key on one line in `~/.config/opendeck-claude-usage/admin-key` and
+make it private:
+
+    chmod 600 ~/.config/opendeck-claude-usage/admin-key
+
+The plugin refuses a key file that other users could read (**KEY PERMS**),
+shows **NO KEY** when the file is missing, and picks up a new or changed key
+within a minute - no restart. The key is only ever sent, as the `x-api-key`
+header, to `api.anthropic.com`; it's never stored in OpenDeck's settings,
+shown in a settings page, or logged.
+
+The numbers cover the **whole organization**, every API key and workspace.
+The API buckets cost by **UTC day**, so "today" starts at 00:00 UTC, and
+data lags real usage by about 5 minutes. Cost includes web search and code
+execution charges (but not Priority Tier). The plugin fetches at most twice
+every 5 minutes, however many keys show it; on failures it backs off up to
+30 minutes and keeps showing the last good numbers for up to an hour.
+
 ## Installing
 
 Download the latest `.streamDeckPlugin` and `SHA256SUMS` from
@@ -134,9 +165,24 @@ green/yellow/red at 50/80% to copper with Watch 50, Risk 75 and Critical
    (5 to 3600 seconds). **Today** is since local midnight (the same day as
    the Heatmap's and the Sparkline's "today"); **7 days** is the last 7×24
    hours; **Session** is the current 5-hour usage window.
+   Pick the **source** too: Claude Code's logs (estimated cost), or the
+   Console API (billed; see **Where the API Spend data comes from**).
+   Console data comes in whole UTC days, so its Today is the UTC day and
+   Session isn't offered.
 3. It updates automatically on that schedule; tap the tile for an
    immediate refresh (this doesn't reset the schedule - the next
    automatic refresh still happens on time).
+
+## Using API Spend
+
+1. Set up the Admin key file (see **Where the API Spend data comes from**).
+2. Add an **API Spend** key on a dial or a keypad tile.
+3. It shows billed dollars for **This month** first. A short press (key or
+   dial) cycles **Today (UTC) → 7 days → This month**, and the choice is
+   remembered; hold half a second to refresh.
+4. Optionally set a **Monthly budget**. On This month the key then draws a
+   bar of the budget used and colors it with the **Colors & thresholds**
+   marks; on a dial the touch-strip bar fills the same way.
 
 ## Using Peak Clock
 
@@ -260,12 +306,28 @@ version you checked them on:
 | Metric Tile and Usage Heatmap totals match `ccusage` (or another transcript tool) for the same day. | not recorded |
 | `~/.local/state/opendeck-claude-usage/history.jsonl` is created owner-only, only grows when usage changes, and survives a restart. | not recorded |
 
+- [ ] API Spend with no key file shows NO KEY; after creating a 0600 key
+      file it shows dollars within a minute, without restarting OpenDeck.
+      *(not yet verified)*
+- [ ] A 0644 key file shows KEY PERMS; a regular API key shows NOT ADMIN.
+      *(not yet verified)*
+- [ ] A short press on an API Spend key or dial cycles Today UTC → 7 days
+      → This month, and the range survives an OpenDeck restart; holding
+      refreshes. *(not yet verified)*
+- [ ] With a monthly budget, This month shows the bar and changes color at
+      the marks; the dial's bar fills the same way. *(not yet verified)*
+- [ ] A Metric Tile on Source = Console shows billed Tokens/Cost with a
+      "billed" subtitle, and Session is greyed out in its settings.
+      *(not yet verified)*
+- [ ] `cargo test -- --ignored live_console` passes with a real Admin key
+      (today's bucket is present). *(not yet verified)*
+
 ## Development
 
 ```bash
 cargo test --locked                          # unit tests (no live OpenDeck needed)
 node --test tests/pi/*.test.mjs                  # settings-page (Property Inspector) tests
-cargo test -- --ignored live_ --nocapture    # one real usage-API request + a scan of your transcripts
+cargo test -- --ignored live_ --nocapture    # one real usage-API request + a scan of your transcripts (+ the Console API with an Admin key)
 cargo build --release --locked
 node build.mjs                               # assembles dist/<uuid>.sdPlugin from what was built
 cp -r dist/com.jfms7s.claudeusage.sdPlugin ~/.config/opendeck/plugins/

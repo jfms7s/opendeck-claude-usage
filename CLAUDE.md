@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Rust [OpenDeck](https://github.com/nekename/OpenDeck) plugin (Linux only, built on the `openaction` crate) that shows Claude usage on Stream Deck dials and keypad tiles. Seven actions: Usage Gauge, Session + Weekly (combo), Burn Rate, Usage Heatmap, Usage Sparkline, Peak Clock, Metric Tile. The README is the user-facing spec for every action's behavior.
+A Rust [OpenDeck](https://github.com/nekename/OpenDeck) plugin (Linux only, built on the `openaction` crate) that shows Claude usage on Stream Deck dials and keypad tiles. Eight actions: Usage Gauge, Session + Weekly (combo), Burn Rate, Usage Heatmap, Usage Sparkline, Peak Clock, Metric Tile, API Spend. The README is the user-facing spec for every action's behavior.
 
 ## Commands
 
@@ -14,7 +14,7 @@ cargo clippy --all-targets --locked -- -D warnings     # CI gate - warnings fail
 cargo test --locked                                    # all unit tests; no OpenDeck needed
 cargo test heatmap::                                   # tests in one module
 node --test tests/pi/*.test.mjs                        # Property Inspector tests (runs the real PI pages against a stub DOM)
-cargo test -- --ignored live_ --nocapture              # one real usage-API request + a scan of your real transcripts
+cargo test -- --ignored live_ --nocapture              # one real usage-API request + a scan of your real transcripts + the Console Admin API (skipped without ~/.config/opendeck-claude-usage/admin-key)
 cargo build --release --locked                         # or --target <triple>
 node build.mjs                                         # bundles every built target into dist/com.jfms7s.claudeusage.sdPlugin
 ```
@@ -25,12 +25,13 @@ Install locally by copying `dist/com.jfms7s.claudeusage.sdPlugin` into `~/.confi
 
 ## Architecture
 
-**Two data sources**, both built once in `main.rs::wire` and shared by all actions:
+**Three data sources**, all built once in `main.rs::wire` and shared by all actions:
 
-- `source/api.rs` → `source/cached.rs`: calls the undocumented `api.anthropic.com/api/oauth/usage` with the OAuth token from `~/.claude/.credentials.json` (read-only; never refresh it - that logs Claude Code out; no redirects, https only, and errors never quote the credentials file). `CachedUsageSource` throttles to **one request per ~3 minutes (±10% jitter) across all actions** (the rate limit is shared with Claude Code's own `/usage`), backs off exponentially on failure (honouring `Retry-After`), and serves the last good snapshot until it's 15 min stale. Actions only ever get it as `Arc<dyn SharedUsage>`, which only `CachedUsageSource` implements, so a raw source can't be wired in; `main.rs`'s test checks every reader shares one budget. Never add a code path that bypasses this cache.
+- `source/api.rs` → `source/cached.rs`: calls the undocumented `api.anthropic.com/api/oauth/usage` with the OAuth token from `~/.claude/.credentials.json` (read-only; never refresh it - that logs Claude Code out; no redirects, https only, and errors never quote the credentials file). `CachedUsageSource` (the usage instance of the generic `CachedSource<S: Fetch>`) throttles to **one request per ~3 minutes (±10% jitter) across all actions** (the rate limit is shared with Claude Code's own `/usage`), backs off exponentially on failure (honouring `Retry-After`), and serves the last good snapshot until it's 15 min stale. Actions only ever get it as `Arc<dyn SharedUsage>`, which only `CachedUsageSource` implements, so a raw source can't be wired in; `main.rs`'s test checks every reader shares one budget. Never add a code path that bypasses this cache.
 - `source/logs.rs`: `LogUsageSource` reads Claude Code transcripts (`~/.claude/projects/**/*.jsonl`, including `<session>/subagents/`), deduplicating on `message.id` + `requestId` (a message is written once per content block), reading each append-only file incrementally and keeping one shared copy of the entries. Used by Metric Tile and Heatmap. Cost is estimated via the exact model-ID price table in `pricing.rs` (unknown models are flagged, not guessed); `<synthetic>` entries are excluded.
+- `source/console.rs` → `CachedSource`: billed Console org spend from the Usage & Cost Admin API (`cost_report` + `usage_report/messages`, daily UTC buckets, month to date plus the last 7 days) with an Admin key read from `~/.config/opendeck-claude-usage/admin-key` (refused unless 0600/0400; sent only as `x-api-key` to `api.anthropic.com`, never following redirects; never put it in settings, a PI, or a log). Its own cache (`CONSOLE_POLICY`): 5 min interval, 30 min max backoff, 60 min stale; a missing/insecure key file is re-checked every read without a request (`Fetch::is_local`), and a replaced key file is retried at once (`Fetch::input_changed`). API Spend and Console-sourced Metric Tiles read it through the `ConsoleData` trait.
 
-**`hub.rs` - `UsageHub`**: every API-driven action (Gauge, Burn Rate, Combo, Sparkline) registers instances with `track(id, View)`, where a `View` is an `Arc<dyn HubView>` that turns a snapshot (and, if `needs_history`, the recorded readings) into an `Output`. One `poll_loop` - just after each minute boundary, parked while nothing is tracked - reads the shared cache once and re-renders every tracked instance; `render_cached` draws on appear/press from `SharedUsage::peek` (same staleness rule). The hub also records new readings to `HistoryStore` (`history.rs`, `~/.local/state/opendeck-claude-usage/history.jsonl`, trimmed to 8 days) which the Sparkline draws from. Metric Tile, Heatmap and Peak Clock have their own tick loops (deadline- or minute-based, parked while empty).
+**`hub.rs` - `UsageHub`**: every API-driven action (Gauge, Burn Rate, Combo, Sparkline) registers instances with `track(id, View)`, where a `View` is an `Arc<dyn HubView>` that turns a snapshot (and, if `needs_history`, the recorded readings) into an `Output`. One `poll_loop` - just after each minute boundary, parked while nothing is tracked - reads the shared cache once and re-renders every tracked instance; `render_cached` draws on appear/press from `SharedUsage::peek` (same staleness rule). The hub also records new readings to `HistoryStore` (`history.rs`, `~/.local/state/opendeck-claude-usage/history.jsonl`, trimmed to 8 days) which the Sparkline draws from. Metric Tile, Heatmap, API Spend and Peak Clock have their own tick loops (deadline- or minute-based, parked while empty).
 
 **Per-action module split**:
 - `<feature>.rs` - pure logic/data shaping (`burn.rs`, `combo.rs`, `heatmap.rs`, `sparkline.rs`, `metric.rs`, `peak.rs`, `pace.rs`, `level.rs`, `gauge_style.rs`), unit-tested without OpenDeck. `format.rs` is the shared display layer (`UsageDisplay`, `build_display`, `usage_feedback`) used by the gauge, combo and the gauge styles.

@@ -14,7 +14,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Fetches usage straight from Anthropic's API on every `read`, using the
 /// OAuth access token Claude Code keeps in `~/.claude/.credentials.json`.
-/// Unthrottled on its own - wrap it in `CachedUsageSource`.
+/// Unthrottled on its own - wrap it in `CachedSource`.
 ///
 /// The token is only ever read and sent in the `Authorization` header;
 /// it is never refreshed here. Refreshing rotates the refresh token, which
