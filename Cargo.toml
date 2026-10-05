@@ -11,7 +11,8 @@ repository = "https://github.com/jfms7s/opendeck-claude-usage"
 
 [dependencies]
 openaction = "2.7"
-tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "fs"] }
+# process: reading the macOS Keychain through /usr/bin/security.
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "fs", "process"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-trait = "0.1"

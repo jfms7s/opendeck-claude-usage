@@ -13,7 +13,8 @@ const OAUTH_BETA: &str = "oauth-2025-04-20";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Fetches usage straight from Anthropic's API on every `read`, using the
-/// OAuth access token Claude Code keeps in `~/.claude/.credentials.json`.
+/// OAuth access token Claude Code keeps in `~/.claude/.credentials.json` on
+/// Linux and in the login Keychain on macOS (see `CredentialsLocation`).
 /// Unthrottled on its own - wrap it in `CachedSource`.
 ///
 /// The token is only ever read and sent in the `Authorization` header;
@@ -22,12 +23,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 /// as a `Credentials` error until Claude Code (CLI, desktop app or IDE
 /// extension) next refreshes it itself.
 pub struct ApiUsageSource {
-    credentials_path: PathBuf,
+    credentials: CredentialsLocation,
     client: reqwest::Client,
 }
 
 impl ApiUsageSource {
-    pub fn new(credentials_path: PathBuf) -> Self {
+    pub fn new(credentials: CredentialsLocation) -> Self {
         // The request carries the user's OAuth token, so it goes nowhere but
         // the fixed https URL: no redirects (a 3xx is just a failed
         // request), and never plain http.
@@ -39,13 +40,13 @@ impl ApiUsageSource {
             .build()
             .expect("reqwest client with static config");
         Self {
-            credentials_path,
+            credentials,
             client,
         }
     }
 
     /// `~/.claude/.credentials.json` - where Claude Code stores its OAuth
-    /// login on Linux.
+    /// login on Linux (and on macOS when it can't use the Keychain).
     pub fn default_credentials_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
         PathBuf::from(home).join(".claude/.credentials.json")
@@ -54,7 +55,124 @@ impl ApiUsageSource {
 
 impl Default for ApiUsageSource {
     fn default() -> Self {
-        Self::new(Self::default_credentials_path())
+        Self::new(CredentialsLocation::platform_default())
+    }
+}
+
+/// Where Claude Code's OAuth login (the credentials JSON) is read from.
+pub enum CredentialsLocation {
+    /// A credentials file - Claude Code's store on Linux.
+    File(PathBuf),
+    /// The macOS login Keychain, read the way Claude Code itself reads it.
+    Keychain(Keychain),
+}
+
+/// Claude Code writes its login with `/usr/bin/security add-generic-password`,
+/// so the item's access list trusts that tool: reading it through the same
+/// tool needs no Keychain prompt, even after this plugin is updated.
+pub struct Keychain {
+    pub service: String,
+    pub account: String,
+    /// `/usr/bin/security`; a field so tests can stand in a script.
+    pub security: PathBuf,
+    /// Read when the Keychain has no item (`security` exit 44): Claude Code
+    /// falls back to the credentials file when it can't use the Keychain.
+    pub fallback: PathBuf,
+    /// Longer than Claude Code's own 10 s, so that if a prompt ever does
+    /// appear there is time to answer it.
+    pub timeout: Duration,
+}
+
+/// `security`'s exit status for "The specified item could not be found".
+const SECURITY_ITEM_NOT_FOUND: i32 = 44;
+const NO_LOGIN: &str = "no Claude Code login in the Keychain or ~/.claude/.credentials.json";
+
+/// The Keychain account Claude Code uses: `$USER`, unless it holds anything
+/// outside `[A-Za-z0-9._-]` (or is empty/unset), then a fixed name.
+fn keychain_account(user: Option<&str>) -> String {
+    match user {
+        Some(u)
+            if !u.is_empty()
+                && u.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)) =>
+        {
+            u.to_string()
+        }
+        _ => "claude-code-user".to_string(),
+    }
+}
+
+impl CredentialsLocation {
+    /// The Keychain on macOS, the credentials file elsewhere.
+    pub fn platform_default() -> Self {
+        let file = ApiUsageSource::default_credentials_path();
+        if cfg!(target_os = "macos") {
+            let user = std::env::var("USER").ok();
+            Self::Keychain(Keychain {
+                service: "Claude Code-credentials".to_string(),
+                account: keychain_account(user.as_deref()),
+                security: PathBuf::from("/usr/bin/security"),
+                fallback: file,
+                timeout: Duration::from_secs(30),
+            })
+        } else {
+            Self::File(file)
+        }
+    }
+
+    /// The credentials JSON. Errors never carry what `security` printed:
+    /// on success its output is the token itself.
+    pub async fn read(&self) -> Result<String, UsageSourceError> {
+        match self {
+            Self::File(path) => tokio::fs::read_to_string(path)
+                .await
+                .map_err(|e| UsageSourceError::Credentials(e.to_string())),
+            Self::Keychain(k) => k.read().await,
+        }
+    }
+}
+
+impl Keychain {
+    async fn read(&self) -> Result<String, UsageSourceError> {
+        let child = tokio::process::Command::new(&self.security)
+            .args([
+                "find-generic-password",
+                "-a",
+                &self.account,
+                "-s",
+                &self.service,
+                "-w",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                UsageSourceError::Credentials(format!("could not run security: {}", e.kind()))
+            })?;
+        let output = tokio::time::timeout(self.timeout, child.wait_with_output())
+            .await
+            .map_err(|_| UsageSourceError::Credentials("Keychain read timed out".to_string()))?
+            .map_err(|e| {
+                UsageSourceError::Credentials(format!("Keychain read failed: {}", e.kind()))
+            })?;
+        match output.status.code() {
+            Some(0) => String::from_utf8(output.stdout)
+                .map(|s| s.trim().to_string())
+                .map_err(|_| {
+                    UsageSourceError::Credentials("Keychain item is not text".to_string())
+                }),
+            Some(SECURITY_ITEM_NOT_FOUND) => tokio::fs::read_to_string(&self.fallback)
+                .await
+                .map_err(|_| UsageSourceError::Credentials(NO_LOGIN.to_string())),
+            Some(code) => Err(UsageSourceError::Credentials(format!(
+                "Keychain read failed (security exited {code})"
+            ))),
+            None => Err(UsageSourceError::Credentials(
+                "Keychain read failed (security was killed)".to_string(),
+            )),
+        }
     }
 }
 
@@ -183,9 +301,7 @@ fn status_error(status: reqwest::StatusCode, retry_after: Option<&str>) -> Usage
 #[async_trait]
 impl UsageSource for ApiUsageSource {
     async fn read(&self) -> Result<UsageSnapshot, UsageSourceError> {
-        let credentials = tokio::fs::read_to_string(&self.credentials_path)
-            .await
-            .map_err(|e| UsageSourceError::Credentials(e.to_string()))?;
+        let credentials = self.credentials.read().await?;
         let token = parse_token(&credentials, Utc::now())?;
 
         let response = self
@@ -315,7 +431,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_credentials_file_fails_before_any_request() {
-        let source = ApiUsageSource::new(PathBuf::from("/nonexistent/.credentials.json"));
+        let source = ApiUsageSource::new(CredentialsLocation::File(PathBuf::from(
+            "/nonexistent/.credentials.json",
+        )));
         let result = source.read().await;
         assert!(matches!(result, Err(UsageSourceError::Credentials(_))));
     }
@@ -392,6 +510,129 @@ mod tests {
             assert!(
                 window.resets_at.is_some() || window.percent == 0.0,
                 "{name} is in use but has no reset time"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod keychain_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    const JSON: &str = r#"{"claudeAiOauth": {"accessToken": "sk-ant-oat01-secret"}}"#;
+
+    /// A stand-in for `/usr/bin/security`: a shell script with `body`.
+    fn fake_security(dir: &std::path::Path, body: &str) -> PathBuf {
+        let path = dir.join("security");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn keychain(security: PathBuf, fallback: PathBuf) -> CredentialsLocation {
+        CredentialsLocation::Keychain(Keychain {
+            service: "Claude Code-credentials".into(),
+            account: "jf".into(),
+            security,
+            fallback,
+            timeout: Duration::from_millis(500),
+        })
+    }
+
+    #[tokio::test]
+    async fn keychain_success_returns_the_json() {
+        let dir = tempfile::tempdir().unwrap();
+        // Echo the arguments too, so a wrong call shape fails the match.
+        let script = format!(
+            r#"[ "$*" = "find-generic-password -a jf -s Claude Code-credentials -w" ] || exit 9
+printf '%s\n' '{JSON}'"#
+        );
+        let location = keychain(fake_security(dir.path(), &script), dir.path().join("none"));
+        assert_eq!(location.read().await.unwrap(), JSON);
+    }
+
+    #[tokio::test]
+    async fn keychain_not_found_falls_back_to_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".credentials.json");
+        std::fs::write(&file, JSON).unwrap();
+        let location = keychain(fake_security(dir.path(), "exit 44"), file);
+        assert_eq!(location.read().await.unwrap(), JSON);
+    }
+
+    #[tokio::test]
+    async fn keychain_not_found_without_a_file_is_no_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let location = keychain(
+            fake_security(dir.path(), "exit 44"),
+            dir.path().join("none"),
+        );
+        let Err(UsageSourceError::Credentials(msg)) = location.read().await else {
+            panic!("expected a Credentials error");
+        };
+        assert!(msg.contains("no Claude Code login"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn keychain_failure_does_not_leak_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = format!("printf '%s' '{JSON}'; echo 'sk-ant-oat01-secret' >&2; exit 51");
+        let location = keychain(fake_security(dir.path(), &script), dir.path().join("none"));
+        let Err(UsageSourceError::Credentials(msg)) = location.read().await else {
+            panic!("expected a Credentials error");
+        };
+        assert!(msg.contains("51"), "{msg}");
+        assert!(!msg.contains("secret") && !msg.contains("sk-ant"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn keychain_timeout_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let location = keychain(
+            fake_security(dir.path(), "sleep 5"),
+            dir.path().join("none"),
+        );
+        let started = std::time::Instant::now();
+        let Err(UsageSourceError::Credentials(msg)) = location.read().await else {
+            panic!("expected a Credentials error");
+        };
+        assert!(msg.contains("timed out"), "{msg}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn a_missing_security_tool_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let location = keychain(dir.path().join("no-such-tool"), dir.path().join("none"));
+        assert!(matches!(
+            location.read().await,
+            Err(UsageSourceError::Credentials(_))
+        ));
+    }
+
+    #[test]
+    fn account_follows_claude_codes_rule() {
+        assert_eq!(keychain_account(Some("jf.ms-7_s")), "jf.ms-7_s");
+        assert_eq!(keychain_account(Some("Jane Doe")), "claude-code-user");
+        assert_eq!(keychain_account(Some("joão")), "claude-code-user");
+        assert_eq!(keychain_account(Some("")), "claude-code-user");
+        assert_eq!(keychain_account(None), "claude-code-user");
+    }
+
+    #[test]
+    fn platform_default_matches_the_os() {
+        let location = CredentialsLocation::platform_default();
+        if cfg!(target_os = "macos") {
+            let CredentialsLocation::Keychain(k) = location else {
+                panic!("macOS reads the Keychain");
+            };
+            assert_eq!(k.service, "Claude Code-credentials");
+            assert_eq!(k.security, PathBuf::from("/usr/bin/security"));
+            assert!(k.fallback.ends_with(".claude/.credentials.json"));
+        } else {
+            assert!(
+                matches!(location, CredentialsLocation::File(p) if p.ends_with(".claude/.credentials.json"))
             );
         }
     }
