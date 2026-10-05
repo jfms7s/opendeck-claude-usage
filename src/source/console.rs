@@ -256,6 +256,19 @@ const MAX_PAGES: usize = 4;
 pub struct ConsoleSource {
     key_path: PathBuf,
     client: reqwest::Client,
+    /// The key file as it was at the last fetch, so a replaced key can be
+    /// retried at once (see `Fetch::input_changed`).
+    fetched_with: std::sync::Mutex<KeyStamp>,
+}
+
+/// What identifies one version of the key file without reading it:
+/// modified time, size and mode. `None` when there's no file.
+type KeyStamp = Option<(std::time::SystemTime, u64, u32)>;
+
+async fn key_stamp(path: &Path) -> KeyStamp {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = tokio::fs::metadata(path).await.ok()?;
+    Some((meta.modified().ok()?, meta.len(), meta.permissions().mode()))
 }
 
 impl ConsoleSource {
@@ -265,7 +278,11 @@ impl ConsoleSource {
             .user_agent(concat!("opendeck-claude-usage/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("reqwest client with static config");
-        Self { key_path, client }
+        Self {
+            key_path,
+            client,
+            fetched_with: std::sync::Mutex::new(None),
+        }
     }
 
     async fn get(&self, key: &AdminKey, url: reqwest::Url) -> Result<String, ConsoleError> {
@@ -358,6 +375,8 @@ impl Fetch for ConsoleSource {
     const LABEL: &'static str = "console spend";
 
     async fn fetch(&self) -> Result<ConsoleSnapshot, ConsoleError> {
+        let stamp = key_stamp(&self.key_path).await;
+        *self.fetched_with.lock().expect("key stamp lock") = stamp;
         let key = read_admin_key(&self.key_path).await?;
         let (start, end) = window(Utc::now());
         let cost = self
@@ -373,6 +392,13 @@ impl Fetch for ConsoleSource {
     /// every read so a newly added key shows up within a tick.
     fn is_local(error: &ConsoleError) -> bool {
         matches!(error, ConsoleError::NoKey | ConsoleError::InsecureKeyFile)
+    }
+
+    /// A replaced key file (after NOT ADMIN, say) is retried at once
+    /// instead of after a backoff of up to 30 minutes. One `stat` per read.
+    async fn input_changed(&self) -> bool {
+        let now = key_stamp(&self.key_path).await;
+        now != *self.fetched_with.lock().expect("key stamp lock")
     }
 }
 
@@ -694,5 +720,30 @@ mod tests {
             snapshot.days.iter().any(|d| d.date == today),
             "today's bucket is missing - check ending_at"
         );
+    }
+
+    /// After KEY PERMS or NOT ADMIN the user replaces the key: the cache
+    /// must hear about it rather than wait out its backoff.
+    #[tokio::test]
+    async fn replacing_the_key_file_counts_as_changed_input() {
+        let (_dir, path) = key_file("sk-ant-api03-regular", 0o644); // refused locally
+        let source = ConsoleSource::new(path.clone());
+        assert_eq!(source.fetch().await, Err(ConsoleError::InsecureKeyFile));
+        assert!(!source.input_changed().await);
+
+        std::fs::write(&path, "sk-ant-admin01-replacement").unwrap();
+        assert!(source.input_changed().await);
+    }
+
+    #[tokio::test]
+    async fn creating_a_missing_key_file_counts_as_changed_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("admin-key");
+        let source = ConsoleSource::new(path.clone());
+        assert_eq!(source.fetch().await, Err(ConsoleError::NoKey));
+        assert!(!source.input_changed().await);
+
+        std::fs::write(&path, "sk-ant-admin01-new").unwrap();
+        assert!(source.input_changed().await);
     }
 }

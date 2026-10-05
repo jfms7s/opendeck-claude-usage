@@ -26,6 +26,14 @@ pub trait Fetch: Send + Sync {
     fn is_local(_error: &Self::Error) -> bool {
         false
     }
+
+    /// Whether the source's own input changed since its last fetch (a
+    /// replaced key file): the cache then retries straight away, with a
+    /// fresh backoff, instead of serving the last outcome until the delay
+    /// ends. Must be cheap - it runs on every throttled read.
+    async fn input_changed(&self) -> bool {
+        false
+    }
 }
 
 #[async_trait]
@@ -61,7 +69,8 @@ pub struct CachePolicy {
 ///   limit, a network blip, an expired token), the next attempt waits
 ///   `min_interval * 2^n`, capped at `max_backoff`.
 /// - A local failure (`Fetch::is_local`) is re-checked on the next read
-///   instead, without growing the backoff.
+///   instead, without growing the backoff - and so is any outcome once the
+///   source reports its input changed (`Fetch::input_changed`).
 /// - While failing, callers keep getting the last successful snapshot until
 ///   it's older than `stale_after`, so one rejected request doesn't flip
 ///   every dial to "no data".
@@ -152,7 +161,10 @@ impl<S: Fetch> CachedSource<S> {
         let mut state = self.inner.state.lock().await;
         let now = Instant::now();
         if state.next_attempt.is_some_and(|at| now < at) {
-            return state.served(now, policy.stale_after);
+            if !self.inner.source.input_changed().await {
+                return state.served(now, policy.stale_after);
+            }
+            state.consecutive_failures = 0;
         }
 
         match self.inner.source.fetch().await {
@@ -408,6 +420,50 @@ mod tests {
         assert_eq!(cached.read().await, Err("no key".to_string()));
         assert_eq!(cached.read().await, Err("no key".to_string()));
         assert_eq!(cached.read().await, Err("no key".to_string()));
+        assert_eq!(source.reads.load(Ordering::SeqCst), 3);
+    }
+
+    /// Fails like a rejected key, until told its input changed.
+    #[derive(Clone, Default)]
+    struct Rotatable {
+        reads: Arc<AtomicUsize>,
+        changed: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl Fetch for Rotatable {
+        type Snapshot = u32;
+        type Error = String;
+        const LABEL: &'static str = "test";
+
+        async fn fetch(&self) -> Result<u32, String> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.changed.store(false, Ordering::SeqCst);
+            Err("HTTP 401".to_string())
+        }
+
+        async fn input_changed(&self) -> bool {
+            self.changed.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Replacing a rejected key must not wait out a backoff that has grown
+    /// to half an hour.
+    #[tokio::test(start_paused = true)]
+    async fn a_changed_input_is_retried_before_the_backoff_ends() {
+        let source = Rotatable::default();
+        let cached = CachedSource::new(source.clone(), POLICY);
+        cached.read().await.unwrap_err(); // failure 1 -> next attempt in 120s
+        cached.read().await.unwrap_err();
+        assert_eq!(source.reads.load(Ordering::SeqCst), 1);
+
+        source.changed.store(true, Ordering::SeqCst);
+        cached.read().await.unwrap_err();
+        assert_eq!(source.reads.load(Ordering::SeqCst), 2);
+
+        // The retry started a fresh backoff (120s, not 240s).
+        advance_secs(120).await;
+        cached.read().await.unwrap_err();
         assert_eq!(source.reads.load(Ordering::SeqCst), 3);
     }
 }
