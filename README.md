@@ -25,8 +25,12 @@ usage readout.
 
 The plugin asks Anthropic directly: it calls
 `https://api.anthropic.com/api/oauth/usage` (the same endpoint Claude Code's
-`/usage` reads) with the OAuth login Claude Code stores in
-`~/.claude/.credentials.json`, and keeps the answer in memory. The only file
+`/usage` reads) with the OAuth login Claude Code stores - in
+`~/.claude/.credentials.json` on Linux, and in the login Keychain on macOS - and
+keeps the answer in memory. On macOS it reads the Keychain item ("Claude
+Code-credentials") through `/usr/bin/security`, the same way Claude Code does, so
+no Keychain prompt is expected; if there is no item it falls back to
+`~/.claude/.credentials.json`. The only file
 the plugin writes is the usage history for **Usage Sparkline** (see below).
 It works the same whether you use Claude Code from the
 CLI, the desktop app, or an IDE extension, as long as one of them has logged
@@ -130,18 +134,30 @@ every 5 minutes, however many keys show it; on failures it backs off up to
 
 ## Installing
 
+Runs in OpenDeck on Linux (x86_64 and aarch64) and on macOS with Apple Silicon.
+
 Download the latest `.streamDeckPlugin` and `SHA256SUMS` from
 [Releases](https://github.com/jfms7s/opendeck-claude-usage/releases), then
 either double-click it (if your file manager associates the extension with
-OpenDeck) or unzip it into `~/.config/opendeck/plugins/` and restart OpenDeck
-(plugins are only loaded at startup).
+OpenDeck) or unzip it into OpenDeck's plugin folder and restart OpenDeck
+(plugins are only loaded at startup):
+
+- Linux: `~/.config/opendeck/plugins/`
+- macOS: `~/Library/Application Support/opendeck/plugins/`
+
+On macOS, a bundle unzipped by hand (e.g. in Finder) is marked as downloaded
+and Gatekeeper refuses to start the binary. Clear the mark once:
+
+```bash
+xattr -dr com.apple.quarantine ~/Library/Application\ Support/opendeck/plugins/com.jfms7s.claudeusage.sdPlugin
+```
 
 The plugin can read your Claude login, so check the download is the one CI
 built before installing it - either against the checksum, or against the
 build provenance GitHub recorded for it:
 
 ```bash
-sha256sum -c SHA256SUMS
+sha256sum -c SHA256SUMS                    # macOS: shasum -a 256 -c SHA256SUMS
 gh attestation verify opendeck-claude-usage.streamDeckPlugin --repo jfms7s/opendeck-claude-usage
 ```
 
@@ -278,8 +294,9 @@ touch-strip bar.
 
 Anthropic's usage endpoint only reports the current percentages, so the
 plugin records them itself: each successful poll whose numbers changed (plus the
-first poll of each day, to mark midnight) is appended to `~/.local/state/opendeck-claude-usage/history.jsonl` (or under
-`$XDG_STATE_HOME`). It holds only session/weekly/extra-usage percentages and reset
+first poll of each day, to mark midnight) is appended to `~/.local/state/opendeck-claude-usage/history.jsonl`
+on Linux or `~/Library/Application Support/opendeck-claude-usage/history.jsonl` on macOS (or under
+`$XDG_STATE_HOME` when that is set). It holds only session/weekly/extra-usage percentages and reset
 times - no tokens, credentials or account data - and anything older than 8
 days is dropped as it goes. The file and its folder are owner-only. Delete
 the file any time to reset the history. If the folder can't be written, the
@@ -322,6 +339,19 @@ version you checked them on:
 - [ ] `cargo test -- --ignored live_console` passes with a real Admin key
       (today's bucket is present). *(not yet verified)*
 
+On a Mac (Apple Silicon), with the release bundle installed through OpenDeck:
+
+- [ ] `xattr -l` on the installed `opendeck-claude-usage-aarch64-apple-darwin`
+      shows no `com.apple.quarantine`. *(not yet verified)*
+- [ ] Usage Gauge, Session + Weekly, Burn Rate and Usage Sparkline show usage
+      from the Keychain login, with no Keychain prompt - also after updating the
+      plugin. *(not yet verified)*
+- [ ] Metric Tile, Usage Heatmap and Peak Clock read the transcripts in
+      `~/.claude/projects`. *(not yet verified)*
+- [ ] `~/Library/Application Support/opendeck-claude-usage/history.jsonl` is
+      created owner-only. *(not yet verified)*
+- [ ] `cargo test -- --ignored live_` passes on the Mac. *(not yet verified)*
+
 ## Development
 
 ```bash
@@ -331,12 +361,13 @@ cargo test -- --ignored live_ --nocapture    # one real usage-API request + a sc
 cargo build --release --locked
 node build.mjs                               # assembles dist/<uuid>.sdPlugin from what was built
 cp -r dist/com.jfms7s.claudeusage.sdPlugin ~/.config/opendeck/plugins/
+# (macOS: ~/Library/Application\ Support/opendeck/plugins/)
 # restart OpenDeck, then work through the smoke-test checklist above
 ```
 
 Releases are cut by pushing a `vX.Y.Z` tag matching the version in
 `Cargo.toml` and `assets/manifest.json`: the Release workflow tests, builds
-both architectures, and publishes the release with the bundle, its
+both Linux architectures and the macOS one (on a macOS runner), and publishes the release with the bundle, its
 `SHA256SUMS` and a build-provenance attestation.
 
 ## License

@@ -99,18 +99,34 @@ pub fn same_reset(a: Option<DateTime<Utc>>, b: Option<DateTime<Utc>>) -> bool {
     }
 }
 
+/// `$XDG_STATE_HOME` when absolute (per the XDG spec), else the platform's
+/// place for app state: `~/.local/state` on Linux, `~/Library/Application
+/// Support` on macOS.
+fn state_base(xdg_state_home: Option<std::ffi::OsString>, home: &str, macos: bool) -> PathBuf {
+    xdg_state_home
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| {
+            let home = PathBuf::from(home);
+            if macos {
+                home.join("Library/Application Support")
+            } else {
+                home.join(".local/state")
+            }
+        })
+}
+
 impl HistoryStore {
-    /// `$XDG_STATE_HOME` (when absolute, per the XDG spec) or
-    /// `~/.local/state`, plus the plugin's own directory.
+    /// `state_base()` plus the plugin's own directory.
     pub fn default_path() -> PathBuf {
-        let base = std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .unwrap_or_else(|| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-                PathBuf::from(home).join(".local/state")
-            });
-        base.join("opendeck-claude-usage").join("history.jsonl")
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        state_base(
+            std::env::var_os("XDG_STATE_HOME"),
+            &home,
+            cfg!(target_os = "macos"),
+        )
+        .join("opendeck-claude-usage")
+        .join("history.jsonl")
     }
 
     /// A store that never touches disk - for tests of anything that
@@ -339,6 +355,35 @@ mod tests {
     use super::*;
     use crate::source::{MonthlyUsage, WindowUsage};
     use chrono::TimeZone;
+
+    #[test]
+    fn history_dir_per_platform() {
+        use std::ffi::OsString;
+        let abs = Some(OsString::from("/xdg/state"));
+        let rel = Some(OsString::from("relative/state"));
+        // An absolute $XDG_STATE_HOME wins on both platforms.
+        assert_eq!(
+            state_base(abs.clone(), "/home/jf", false),
+            PathBuf::from("/xdg/state")
+        );
+        assert_eq!(
+            state_base(abs, "/Users/jf", true),
+            PathBuf::from("/xdg/state")
+        );
+        // Otherwise each platform's convention; a relative one is ignored.
+        assert_eq!(
+            state_base(None, "/home/jf", false),
+            PathBuf::from("/home/jf/.local/state")
+        );
+        assert_eq!(
+            state_base(rel, "/home/jf", false),
+            PathBuf::from("/home/jf/.local/state")
+        );
+        assert_eq!(
+            state_base(None, "/Users/jf", true),
+            PathBuf::from("/Users/jf/Library/Application Support")
+        );
+    }
 
     fn at(hour: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 9, 30, hour, 0, 0).unwrap()

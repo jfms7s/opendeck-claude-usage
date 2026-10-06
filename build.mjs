@@ -45,6 +45,11 @@ for (const [target, file] of Object.entries(codePaths)) {
 		fail(`manifest.json CodePaths["${target}"] is "${file}", expected "${BIN_NAME}-${target}"`);
 	}
 }
+for (const key of ["CodePathLin", "CodePathMac"]) {
+	if (manifest[key] && !Object.values(codePaths).includes(manifest[key])) {
+		fail(`manifest.json ${key} "${manifest[key]}" is not one of its CodePaths`);
+	}
+}
 
 function hostTriple() {
 	try {
