@@ -78,8 +78,7 @@ pub struct Keychain {
     /// Read when the Keychain has no item (`security` exit 44): Claude Code
     /// falls back to the credentials file when it can't use the Keychain.
     pub fallback: PathBuf,
-    /// Longer than Claude Code's own 10 s, so that if a prompt ever does
-    /// appear there is time to answer it.
+    /// 10 s, like Claude Code (see `keychain_default`).
     pub timeout: Duration,
 }
 
@@ -87,18 +86,59 @@ pub struct Keychain {
 const SECURITY_ITEM_NOT_FOUND: i32 = 44;
 const NO_LOGIN: &str = "no Claude Code login in the Keychain or ~/.claude/.credentials.json";
 
-/// The Keychain account Claude Code uses: `$USER`, unless it holds anything
-/// outside `[A-Za-z0-9._-]` (or is empty/unset), then a fixed name.
-fn keychain_account(user: Option<&str>) -> String {
-    match user {
-        Some(u)
-            if !u.is_empty()
-                && u.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)) =>
-        {
-            u.to_string()
+/// The Keychain account Claude Code uses: `$USER`, or the login name when
+/// that is empty or unset (`process.env.USER || os.userInfo().username`),
+/// then a fixed name unless it is all `[A-Za-z0-9._-]`.
+fn keychain_account(user: Option<&str>, login: Option<&str>) -> String {
+    let name = user.filter(|u| !u.is_empty()).or(login).unwrap_or("");
+    if !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        name.to_string()
+    } else {
+        "claude-code-user".to_string()
+    }
+}
+
+/// This process's login name from the user database (what Node's
+/// `os.userInfo().username` returns).
+fn login_name() -> Option<String> {
+    let mut buf = vec![0u8; 4096];
+    // SAFETY: `pwd` is plain data getpwuid_r fills in; `buf` is valid for
+    // `buf.len()` bytes and outlives every pointer read from `pwd`.
+    unsafe {
+        let mut pwd: libc::passwd = std::mem::zeroed();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let rc = libc::getpwuid_r(
+            libc::getuid(),
+            &mut pwd,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut result,
+        );
+        if rc != 0 || result.is_null() || pwd.pw_name.is_null() {
+            return None;
         }
-        _ => "claude-code-user".to_string(),
+        std::ffi::CStr::from_ptr(pwd.pw_name)
+            .to_str()
+            .ok()
+            .map(str::to_string)
+    }
+}
+
+/// How Claude Code reads its login on macOS.
+fn keychain_default(user: Option<&str>, fallback: Option<PathBuf>) -> Keychain {
+    let login = login_name();
+    Keychain {
+        service: "Claude Code-credentials".to_string(),
+        account: keychain_account(user, login.as_deref()),
+        security: PathBuf::from("/usr/bin/security"),
+        fallback: fallback.unwrap_or_else(ApiUsageSource::default_credentials_path),
+        // Claude Code's own limit. A hung read holds up any event handler
+        // waiting on the cache, so don't wait longer.
+        timeout: Duration::from_secs(10),
     }
 }
 
@@ -108,13 +148,7 @@ impl CredentialsLocation {
         let file = ApiUsageSource::default_credentials_path();
         if cfg!(target_os = "macos") {
             let user = std::env::var("USER").ok();
-            Self::Keychain(Keychain {
-                service: "Claude Code-credentials".to_string(),
-                account: keychain_account(user.as_deref()),
-                security: PathBuf::from("/usr/bin/security"),
-                fallback: file,
-                timeout: Duration::from_secs(30),
-            })
+            Self::Keychain(keychain_default(user.as_deref(), Some(file)))
         } else {
             Self::File(file)
         }
@@ -629,11 +663,37 @@ printf '%s\n' '{JSON}'"#
 
     #[test]
     fn account_follows_claude_codes_rule() {
-        assert_eq!(keychain_account(Some("jf.ms-7_s")), "jf.ms-7_s");
-        assert_eq!(keychain_account(Some("Jane Doe")), "claude-code-user");
-        assert_eq!(keychain_account(Some("joão")), "claude-code-user");
-        assert_eq!(keychain_account(Some("")), "claude-code-user");
-        assert_eq!(keychain_account(None), "claude-code-user");
+        // Claude Code: `process.env.USER || os.userInfo().username`, then
+        // `claude-code-user` unless it is `^[a-zA-Z0-9._-]+$`.
+        assert_eq!(
+            keychain_account(Some("jf.ms-7_s"), Some("other")),
+            "jf.ms-7_s"
+        );
+        assert_eq!(
+            keychain_account(Some("Jane Doe"), Some("jane")),
+            "claude-code-user"
+        );
+        assert_eq!(keychain_account(Some("joão"), None), "claude-code-user");
+        // An empty or unset USER falls back to the login name, like Claude Code.
+        assert_eq!(keychain_account(Some(""), Some("jf")), "jf");
+        assert_eq!(keychain_account(None, Some("jf")), "jf");
+        assert_eq!(keychain_account(None, Some("Jane Doe")), "claude-code-user");
+        assert_eq!(keychain_account(None, None), "claude-code-user");
+    }
+
+    #[test]
+    fn the_keychain_read_times_out_like_claude_code() {
+        // A hung read holds up event handlers waiting on the cache, so it
+        // must not wait longer than Claude Code's own 10 s.
+        let k = keychain_default(Some("jf"), None);
+        assert_eq!(k.timeout, Duration::from_secs(10));
+        assert_eq!(k.account, "jf");
+        assert_eq!(k.service, "Claude Code-credentials");
+    }
+
+    #[test]
+    fn the_login_name_is_found() {
+        assert!(login_name().is_some_and(|n| !n.is_empty()));
     }
 
     #[test]
