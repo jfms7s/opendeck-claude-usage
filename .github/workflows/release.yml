@@ -1,5 +1,6 @@
 name: Release
-# Pushing a `vX.Y.Z` tag builds, tests and packages that commit, then
+# Pushing a `vX.Y.Z` tag builds, tests and packages that commit (Linux
+# binaries on Ubuntu, the macOS one on a macOS runner), then
 # creates the GitHub release as a draft, attaches the bundle and its
 # checksum, and only then publishes it - so a release is never visible
 # without its asset.
@@ -10,9 +11,47 @@ on:
 permissions: {}
 
 jobs:
+  build-macos:
+    # Native Apple Silicon build. Read-only, like `build`: it runs every
+    # dependency's build script.
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: 1.98.1
+          targets: aarch64-apple-darwin
+      - run: cargo build --release --locked --target aarch64-apple-darwin
+      - name: Check it is a signed arm64 binary that starts
+        run: |
+          bin=target/aarch64-apple-darwin/release/opendeck-claude-usage
+          file "$bin"
+          # macOS's file says "executable arm64", Linux's "arm64 executable".
+          file -b "$bin" | grep -Eq '^Mach-O 64-bit (arm64 executable|executable arm64)'
+          # Apple Silicon kills unsigned binaries; the linker's ad-hoc
+          # signature must survive `strip = true`.
+          codesign --verify --verbose "$bin"
+          # Without OpenDeck's arguments it stops at the first missing flag,
+          # which proves it got as far as main().
+          out=$("$bin" 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q "missing CLI flag: -port"
+      - name: Pack the binary (a tar keeps the executable bit; artifacts don't)
+        run: tar -cf macos-bin.tar -C target/aarch64-apple-darwin/release opendeck-claude-usage
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-bin
+          path: macos-bin.tar
+          if-no-files-found: error
+
   build:
     # Read-only: this job runs every dependency's build script and proc
     # macro, so it gets no token that can write anything.
+    needs: build-macos
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -45,11 +84,21 @@ jobs:
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
       - run: cargo build --release --locked --target x86_64-unknown-linux-gnu
       - run: cargo build --release --locked --target aarch64-unknown-linux-gnu
-      # Nothing runs the aarch64 binary; at least check it is one.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: macos-bin
+      - name: Unpack the macOS binary where build.mjs looks for it
+        run: |
+          mkdir -p target/aarch64-apple-darwin/release
+          tar -xf macos-bin.tar -C target/aarch64-apple-darwin/release
+          test -x target/aarch64-apple-darwin/release/opendeck-claude-usage
+      # Nothing here runs the aarch64 binaries; at least check they are ones.
       - name: Check each binary's architecture
         run: |
           file target/x86_64-unknown-linux-gnu/release/opendeck-claude-usage | grep -q 'x86-64'
           file target/aarch64-unknown-linux-gnu/release/opendeck-claude-usage | grep -q 'ARM aarch64'
+          # macOS's file says "executable arm64", Linux's "arm64 executable".
+          file -b target/aarch64-apple-darwin/release/opendeck-claude-usage | grep -Eq '^Mach-O 64-bit (arm64 executable|executable arm64)'
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -61,6 +110,7 @@ jobs:
           cd dist
           zip -r ../opendeck-claude-usage.streamDeckPlugin com.jfms7s.claudeusage.sdPlugin
           cd ..
+          unzip -Z opendeck-claude-usage.streamDeckPlugin | grep -E '^-rwx.*opendeck-claude-usage-aarch64-apple-darwin$'
           sha256sum opendeck-claude-usage.streamDeckPlugin > SHA256SUMS
           cat SHA256SUMS
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
