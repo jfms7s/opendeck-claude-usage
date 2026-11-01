@@ -77,7 +77,6 @@ fn render_svg(
     arcs_active: bool,
     status: &PeakStatus,
 ) -> String {
-    let card = tile::card();
     let arcs = peak_arcs(window, arcs_active);
     let (tx, ty) = point_on_ring(now_minutes, POINTER_LENGTH);
     let status_line = tile::text_line(
@@ -95,9 +94,9 @@ fn render_svg(
         &status.countdown_text,
     );
 
-    format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">{card}<circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{FACE_RADIUS}" fill="none" stroke="{FACE_COLOR}" stroke-width="{RING_STROKE_WIDTH}" />{arcs}<line x1="{CENTER_X}" y1="{CENTER_Y}" x2="{tx:.2}" y2="{ty:.2}" stroke="{POINTER_COLOR}" stroke-width="{POINTER_WIDTH}" stroke-linecap="round" /><circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{PIVOT_RADIUS}" fill="{POINTER_COLOR}" />{status_line}{countdown_line}</svg>"#
-    )
+    tile::svg(&format!(
+        r#"<circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{FACE_RADIUS}" fill="none" stroke="{FACE_COLOR}" stroke-width="{RING_STROKE_WIDTH}" />{arcs}<line x1="{CENTER_X}" y1="{CENTER_Y}" x2="{tx:.2}" y2="{ty:.2}" stroke="{POINTER_COLOR}" stroke-width="{POINTER_WIDTH}" stroke-linecap="round" /><circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{PIVOT_RADIUS}" fill="{POINTER_COLOR}" />{status_line}{countdown_line}"#
+    ))
 }
 
 fn status_color(is_peak: bool) -> &'static str {

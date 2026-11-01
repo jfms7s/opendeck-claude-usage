@@ -101,7 +101,6 @@ pub(super) fn render(display: &UsageDisplay) -> String {
     let nx2 = CENTER_X + NEEDLE_HALF_WIDTH;
     let tip_y = CENTER_Y - NEEDLE_LENGTH;
 
-    let card = tile::card();
     // The percent carries the level color - on a keypad it's the only
     // place a pace-based warning shows, since the zones follow actual %.
     let percent = tile::text_line(
@@ -119,9 +118,9 @@ pub(super) fn render(display: &UsageDisplay) -> String {
         &display.tile_detail,
     );
 
-    format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">{card}{arcs}<polygon points="{nx1},{CENTER_Y} {nx2},{CENTER_Y} {CENTER_X},{tip_y}" fill="{NEEDLE_COLOR}" stroke-linejoin="round" transform="rotate({rotation:.2} {CENTER_X} {CENTER_Y})" /><circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{PIVOT_RADIUS}" fill="{NEEDLE_COLOR}" />{percent}{detail}</svg>"#
-    )
+    tile::svg(&format!(
+        r#"{arcs}<polygon points="{nx1},{CENTER_Y} {nx2},{CENTER_Y} {CENTER_X},{tip_y}" fill="{NEEDLE_COLOR}" stroke-linejoin="round" transform="rotate({rotation:.2} {CENTER_X} {CENTER_Y})" /><circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{PIVOT_RADIUS}" fill="{NEEDLE_COLOR}" />{percent}{detail}"#
+    ))
 }
 
 #[cfg(test)]

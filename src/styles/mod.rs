@@ -34,15 +34,7 @@ pub fn build_styled_icon(display: &UsageDisplay, style: GaugeStyle) -> String {
 /// Sweeps at least this large are drawn as a whole circle.
 const FULL_TURN: f64 = 359.9;
 
-/// Unfilled part of every bar/arc - dark enough to read as "empty" on the
-/// card, light enough to show the track's extent.
-pub const TRACK_COLOR: &str = "#374151";
-
-/// The 100x100 `<svg>` wrapper with the shared dark card underneath.
-pub fn svg(body: &str) -> String {
-    let card = tile::card();
-    format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">{card}{body}</svg>"#)
-}
+pub use crate::tile::{TRACK_COLOR, svg};
 
 /// A point on a circle at `deg` degrees measured clockwise from +x in
 /// screen space (y grows downward, so +sin is down): 0 = right, 90 =

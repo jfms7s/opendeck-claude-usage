@@ -16,7 +16,6 @@ const SUBTITLE_BASELINE: f64 = 86.0;
 const SUBTITLE_SIZE: f64 = 14.0;
 
 fn render_svg(display: &MetricDisplay) -> String {
-    let card = tile::card();
     let label = tile::text_line(
         LABEL_BASELINE,
         LABEL_SIZE,
@@ -42,9 +41,7 @@ fn render_svg(display: &MetricDisplay) -> String {
         MUTED_TEXT_COLOR,
         display.subtitle,
     );
-    format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">{card}{label}{underline}{value}{subtitle}</svg>"#
-    )
+    tile::svg(&format!(r#"{label}{underline}{value}{subtitle}"#))
 }
 
 /// The `image` string OpenDeck's `setImage` expects.
