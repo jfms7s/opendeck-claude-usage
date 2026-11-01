@@ -1,17 +1,15 @@
 //! Metric Tile: total Tokens or estimated Cost from Claude Code's
-//! transcripts over Today / 7 days / the current session, each tile on its
-//! own refresh interval. Keypad only; a tap refreshes.
+//! transcripts over Today / 7 days / the current session, redrawn every
+//! minute like the other actions. Keypad only; a tap refreshes.
 
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
 use openaction::{Action, Instance, OpenActionResult};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
-use tokio::time::Instant;
 
 use crate::metric::{
     MetricDisplay, MetricKind, ModelScope, RangeKind, build_scoped_metric_display, error_display,
@@ -21,14 +19,11 @@ use crate::settings::lenient;
 use crate::source::cached::SharedUsage;
 use crate::source::logs::{LogEntry, LogUsageSource};
 use crate::surface::{Frames, Output, Surface, for_each_tracked};
-use crate::tasks::park_while_empty;
+use crate::tasks::{park_while_empty, sleep_to_next_minute};
 
-/// The PI offers 5..=3600 seconds; anything stored outside that is clamped.
-const MIN_REFRESH: u64 = 5;
-const MAX_REFRESH: u64 = 3600;
-
-/// Each field falls back alone (see `settings::lenient`).
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+/// Each field falls back alone (see `settings::lenient`). A stored
+/// `refresh_seconds` (cut in 0.20) is ignored.
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
 pub struct MetricTileSettings {
     #[serde(default, deserialize_with = "lenient")]
     pub metric: MetricKind,
@@ -37,34 +32,6 @@ pub struct MetricTileSettings {
     /// Which models count (all, or one family).
     #[serde(default, deserialize_with = "lenient")]
     pub scope: ModelScope,
-    #[serde(default = "default_refresh", deserialize_with = "lenient_refresh")]
-    pub refresh_seconds: u64,
-}
-
-fn default_refresh() -> u64 {
-    60
-}
-
-fn lenient_refresh<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(value.as_u64().unwrap_or_else(default_refresh))
-}
-
-impl Default for MetricTileSettings {
-    fn default() -> Self {
-        Self {
-            metric: MetricKind::default(),
-            range: RangeKind::default(),
-            scope: ModelScope::default(),
-            refresh_seconds: default_refresh(),
-        }
-    }
-}
-
-impl MetricTileSettings {
-    fn interval(&self) -> Duration {
-        Duration::from_secs(self.refresh_seconds.clamp(MIN_REFRESH, MAX_REFRESH))
-    }
 }
 
 /// Where the Session range takes its reset time from.
@@ -78,22 +45,21 @@ pub(crate) enum UsageRead {
     Cached,
 }
 
-struct TrackedInstance {
-    settings: MetricTileSettings,
-    next_due: Instant,
-}
-
 #[derive(Clone)]
 pub struct MetricTileAction {
     log_source: Arc<LogUsageSource>,
     /// Only read for the Session range's reset time - through the plugin's
     /// one shared, throttled usage cache.
     usage: Arc<dyn SharedUsage>,
-    registry: Arc<DashMap<String, TrackedInstance>>,
+    /// Each visible instance's settings - what the tick redraws.
+    registry: Arc<DashMap<String, MetricTileSettings>>,
     frames: Arc<Frames>,
-    /// Pinged on every (re)track, so the tick loop re-plans its next
-    /// wake-up (or leaves its park).
+    /// Pinged on every (re)track, so a parked tick loop resumes.
     wake: Arc<Notify>,
+    /// Pinged by an event that drew without data it couldn't wait for (no
+    /// transcript scan yet, or no cached session reset time): the tick
+    /// loop then redraws now instead of at the next minute.
+    refresh_soon: Arc<Notify>,
 }
 
 impl MetricTileAction {
@@ -104,17 +70,13 @@ impl MetricTileAction {
             registry: Arc::new(DashMap::new()),
             frames: Arc::new(Frames::default()),
             wake: Arc::new(Notify::new()),
+            refresh_soon: Arc::new(Notify::new()),
         }
     }
 
-    /// Tracks (or re-tracks, overwriting prior settings) an instance that
-    /// was just drawn, so it's next due one interval from now.
+    /// Tracks (or re-tracks, overwriting prior settings) an instance.
     fn track(&self, instance_id: &str, settings: MetricTileSettings) {
-        let next_due = Instant::now() + settings.interval();
-        self.registry.insert(
-            instance_id.to_string(),
-            TrackedInstance { settings, next_due },
-        );
+        self.registry.insert(instance_id.to_string(), settings);
         self.wake.notify_one();
     }
 
@@ -124,7 +86,7 @@ impl MetricTileAction {
     }
 
     /// What one instance shows, from already-scanned entries (so a tick
-    /// scans once for all its due instances).
+    /// scans once for every tile).
     async fn display(
         &self,
         entries: &[LogEntry],
@@ -190,47 +152,29 @@ impl MetricTileAction {
             .render(surface, &entries, settings, UsageRead::Cached)
             .await;
         // Either half missing (no scan yet, or no usable usage snapshot
-        // for the Session range): bring the tile's refresh forward, so the
-        // tick loop scans and reads off the event loop and redraws it. The
-        // tick scans once for every tile due, and the usage cache bounds
-        // what a read costs.
+        // for the Session range): ask the tick loop to redraw now - it
+        // scans and reads off the event loop, once for every tile, and the
+        // usage cache bounds what a read costs.
         let usage_cold = settings.range == RangeKind::Session
             && self.usage.peek().and_then(Result::ok).is_none();
         if !scanned || usage_cold {
-            self.due_now(surface.id());
+            self.refresh_soon.notify_one();
         }
         drawn
     }
 
-    /// Makes a tracked instance due at once and wakes the tick loop.
-    fn due_now(&self, instance_id: &str) {
-        if let Some(mut tracked) = self.registry.get_mut(instance_id) {
-            tracked.next_due = Instant::now();
-        }
-        self.wake.notify_one();
-    }
-
-    /// When the soonest instance is due, if any is tracked.
-    fn next_deadline(&self) -> Option<Instant> {
-        self.registry.iter().map(|t| t.next_due).min()
-    }
-
-    /// Runs forever: sleeps until the soonest instance is due, renders the
-    /// due ones (each on its own `refresh_seconds`), and re-plans whenever
-    /// an instance is tracked. Parks while none is visible. Spawned once
-    /// from `main.rs`, supervised.
+    /// Runs forever: just after every minute boundary (or at once when an
+    /// event asked for it) scans the transcripts once and redraws every
+    /// visible tile. Parks while none is visible. Spawned once from
+    /// `main.rs`, supervised.
     pub async fn tick_loop(self) {
         loop {
             park_while_empty(|| self.registry.is_empty(), &self.wake).await;
-            let Some(deadline) = self.next_deadline() else {
-                continue;
-            };
             tokio::select! {
-                () = tokio::time::sleep_until(deadline) => {
-                    self.tick_once(openaction::get_instance).await;
-                }
-                () = self.wake.notified() => {}
+                () = sleep_to_next_minute() => {}
+                () = self.refresh_soon.notified() => {}
             }
+            self.tick_once(openaction::get_instance).await;
         }
     }
 
@@ -240,27 +184,16 @@ impl MetricTileAction {
         L: FnMut(String) -> LF,
         LF: Future<Output = Option<S>>,
     {
-        let now = Instant::now();
-        let snapshot: Vec<(String, Instant)> = self
-            .registry
-            .iter()
-            .map(|e| (e.key().clone(), e.next_due))
-            .collect();
-        let due = due_instance_ids(&snapshot, now);
-        if due.is_empty() {
+        let ids: Vec<String> = self.registry.iter().map(|e| e.key().clone()).collect();
+        if ids.is_empty() {
             return;
         }
-        for id in &due {
-            if let Some(mut tracked) = self.registry.get_mut(id) {
-                tracked.next_due = now + tracked.settings.interval();
-            }
-        }
-        // Scanned once per tick, however many instances are due.
+        // Scanned once per tick, however many tiles are visible.
         let entries = self.log_source.entries().await;
         let entries = &entries;
         for_each_tracked(
-            due,
-            |id| self.registry.get(id).map(|t| t.settings.clone()),
+            ids,
+            |id| self.registry.get(id).map(|s| s.clone()),
             lookup,
             |surface, settings| async move {
                 if let Err(e) = self
@@ -273,15 +206,6 @@ impl MetricTileAction {
         )
         .await;
     }
-}
-
-/// Pure due-time filter, so the scheduling decision is unit-testable.
-fn due_instance_ids(tracked: &[(String, Instant)], now: Instant) -> Vec<String> {
-    tracked
-        .iter()
-        .filter(|(_, due)| *due <= now)
-        .map(|(id, _)| id.clone())
-        .collect()
 }
 
 #[async_trait]
@@ -317,8 +241,7 @@ impl Action for MetricTileAction {
         Ok(())
     }
 
-    /// A tap refreshes just that tile - and doesn't move its next scheduled
-    /// refresh, since a tap is a bonus, not a reason to skip one.
+    /// A tap refreshes just that tile at once.
     async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
         self.redraw(instance, settings).await
     }
@@ -333,6 +256,7 @@ mod tests {
     use crate::surface::test_support::FakeSurface;
     use crate::test_support::manifest_entry;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     /// Counts reads of the usage API.
     #[derive(Clone, Default)]
@@ -383,11 +307,26 @@ mod tests {
     }
 
     #[test]
-    fn default_settings_are_tokens_today_at_sixty_seconds() {
+    fn default_settings_are_tokens_today_all_models() {
         let settings = MetricTileSettings::default();
         assert_eq!(settings.metric, MetricKind::Tokens);
         assert_eq!(settings.range, RangeKind::Today);
-        assert_eq!(settings.refresh_seconds, 60);
+        assert_eq!(settings.scope, ModelScope::All);
+    }
+
+    /// A tile saved with the cut `refresh_seconds` loads with its other
+    /// settings; the stored refresh is ignored.
+    #[test]
+    fn a_saved_refresh_seconds_is_ignored() {
+        for json in [
+            r#"{"metric":"cost","refresh_seconds":30}"#,
+            r#"{"metric":"cost","refresh_seconds":"x"}"#,
+        ] {
+            let s: MetricTileSettings = serde_json::from_str(json).unwrap();
+            assert_eq!(s.metric, MetricKind::Cost, "{json}");
+            let saved = serde_json::to_value(&s).unwrap();
+            assert!(saved.get("refresh_seconds").is_none());
+        }
     }
 
     #[test]
@@ -403,15 +342,15 @@ mod tests {
     #[test]
     fn a_bad_field_keeps_the_others() {
         let s: MetricTileSettings =
-            serde_json::from_str(r#"{"metric":"bogus","range":"sevenday","refresh_seconds":"30"}"#)
+            serde_json::from_str(r#"{"metric":"bogus","range":"sevenday","scope":"opus"}"#)
                 .unwrap();
         assert_eq!(s.metric, MetricKind::Tokens);
         assert_eq!(s.range, RangeKind::SevenDay);
-        assert_eq!(s.refresh_seconds, 60);
+        assert_eq!(s.scope, ModelScope::Opus);
     }
 
     /// A tile saved on v0.16 with the removed Console source still loads with
-    /// its metric, range and refresh, and now reads the transcripts.
+    /// its metric and range, and now reads the transcripts.
     #[test]
     fn a_saved_console_source_is_ignored() {
         let s: MetricTileSettings = serde_json::from_str(
@@ -423,7 +362,6 @@ mod tests {
             MetricTileSettings {
                 metric: MetricKind::Cost,
                 range: RangeKind::SevenDay,
-                refresh_seconds: 120,
                 ..MetricTileSettings::default()
             }
         );
@@ -460,17 +398,6 @@ mod tests {
     }
 
     #[test]
-    fn the_interval_is_clamped_to_what_the_pi_offers() {
-        let at = |refresh_seconds| MetricTileSettings {
-            refresh_seconds,
-            ..MetricTileSettings::default()
-        };
-        assert_eq!(at(0).interval(), Duration::from_secs(5));
-        assert_eq!(at(30).interval(), Duration::from_secs(30));
-        assert_eq!(at(1_000_000).interval(), Duration::from_secs(3600));
-    }
-
-    #[test]
     fn track_then_untrack_round_trips_through_the_registry() {
         let action = action();
         action.track("ctx1", MetricTileSettings::default());
@@ -489,62 +416,45 @@ mod tests {
             MetricTileSettings {
                 metric: MetricKind::Cost,
                 range: RangeKind::Session,
-                refresh_seconds: 30,
                 ..MetricTileSettings::default()
             },
         );
         let tracked = action.registry.get("ctx1").unwrap();
-        assert_eq!(tracked.settings.metric, MetricKind::Cost);
-        assert_eq!(tracked.settings.refresh_seconds, 30);
+        assert_eq!(tracked.metric, MetricKind::Cost);
+        assert_eq!(tracked.range, RangeKind::Session);
     }
 
-    #[test]
-    fn due_instance_ids_includes_only_elapsed_or_exactly_due_instances() {
-        let now = Instant::now();
-        let tracked = vec![
-            ("already_due".to_string(), now - Duration::from_secs(1)),
-            ("not_due_yet".to_string(), now + Duration::from_secs(30)),
-            ("exactly_due".to_string(), now),
-        ];
-        let mut due = due_instance_ids(&tracked, now);
-        due.sort();
-        assert_eq!(
-            due,
-            vec!["already_due".to_string(), "exactly_due".to_string()]
-        );
-    }
-
-    /// Each tile is drawn on its own interval: a 30s tile twice a minute, a
-    /// 60s tile once.
-    #[tokio::test(start_paused = true)]
-    async fn each_instance_is_rendered_on_its_own_interval() {
+    /// One tick redraws every visible tile, whatever its settings, from
+    /// one scan; a tile removed meanwhile isn't looked up.
+    #[tokio::test]
+    async fn one_tick_redraws_every_tracked_tile() {
         let action = action();
-        let at = |refresh_seconds| MetricTileSettings {
-            refresh_seconds,
-            ..MetricTileSettings::default()
-        };
-        action.track("fast", at(30));
-        action.track("slow", at(60));
-        let (fast, slow) = (
-            FakeSurface::new("fast", true),
-            FakeSurface::new("slow", true),
+        action.track("tokens", MetricTileSettings::default());
+        action.track(
+            "cost",
+            MetricTileSettings {
+                metric: MetricKind::Cost,
+                ..MetricTileSettings::default()
+            },
         );
+        action.track("gone", MetricTileSettings::default());
+        action.untrack("gone");
         let mut drawn = Vec::new();
-        for _ in 0..4 {
-            tokio::time::advance(Duration::from_secs(15)).await;
-            action
-                .tick_once(|id| {
-                    drawn.push(id.clone());
-                    std::future::ready(Some(if id == "fast" {
-                        fast.clone()
-                    } else {
-                        slow.clone()
-                    }))
-                })
-                .await;
-        }
+        action
+            .tick_once(|id| {
+                drawn.push(id.clone());
+                std::future::ready(Some(FakeSurface::new(&id, true)))
+            })
+            .await;
         drawn.sort();
-        assert_eq!(drawn, ["fast", "fast", "slow"]);
+        assert_eq!(drawn, ["cost", "tokens"]);
+    }
+
+    /// Asked for a redraw now (`refresh_soon` has a permit)?
+    async fn refresh_requested(action: &MetricTileAction) -> bool {
+        tokio::time::timeout(Duration::from_millis(10), action.refresh_soon.notified())
+            .await
+            .is_ok()
     }
 
     /// The Session range reads the shared, throttled usage cache - several
@@ -666,7 +576,7 @@ mod tests {
             .expect("an event waited on the usage fetch")
             .unwrap();
         assert_eq!(key.frames(), vec![expected(&logs, None).await]);
-        assert!(action.registry.get("a").unwrap().next_due <= Instant::now());
+        assert!(refresh_requested(&action).await);
     }
 
     /// An event uses the cached reset time, and makes no request even when
@@ -688,16 +598,17 @@ mod tests {
         assert_eq!(key.frames(), vec![cached]);
 
         action.track("a", session());
-        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::time::advance(Duration::from_secs(3600)).await;
         action
             .tick_once(|_| std::future::ready(Some(key.clone())))
             .await;
         assert_eq!(source.0.load(Ordering::SeqCst), 2, "the tick did not fetch");
     }
 
-    /// With a usable snapshot cached, an event leaves the schedule alone.
+    /// With a usable snapshot cached and the transcripts scanned, an event
+    /// asks for no extra redraw.
     #[tokio::test(start_paused = true)]
-    async fn a_warm_cache_keeps_the_tap_from_moving_the_schedule() {
+    async fn a_warm_tile_asks_for_no_extra_redraw() {
         let usage = shared(Counting::default());
         usage.read().await.unwrap();
         let root = one_transcript();
@@ -705,16 +616,15 @@ mod tests {
         logs.entries().await; // the first scan is done
         let action = MetricTileAction::new(logs, usage);
         action.track("a", session());
-        let due = action.registry.get("a").unwrap().next_due;
         action
             .redraw(&FakeSurface::new("a", true), &session())
             .await
             .unwrap();
-        assert_eq!(action.registry.get("a").unwrap().next_due, due);
+        assert!(!refresh_requested(&action).await);
     }
 
     /// Before the first transcript scan an event draws at once, without
-    /// scanning, and makes the tile due; the tick loop then scans and
+    /// scanning, and asks for a redraw now; the tick loop then scans and
     /// draws the data.
     #[tokio::test(start_paused = true)]
     async fn an_event_before_the_first_scan_draws_at_once_and_the_tick_fills_it_in() {
@@ -730,7 +640,7 @@ mod tests {
             key.frames(),
             vec![Output::Image(build_metric_icon(&error_display()))]
         );
-        assert!(action.registry.get("a").unwrap().next_due <= Instant::now());
+        assert!(refresh_requested(&action).await);
 
         action
             .tick_once(|_| std::future::ready(Some(key.clone())))
@@ -741,8 +651,6 @@ mod tests {
         let entries = logs.peek();
         assert!(!entries.is_empty());
         assert_ne!(frames[1], frames[0]);
-        // The tick reschedules as usual.
-        assert!(action.registry.get("a").unwrap().next_due > Instant::now());
     }
 
     #[test]

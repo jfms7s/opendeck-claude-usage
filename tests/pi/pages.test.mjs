@@ -63,14 +63,14 @@ test("heatmap: a bad stored color shows the default, the view passes through", a
 	assert.deepEqual(page.saves(), [{ metric: "cost", scope: "all", color: "#d97757", view: "fourWeeks" }]);
 });
 
-test("metric tile: unknown metric and range fall back, refresh is clamped", async () => {
+test("metric tile: unknown metric and range fall back; no refresh field, a stored one isn't saved", async () => {
 	const page = loadPage("metrictile.html");
-	await page.open({ metric: "bogus", range: "yearly", refresh_seconds: "x" });
+	await page.open({ metric: "bogus", range: "yearly", refresh_seconds: 30 });
 	assert.equal(page.el("metric").value, "tokens");
 	assert.equal(page.el("range").value, "today");
-	assert.equal(page.el("refresh_seconds").value, "60");
-	page.change("refresh_seconds", "1");
-	assert.deepEqual(page.saves(), [{ metric: "tokens", range: "today", scope: "all", refresh_seconds: 5 }]);
+	assert.throws(() => page.el("refresh_seconds"), /no element #refresh_seconds/);
+	page.change("range", "sevenday");
+	assert.deepEqual(page.saves(), [{ metric: "tokens", range: "sevenday", scope: "all" }]);
 });
 
 test("metric tile: no Source picker; a saved Console tile opens on its range and saves no source", async () => {
@@ -79,8 +79,8 @@ test("metric tile: no Source picker; a saved Console tile opens on its range and
 	assert.throws(() => page.el("source"), /no element #source/);
 	assert.equal(page.el("metric").value, "cost");
 	assert.equal(page.el("range").value, "session");
-	page.change("refresh_seconds", "90");
-	assert.deepEqual(page.saves(), [{ metric: "cost", range: "session", scope: "all", refresh_seconds: 90 }]);
+	page.change("metric", "tokens");
+	assert.deepEqual(page.saves(), [{ metric: "tokens", range: "session", scope: "all" }]);
 });
 
 test("scope: a saved family is shown and kept; an unknown one falls back to All", async () => {

@@ -160,20 +160,17 @@ green/yellow/red at 50/80% to copper with Watch 50, Risk 75 and Critical
 ## Using a Metric Tile
 
 1. Add a **Metric Tile** key on a keypad tile (no dial/Encoder variant).
-2. Pick the metric (Tokens or Cost), the range, and how often it refreshes
-   (5 to 3600 seconds). **Today** is since local midnight (the same day as
+2. Pick the metric (Tokens or Cost) and the range. **Today** is since local midnight (the same day as
    the Heatmap's and the Sparkline's "today"); **7 days** is the last 7×24
    hours; **Session** is the current 5-hour usage window.
    **Models** limits the count to one family (**Opus**, **Sonnet** or
    **Haiku**, matched in the model id) or keeps **All models**; a scoped
    tile names the family under the number (`today · opus`) and shows `0`,
    not "no data", when that family has no usage in range.
-3. It updates automatically on that schedule; tap the tile for an
-   immediate refresh (this doesn't reset the schedule - the next
-   automatic refresh still happens on time). A Session tile's tap uses the
-   last fetched session reset time; when none has been fetched yet, it
-   shows a rolling 5-hour window and refreshes again right after with the
-   fetched reset time (that one refresh does restart the schedule).
+3. It redraws every minute; tap the tile for an immediate refresh. A
+   Session tile's tap uses the last fetched session reset time; when none
+   has been fetched yet, it shows a rolling 5-hour window and redraws
+   again right after with the fetched reset time.
 
 ## Using Peak Clock
 
