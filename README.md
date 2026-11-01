@@ -37,8 +37,15 @@ CLI, the desktop app, or an IDE extension, as long as one of them has logged
 in on this machine.
 
 The token is only read and sent in the request's `Authorization` header. The
-plugin never refreshes it (that would log Claude Code out); if it has
-expired, the dials show "no data" until Claude Code next runs and renews it.
+plugin never refreshes it or writes the credentials itself (a second
+refresher racing Claude Code could log it out). On Linux, when the token has
+expired, the plugin asks Claude Code to renew it by running
+`claude auth status --json` - found on `PATH`, else in `~/.local/bin` or
+`~/.claude/local` - which refreshes the login through Claude Code's own code
+path; its output (your account email and org) is discarded. That runs at most
+once every 10 minutes and is stopped after 15 seconds. If there is no
+`claude`, or it can't renew the login, the keys show "no data" until Claude
+Code next runs (on macOS this is still the only behaviour).
 
 That endpoint is undocumented and rate-limited per account - and the limit
 is shared with anything else that calls it (Claude Code's `/usage`, editor
