@@ -66,6 +66,15 @@ mod tests {
         }
     }
 
+    /// The whole image, byte for byte - the envelope is shared, so a
+    /// change to it shows up here.
+    #[test]
+    fn the_full_svg_is_pinned() {
+        assert_eq!(render_svg(&tokens()), PINNED_SVG);
+    }
+
+    const PINNED_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><rect x=\"0\" y=\"0\" width=\"100\" height=\"100\" fill=\"#111827\" /><text x=\"50\" y=\"24\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"13\" font-weight=\"700\" fill=\"#d1d5db\">TOKENS</text><rect x=\"38\" y=\"30\" width=\"24\" height=\"3\" rx=\"1.5\" fill=\"#38bdf8\" /><text x=\"50\" y=\"64\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"28\" font-weight=\"700\" fill=\"#f9fafb\" textLength=\"94\" lengthAdjust=\"spacingAndGlyphs\">318.5K</text><text x=\"50\" y=\"86\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"14\" font-weight=\"500\" fill=\"#d1d5db\">today</text></svg>";
+
     #[test]
     fn draws_label_value_and_subtitle_on_the_shared_card() {
         let svg = render_svg(&tokens());

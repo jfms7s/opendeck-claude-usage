@@ -161,6 +161,15 @@ mod tests {
         String::from_utf8(bytes).unwrap()
     }
 
+    /// The whole image, byte for byte - the envelope is shared, so a
+    /// change to it shows up here.
+    #[test]
+    fn the_full_svg_is_pinned() {
+        assert_eq!(render(&display(42.0)), PINNED_SVG);
+    }
+
+    const PINNED_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><rect x=\"0\" y=\"0\" width=\"100\" height=\"100\" fill=\"#111827\" /><path d=\"M 18.00 48.00 A 32 32 0 0 1 50.00 16.00\" fill=\"none\" stroke=\"#d97757\" stroke-width=\"10\" stroke-linecap=\"round\" /><path d=\"M 50.00 16.00 A 32 32 0 0 1 72.63 25.37\" fill=\"none\" stroke=\"#eab308\" stroke-width=\"10\" stroke-linecap=\"round\" /><path d=\"M 72.63 25.37 A 32 32 0 0 1 80.43 38.11\" fill=\"none\" stroke=\"#f97316\" stroke-width=\"10\" stroke-linecap=\"round\" /><path d=\"M 80.43 38.11 A 32 32 0 0 1 82.00 48.00\" fill=\"none\" stroke=\"#ef4444\" stroke-width=\"10\" stroke-linecap=\"round\" /><polygon points=\"47,48 53,48 50,23\" fill=\"#f9fafb\" stroke-linejoin=\"round\" transform=\"rotate(-14.40 50 48)\" /><circle cx=\"50\" cy=\"48\" r=\"5\" fill=\"#f9fafb\" /><text x=\"50\" y=\"79\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"26\" font-weight=\"700\" fill=\"#d97757\">42%</text><text x=\"50\" y=\"96\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"15\" font-weight=\"500\" fill=\"#d1d5db\">1h</text></svg>";
+
     #[test]
     fn builds_a_valid_svg_data_uri() {
         let svg = decode(&build_icon(&display(50.0)));
