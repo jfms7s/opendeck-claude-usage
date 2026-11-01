@@ -180,6 +180,7 @@ mod tests {
                 used_dollars: Some(12.5),
                 limit_dollars: Some(50.0),
             },
+            details: Default::default(),
         }
     }
 
