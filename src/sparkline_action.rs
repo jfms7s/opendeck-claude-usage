@@ -227,7 +227,7 @@ mod tests {
         let s: SparklineSettings =
             serde_json::from_str(r#"{"window":"weekly","series":"today","critical":95}"#).unwrap();
         let c = s.next().unwrap();
-        assert_eq!(c.spark.series, SparkSeries::EvenBurn);
+        assert_eq!(c.spark.series, SparkSeries::Trend);
         assert_eq!(c.spark.window, WindowKind::Weekly);
         assert_eq!(c.colors, s.colors);
     }
@@ -235,10 +235,9 @@ mod tests {
     #[test]
     fn settings_round_trip_flat() {
         let s: SparklineSettings =
-            serde_json::from_str(r#"{"window":"weekly","series":"betweenPolls","watch":40}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"window":"weekly","series":"today","watch":40}"#).unwrap();
         let v = serde_json::to_value(&s).unwrap();
-        assert_eq!(v["series"], "betweenPolls");
+        assert_eq!(v["series"], "today");
         assert_eq!(v["watch"], 40.0);
         let back: SparklineSettings = serde_json::from_value(v).unwrap();
         assert_eq!(back.spark, s.spark);
