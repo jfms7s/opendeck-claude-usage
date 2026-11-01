@@ -25,6 +25,7 @@ use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
@@ -253,6 +254,8 @@ impl Store {
 pub struct LogUsageSource {
     projects_dir: PathBuf,
     store: Arc<Mutex<Store>>,
+    /// Set once a scan has completed.
+    scanned: Arc<AtomicBool>,
 }
 
 /// `projects/<project>/<session>/subagents/<agent>.jsonl` is the deepest
@@ -264,6 +267,24 @@ impl LogUsageSource {
         Self {
             projects_dir,
             store: Arc::new(Mutex::new(Store::default())),
+            scanned: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Whether a scan has completed, so `entries()` normally only tails
+    /// the files (milliseconds) instead of reading every transcript from
+    /// the start. (A shrunk or vanished transcript still makes a later scan
+    /// start over.)
+    pub fn scanned(&self) -> bool {
+        self.scanned.load(Ordering::Acquire)
+    }
+
+    /// The entries already scanned, without scanning or waiting: empty
+    /// before the first scan, and while a scan holds the store.
+    pub fn peek(&self) -> Arc<Vec<LogEntry>> {
+        match self.store.try_lock() {
+            Ok(store) => Arc::clone(&store.entries),
+            Err(_) => Arc::default(),
         }
     }
 
@@ -281,7 +302,13 @@ impl LogUsageSource {
     pub async fn entries(&self) -> Arc<Vec<LogEntry>> {
         let projects_dir = self.projects_dir.clone();
         let store = Arc::clone(&self.store);
-        match tokio::task::spawn_blocking(move || Self::scan(&projects_dir, &store)).await {
+        let scanned = Arc::clone(&self.scanned);
+        let scan = move || {
+            let entries = Self::scan(&projects_dir, &store);
+            scanned.store(true, Ordering::Release);
+            entries
+        };
+        match tokio::task::spawn_blocking(scan).await {
             Ok(entries) => entries,
             Err(e) => {
                 log::error!("scanning Claude Code transcripts failed: {e}");
@@ -414,6 +441,22 @@ mod tests {
 
     async fn entries_in(root: &Path) -> Arc<Vec<LogEntry>> {
         LogUsageSource::new(root.to_path_buf()).entries().await
+    }
+
+    #[tokio::test]
+    async fn peek_and_scanned_reflect_only_a_completed_scan() {
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("session.jsonl"), format!("{ASSISTANT_LINE}\n")).unwrap();
+        let source = LogUsageSource::new(root.path().to_path_buf());
+        assert!(!source.scanned());
+        assert!(source.peek().is_empty());
+
+        let entries = source.entries().await;
+        assert!(source.scanned());
+        assert_eq!(entries.len(), 1);
+        assert!(Arc::ptr_eq(&source.peek(), &entries));
     }
 
     #[test]

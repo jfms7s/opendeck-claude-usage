@@ -3,6 +3,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use openaction::{Action, Instance, OpenActionResult};
@@ -52,6 +53,9 @@ pub struct HeatmapAction {
     frames: Arc<Frames>,
     /// Pinged when an instance appears, so a parked tick loop resumes.
     wake: Arc<Notify>,
+    /// Set once an event has spawned the first transcript scan, so a burst
+    /// of appears at start-up spawns one.
+    first_scan_spawned: Arc<AtomicBool>,
 }
 
 impl HeatmapAction {
@@ -61,6 +65,7 @@ impl HeatmapAction {
             presses: Arc::new(PressCycler::default()),
             frames: Arc::new(Frames::default()),
             wake: Arc::new(Notify::new()),
+            first_scan_spawned: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -69,13 +74,52 @@ impl HeatmapAction {
         output_from(&self.logs.entries().await, settings, keypad)
     }
 
+    /// Draws one instance for an event (appear, new settings, press).
+    /// Until the first transcript scan (seconds, on a big
+    /// `~/.claude/projects`) has completed, it draws what is already
+    /// scanned instead of waiting - openaction handles events one at a
+    /// time - and spawns that scan, which redraws every tracked heatmap.
     async fn render<S: Surface + ?Sized>(
         &self,
         surface: &S,
         settings: &HeatmapSettings,
     ) -> OpenActionResult<()> {
-        let output = self.output(settings, surface.is_keypad()).await;
-        self.frames.push(surface, output).await
+        self.render_with(surface, settings, openaction::get_instance)
+            .await
+    }
+
+    /// `render`, with the lookup the first scan's redraw uses passed in
+    /// (tests pass a fake).
+    async fn render_with<S, T, L, LF>(
+        &self,
+        surface: &S,
+        settings: &HeatmapSettings,
+        lookup: L,
+    ) -> OpenActionResult<()>
+    where
+        S: Surface + ?Sized,
+        T: Surface + 'static,
+        L: FnMut(String) -> LF + Send + 'static,
+        LF: Future<Output = Option<T>> + Send,
+    {
+        if self.logs.scanned() {
+            // A warm rescan only tails the files.
+            let output = self.output(settings, surface.is_keypad()).await;
+            return self.frames.push(surface, output).await;
+        }
+        let output = output_from(&self.logs.peek(), settings, surface.is_keypad());
+        let pushed = self.frames.push(surface, output).await;
+        if !self.first_scan_spawned.swap(true, Ordering::SeqCst) {
+            let this = self.clone();
+            tokio::spawn(async move {
+                this.render_tracked(lookup).await;
+                // A scan that panicked leaves the next event to retry.
+                if !this.logs.scanned() {
+                    this.first_scan_spawned.store(false, Ordering::SeqCst);
+                }
+            });
+        }
+        pushed
     }
 
     fn track(&self, instance_id: &str, settings: &HeatmapSettings) {
@@ -221,6 +265,117 @@ mod tests {
     use crate::heatmap::HeatmapView;
     use crate::surface::test_support::FakeSurface;
     use crate::test_support::{assert_feedback_matches_layout, manifest_entry};
+    use std::time::Duration;
+
+    /// A projects dir with one transcript line written now.
+    fn one_transcript() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let at = chrono::Utc::now().to_rfc3339();
+        std::fs::write(
+            project.join("session.jsonl"),
+            format!(
+                r#"{{"type":"assistant","timestamp":"{at}","message":{{"model":"claude-sonnet-5","usage":{{"input_tokens":2000,"output_tokens":3000}}}}}}"#
+            ),
+        )
+        .unwrap();
+        root
+    }
+
+    /// Before the first transcript scan an event draws at once, without
+    /// waiting on the scan; the scan it spawns redraws every tracked
+    /// heatmap with the data. A second event meanwhile spawns no second
+    /// scan.
+    #[tokio::test]
+    async fn an_event_before_the_first_scan_draws_at_once_and_the_scan_redraws() {
+        let root = one_transcript();
+        let logs = Arc::new(LogUsageSource::new(root.path().to_path_buf()));
+        let action = HeatmapAction::new(Arc::clone(&logs));
+        let settings = HeatmapSettings::default();
+        let key = FakeSurface::new("a", true);
+        action.track("a", &settings);
+        let lookup = {
+            let key = key.clone();
+            move |_: String| std::future::ready(Some(key.clone()))
+        };
+        action
+            .render_with(&key, &settings, lookup.clone())
+            .await
+            .unwrap();
+        let empty = output_from(&[], &settings, true);
+        assert_eq!(key.frames(), vec![empty.clone()]);
+        assert!(action.first_scan_spawned.load(Ordering::SeqCst));
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while key.frames().len() < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the first scan never redrew the heatmap");
+        assert!(logs.scanned());
+        let frames = key.frames();
+        assert_eq!(frames[1], output_from(&logs.peek(), &settings, true));
+        assert_ne!(frames[1], empty);
+    }
+
+    /// Once scanned, an event reads the (tailed) transcripts directly:
+    /// a line written since the scan is drawn.
+    #[tokio::test]
+    async fn an_event_after_the_first_scan_draws_fresh_entries() {
+        let root = one_transcript();
+        let logs = Arc::new(LogUsageSource::new(root.path().to_path_buf()));
+        let before = logs.entries().await;
+        let line = std::fs::read_to_string(root.path().join("project/session.jsonl")).unwrap();
+        let newer = line.replace("\"input_tokens\":2000", "\"input_tokens\":9000");
+        std::fs::write(
+            root.path().join("project/later.jsonl"),
+            format!("{newer}\n"),
+        )
+        .unwrap();
+        let action = HeatmapAction::new(Arc::clone(&logs));
+        let settings = HeatmapSettings::default();
+        let key = FakeSurface::new("a", true);
+        action
+            .render_with(&key, &settings, |_: String| {
+                std::future::ready(None::<FakeSurface>)
+            })
+            .await
+            .unwrap();
+        let after = logs.peek();
+        assert_eq!(after.len(), before.len() + 1);
+        assert_eq!(key.frames(), vec![output_from(&after, &settings, true)]);
+        assert_ne!(key.frames()[0], output_from(&before, &settings, true));
+        assert!(!action.first_scan_spawned.load(Ordering::SeqCst));
+    }
+
+    /// A heatmap removed before the first scan finishes isn't redrawn.
+    #[tokio::test]
+    async fn the_first_scan_does_not_redraw_a_removed_heatmap() {
+        let root = one_transcript();
+        let logs = Arc::new(LogUsageSource::new(root.path().to_path_buf()));
+        let action = HeatmapAction::new(Arc::clone(&logs));
+        let settings = HeatmapSettings::default();
+        let key = FakeSurface::new("a", true);
+        action.track("a", &settings);
+        let lookup = {
+            let key = key.clone();
+            move |_: String| std::future::ready(Some(key.clone()))
+        };
+        action.render_with(&key, &settings, lookup).await.unwrap();
+        // Removed before the spawned scan gets to run (one-thread runtime).
+        action.presses.forget("a");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !logs.scanned() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(key.frames().len(), 1, "a removed key was redrawn");
+    }
 
     #[test]
     fn action_uuid_matches_the_shipped_manifest() {
