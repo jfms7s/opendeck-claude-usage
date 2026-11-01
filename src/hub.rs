@@ -157,11 +157,11 @@ impl UsageHub {
         let hub = Arc::clone(self);
         let mut read = tokio::spawn(async move { hub.read_and_record().await });
         let snapshot = match tokio::time::timeout(REFRESH_DEADLINE, &mut read).await {
-            Ok(joined) => Self::read_outcome(joined),
+            Ok(joined) => self.read_outcome(joined),
             Err(_) => {
                 let hub = Arc::clone(self);
                 tokio::spawn(async move {
-                    let snapshot = Self::read_outcome(read.await);
+                    let snapshot = hub.read_outcome(read.await);
                     hub.render_tracked(snapshot.as_ref(), lookup).await;
                 });
                 self.source.peek().and_then(Result::ok)
@@ -171,7 +171,9 @@ impl UsageHub {
     }
 
     /// The snapshot a spawned read produced, logging why there is none.
+    /// A read that panicked falls back to the cache.
     fn read_outcome(
+        &self,
         joined: Result<Result<UsageSnapshot, UsageSourceError>, tokio::task::JoinError>,
     ) -> Option<UsageSnapshot> {
         match joined {
@@ -182,7 +184,7 @@ impl UsageHub {
             }
             Err(e) => {
                 log::error!("usage refresh task failed: {e}");
-                None
+                self.source.peek().and_then(Result::ok)
             }
         }
     }

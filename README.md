@@ -165,7 +165,8 @@ green/yellow/red at 50/80% to copper with Watch 50, Risk 75 and Critical
    immediate refresh (this doesn't reset the schedule - the next
    automatic refresh still happens on time). A Session tile's tap uses the
    last fetched session reset time; when none has been fetched yet, it
-   shows a rolling 5-hour window and fetches the reset time right after.
+   shows a rolling 5-hour window and refreshes again right after with the
+   fetched reset time (that one refresh does restart the schedule).
 
 ## Using Peak Clock
 
