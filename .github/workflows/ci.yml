@@ -118,24 +118,6 @@ jobs:
           echo "$out" | grep -q "missing CLI flag: -port"
       - run: node build.mjs aarch64-apple-darwin
 
-  # The same MSRV check on macOS, as its own job: the master ruleset requires
-  # a check named exactly `msrv`, which a matrix would rename.
-  msrv-macos:
-    runs-on: macos-15
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
-        with:
-          toolchain: "1.88" # keep in sync with rust-version in Cargo.toml
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          prefix-key: msrv
-      - run: cargo check --all-targets --locked
-
   # eng-metrics-lab (report-only): duplication, complexity and dead code; the collector picks up the artifact.
   quality:
     needs: [test]

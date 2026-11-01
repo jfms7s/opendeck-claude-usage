@@ -67,4 +67,4 @@ Ruled 2026-11-01 from the 2026-10-07 feature-fit review (vault: `specs/2026-11-0
 - **Session + Weekly**: `combo.rs`, `combo_action.rs`, `styles/combo.rs`. No new layouts or content.
 - **Burn Rate metrics Pace and Even burn** (`burn.rs`): no new metrics.
 - **Usage Heatmap Cost measure and colour picker** (`heatmap.rs`), **Peak Clock days** (`peak.rs`): no new options.
-- **macOS**: the Keychain reader and macOS branches in `source/api.rs`, the manifest's macOS entries, the `macos`/`msrv-macos` CI jobs and `build-macos`. No more Mac work until the README's Mac checklist has been run once on a real Mac.
+- **macOS**: the Keychain reader and macOS branches in `source/api.rs`, the manifest's macOS entries, the `macos` CI job and `build-macos`. No more Mac work until the README's Mac checklist has been run once on a real Mac.
