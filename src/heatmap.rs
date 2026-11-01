@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::level::{DEFAULT_NORMAL, is_hex_color};
-use crate::metric::{MetricKind, format_cost, format_tokens};
+use crate::metric::{MetricKind, ModelScope, format_cost, format_tokens};
 use crate::pricing::{CostTotal, cost_for_entry};
 use crate::settings::lenient;
 use crate::source::logs::LogEntry;
@@ -30,6 +30,9 @@ pub struct HeatmapSettings {
     pub view: HeatmapView,
     #[serde(default = "default_color", deserialize_with = "hex_color")]
     pub color: String,
+    /// Which models count (all, or one family).
+    #[serde(default, deserialize_with = "lenient")]
+    pub scope: ModelScope,
 }
 
 fn default_color() -> String {
@@ -51,6 +54,7 @@ impl Default for HeatmapSettings {
             metric: MetricKind::default(),
             view: HeatmapView::default(),
             color: DEFAULT_NORMAL.to_string(),
+            scope: ModelScope::default(),
         }
     }
 }
@@ -179,6 +183,20 @@ pub fn build_heatmap<Tz: TimeZone>(
             color: settings.color.clone(),
         };
     }
+    // Scoped after the "no data" check: a family with no usage is a real
+    // zero.
+    let scoped: Vec<LogEntry>;
+    let entries = match settings.scope {
+        ModelScope::All => entries,
+        scope => {
+            scoped = entries
+                .iter()
+                .filter(|e| scope.matches(e))
+                .cloned()
+                .collect();
+            &scoped
+        }
+    };
     let totals = daily_totals(entries, settings.metric, now.clone(), days);
     let max = totals.iter().copied().fold(0.0, f64::max);
     let cells = totals
@@ -196,7 +214,14 @@ pub fn build_heatmap<Tz: TimeZone>(
         }
     };
     HeatmapDisplay {
-        caption: format!("{} \u{b7} {total_text}", settings.view.caption()),
+        // A scope replaces the view's name; the grid's shape shows the view.
+        caption: format!(
+            "{} \u{b7} {total_text}",
+            settings
+                .scope
+                .family()
+                .map_or_else(|| settings.view.caption().to_string(), str::to_uppercase)
+        ),
         cells,
         weekday_letters,
         color: settings.color.clone(),
@@ -335,6 +360,24 @@ mod tests {
         ];
         let t = hourly_totals(&entries, MetricKind::Tokens, now, 28);
         assert_eq!(t[12], 3.0);
+    }
+
+    #[test]
+    fn a_scoped_heatmap_counts_its_family_and_names_it() {
+        let mut opus = entry("2026-09-30T08:00:00Z", 100);
+        opus.model = "claude-opus-5".into();
+        let entries = [opus, entry("2026-09-30T08:00:00Z", 7)];
+        let scoped = |scope| HeatmapSettings {
+            scope,
+            ..HeatmapSettings::default()
+        };
+        let d = build_heatmap(&entries, &scoped(ModelScope::Opus), now());
+        assert_eq!(d.caption, "OPUS \u{b7} 100");
+        let d = build_heatmap(&entries, &scoped(ModelScope::Haiku), now());
+        assert_eq!(d.caption, "HAIKU \u{b7} 0");
+        assert!(d.cells.iter().all(Option::is_none));
+        let d = build_heatmap(&entries, &scoped(ModelScope::All), now());
+        assert_eq!(d.caption, "7 DAYS \u{b7} 107");
     }
 
     /// The spring change: the 23-hour Sunday is still one cell.
@@ -494,11 +537,12 @@ mod tests {
             metric: MetricKind::Cost,
             view: HeatmapView::FourWeeks,
             color: "#123abc".to_string(),
+            scope: ModelScope::Sonnet,
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(
             v,
-            json!({"metric": "cost", "view": "fourWeeks", "color": "#123abc"})
+            json!({"metric": "cost", "view": "fourWeeks", "color": "#123abc", "scope": "sonnet"})
         );
         assert_eq!(serde_json::from_value::<HeatmapSettings>(v).unwrap(), s);
     }

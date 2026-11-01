@@ -60,7 +60,7 @@ test("heatmap: a bad stored color shows the default, the view passes through", a
 	assert.equal(page.el("color").value, "#d97757");
 	page.change("metric", "cost");
 	page.runTimers();
-	assert.deepEqual(page.saves(), [{ metric: "cost", color: "#d97757", view: "fourWeeks" }]);
+	assert.deepEqual(page.saves(), [{ metric: "cost", scope: "all", color: "#d97757", view: "fourWeeks" }]);
 });
 
 test("metric tile: unknown metric and range fall back, refresh is clamped", async () => {
@@ -70,7 +70,7 @@ test("metric tile: unknown metric and range fall back, refresh is clamped", asyn
 	assert.equal(page.el("range").value, "today");
 	assert.equal(page.el("refresh_seconds").value, "60");
 	page.change("refresh_seconds", "1");
-	assert.deepEqual(page.saves(), [{ metric: "tokens", range: "today", refresh_seconds: 5 }]);
+	assert.deepEqual(page.saves(), [{ metric: "tokens", range: "today", scope: "all", refresh_seconds: 5 }]);
 });
 
 test("metric tile: no Source picker; a saved Console tile opens on its range and saves no source", async () => {
@@ -80,7 +80,25 @@ test("metric tile: no Source picker; a saved Console tile opens on its range and
 	assert.equal(page.el("metric").value, "cost");
 	assert.equal(page.el("range").value, "session");
 	page.change("refresh_seconds", "90");
-	assert.deepEqual(page.saves(), [{ metric: "cost", range: "session", refresh_seconds: 90 }]);
+	assert.deepEqual(page.saves(), [{ metric: "cost", range: "session", scope: "all", refresh_seconds: 90 }]);
+});
+
+test("scope: a saved family is shown and kept; an unknown one falls back to All", async () => {
+	for (const file of ["metrictile.html", "heatmap.html"]) {
+		const kept = loadPage(file);
+		await kept.open({ metric: "tokens", scope: "opus" });
+		assert.equal(kept.el("scope").value, "opus", file);
+		kept.change("metric", "cost");
+		kept.runTimers();
+		assert.equal(kept.saves()[0].scope, "opus", file);
+
+		const unknown = loadPage(file);
+		await unknown.open({ scope: "project:foo" });
+		assert.equal(unknown.el("scope").value, "all", file);
+		unknown.change("scope", "haiku");
+		unknown.runTimers();
+		assert.equal(unknown.saves()[0].scope, "haiku", file);
+	}
 });
 
 test("peak clock: an empty day list stays empty; bad times fall back", async () => {

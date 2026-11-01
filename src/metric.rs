@@ -26,6 +26,37 @@ pub enum RangeKind {
     Session,
 }
 
+/// Which models a Metric Tile or Heatmap counts: every model, or one
+/// family, matched as a case-insensitive substring of the model id (so a
+/// saved key keeps working when a new version ships). A model in no family
+/// counts only under `All`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelScope {
+    #[default]
+    All,
+    Opus,
+    Sonnet,
+    Haiku,
+}
+
+impl ModelScope {
+    /// The family's name as drawn on a key, `None` for `All`.
+    pub fn family(self) -> Option<&'static str> {
+        match self {
+            ModelScope::All => None,
+            ModelScope::Opus => Some("opus"),
+            ModelScope::Sonnet => Some("sonnet"),
+            ModelScope::Haiku => Some("haiku"),
+        }
+    }
+
+    pub fn matches(self, entry: &LogEntry) -> bool {
+        self.family()
+            .is_none_or(|family| entry.model.to_ascii_lowercase().contains(family))
+    }
+}
+
 pub struct MetricDisplay {
     pub label: &'static str,
     pub value_text: String,
@@ -112,6 +143,7 @@ pub fn format_cost_total(total: CostTotal) -> String {
 /// entries at all were found anywhere" warrants `error_display()`
 /// instead (see `metric_action.rs`), since a legitimate zero-usage range
 /// is a different situation from no log data existing at all.
+#[cfg(test)]
 pub fn build_metric_display<Tz: TimeZone>(
     entries: &[LogEntry],
     metric: MetricKind,
@@ -119,17 +151,34 @@ pub fn build_metric_display<Tz: TimeZone>(
     now: DateTime<Tz>,
     session_resets_at: Option<DateTime<Utc>>,
 ) -> MetricDisplay {
+    build_scoped_metric_display(
+        entries,
+        metric,
+        range,
+        ModelScope::All,
+        now,
+        session_resets_at,
+    )
+}
+
+/// `build_metric_display` counting only `scope`'s models; the subtitle
+/// names a family scope (`today · opus`). A scope with no usage in range
+/// is a real zero, not "no data".
+pub fn build_scoped_metric_display<Tz: TimeZone>(
+    entries: &[LogEntry],
+    metric: MetricKind,
+    range: RangeKind,
+    scope: ModelScope,
+    now: DateTime<Tz>,
+    session_resets_at: Option<DateTime<Utc>>,
+) -> MetricDisplay {
     let (start, end) = range_bounds(range, now, session_resets_at);
     let in_range: Vec<&LogEntry> = entries
         .iter()
-        .filter(|e| e.timestamp >= start && e.timestamp <= end)
+        .filter(|e| e.timestamp >= start && e.timestamp <= end && scope.matches(e))
         .collect();
 
-    let subtitle = match range {
-        RangeKind::Today => "today",
-        RangeKind::SevenDay => "7 days",
-        RangeKind::Session => "session",
-    };
+    let subtitle = subtitle(range, scope);
 
     match metric {
         MetricKind::Tokens => {
@@ -147,6 +196,27 @@ pub fn build_metric_display<Tz: TimeZone>(
             subtitle,
             accent_color: COST_ACCENT,
         },
+    }
+}
+
+/// The range, plus the family when scoped - static, so `MetricDisplay`
+/// stays cheap.
+fn subtitle(range: RangeKind, scope: ModelScope) -> &'static str {
+    use ModelScope::*;
+    use RangeKind::*;
+    match (range, scope) {
+        (Today, All) => "today",
+        (Today, Opus) => "today \u{b7} opus",
+        (Today, Sonnet) => "today \u{b7} sonnet",
+        (Today, Haiku) => "today \u{b7} haiku",
+        (SevenDay, All) => "7 days",
+        (SevenDay, Opus) => "7 days \u{b7} opus",
+        (SevenDay, Sonnet) => "7 days \u{b7} sonnet",
+        (SevenDay, Haiku) => "7 days \u{b7} haiku",
+        (Session, All) => "session",
+        (Session, Opus) => "session \u{b7} opus",
+        (Session, Sonnet) => "session \u{b7} sonnet",
+        (Session, Haiku) => "session \u{b7} haiku",
     }
 }
 
@@ -320,5 +390,76 @@ mod tests {
         let display = error_display();
         assert_eq!(display.subtitle, "no data");
         assert_eq!(display.accent_color, DISABLED_COLOR);
+    }
+
+    fn model_entry(model: &str, tokens: u64) -> LogEntry {
+        LogEntry {
+            timestamp: dt(10, 0),
+            model: model.into(),
+            input_tokens: tokens,
+            ..LogEntry::default()
+        }
+    }
+
+    #[test]
+    fn a_model_scope_matches_its_family_only() {
+        let opus = model_entry("claude-opus-5", 1);
+        let sonnet = model_entry("Claude-Sonnet-5-5", 1);
+        let other = model_entry("gpt-free", 1);
+        for e in [&opus, &sonnet, &other] {
+            assert!(ModelScope::All.matches(e));
+        }
+        assert!(ModelScope::Opus.matches(&opus));
+        assert!(!ModelScope::Opus.matches(&sonnet));
+        assert!(ModelScope::Sonnet.matches(&sonnet), "case-insensitive");
+        assert!(!ModelScope::Haiku.matches(&other));
+    }
+
+    #[test]
+    fn a_scoped_display_counts_its_family_and_names_it() {
+        let entries = [
+            model_entry("claude-opus-5", 100),
+            model_entry("claude-sonnet-5", 7),
+        ];
+        let now = dt(12, 0);
+        let opus = build_scoped_metric_display(
+            &entries,
+            MetricKind::Tokens,
+            RangeKind::Today,
+            ModelScope::Opus,
+            now,
+            None,
+        );
+        assert_eq!(opus.value_text, "100");
+        assert_eq!(opus.subtitle, "today \u{b7} opus");
+        // No Haiku usage: a real zero, not "no data".
+        let haiku = build_scoped_metric_display(
+            &entries,
+            MetricKind::Tokens,
+            RangeKind::SevenDay,
+            ModelScope::Haiku,
+            now,
+            None,
+        );
+        assert_eq!(haiku.value_text, "0");
+        assert_eq!(haiku.subtitle, "7 days \u{b7} haiku");
+        assert_eq!(haiku.label, "Tokens");
+    }
+
+    #[test]
+    fn a_garbage_or_missing_scope_is_all() {
+        #[derive(serde::Deserialize)]
+        struct W {
+            #[serde(default, deserialize_with = "crate::settings::lenient")]
+            scope: ModelScope,
+        }
+        for json in [r#"{}"#, r#"{"scope":"gpt"}"#, r#"{"scope":3}"#] {
+            assert_eq!(
+                serde_json::from_str::<W>(json).unwrap().scope,
+                ModelScope::All
+            );
+        }
+        let w: W = serde_json::from_str(r#"{"scope":"opus"}"#).unwrap();
+        assert_eq!(w.scope, ModelScope::Opus);
     }
 }

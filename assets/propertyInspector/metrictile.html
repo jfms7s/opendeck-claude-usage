@@ -25,6 +25,15 @@
 						<option value="session">Session (5 hour)</option>
 					</select>
 				</div>
+				<div class="field">
+					<label for="scope">Models</label>
+					<select id="scope">
+						<option value="all">All models</option>
+						<option value="opus">Opus</option>
+						<option value="sonnet">Sonnet</option>
+						<option value="haiku">Haiku</option>
+					</select>
+				</div>
 			</div>
 		</section>
 
@@ -44,17 +53,19 @@
 			apply(settings) {
 				selectKnown(document.getElementById("metric"), settings.metric, "tokens");
 				selectKnown(document.getElementById("range"), settings.range, "today");
+				selectKnown(document.getElementById("scope"), settings.scope, "all");
 				const seconds = Number(settings.refresh_seconds);
 				document.getElementById("refresh_seconds").value = Number.isInteger(seconds) && seconds > 0 ? seconds : 60;
 			},
 			read: () => ({
 				metric: document.getElementById("metric").value,
 				range: document.getElementById("range").value,
+				scope: document.getElementById("scope").value,
 				refresh_seconds: Math.min(3600, Math.max(5, parseInt(document.getElementById("refresh_seconds").value, 10) || 60)),
 			}),
 		});
 
-		for (const id of ["metric", "range", "refresh_seconds"]) {
+		for (const id of ["metric", "range", "scope", "refresh_seconds"]) {
 			document.getElementById(id).addEventListener("change", pi.changed);
 		}
 	</script>
