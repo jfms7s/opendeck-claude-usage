@@ -1,25 +1,25 @@
 # OpenDeck Claude Usage
 
-An [OpenDeck](https://github.com/nekename/OpenDeck) plugin with seven actions
-- **Usage Gauge**, **Session + Weekly**, **Burn Rate**, **Usage Heatmap**,
-**Usage Sparkline**, **Peak Clock**, and **Metric Tile**. Usage Gauge is
-assignable to a Stream Deck dial or a keypad tile and shows percent used and
-time until reset for one of Claude's usage windows - **Session** (5 hour),
+An [OpenDeck](https://github.com/nekename/OpenDeck) plugin that shows your
+Claude usage on Stream Deck keys, with seven actions - **Usage Gauge**,
+**Session + Weekly**, **Burn Rate**, **Usage Heatmap**, **Usage Sparkline**,
+**Peak Clock**, and **Metric Tile**. Usage Gauge shows percent used and time
+until reset for one of Claude's usage windows - **Session** (5 hour),
 **Weekly** (7 day), or **Monthly** (pay-as-you-go extra usage spend, if
 enabled on your account).
 
-On a dial, the touch strip shows a live bar, percent, and detail text. On a
-keypad tile (no touch strip), the same data renders as a generated icon on
-a dark card: a speedometer-style gauge - a four-zone semicircle drawn from the key's own
-Watch/Risk/Critical marks and colors (see below) - with a light needle pointing at the current percent - above the percent and a
-compact countdown (e.g. `3h 54m`, `6d 10h`). The text is drawn into the
-icon itself rather than the key's native title, so it looks the same
-whatever title font/size/alignment the key is set to, and needs no custom
-background color to stay readable.
+On a key, the data renders as a generated icon on a dark card: a
+speedometer-style gauge - a four-zone semicircle drawn from the key's own
+Watch/Risk/Critical marks and colors (see below) - with a light needle
+pointing at the current percent - above the percent and a compact countdown
+(e.g. `3h 54m`, `6d 10h`). The text is drawn into the icon itself rather than
+the key's native title, so it looks the same whatever title font/size/alignment
+the key is set to, and needs no custom background color to stay readable.
 
-Built for a Stream Deck XL+'s 6 dials, 1200x100 touch strip, and 32 keys -
-assign up to three dials or tiles (one per window) for an always-visible
-usage readout.
+Built for Stream Deck keys: put one key per window (or a Session + Weekly key)
+anywhere on the deck for an always-visible usage readout. Most actions also
+work on a dial (Stream Deck + / + XL), where the touch strip shows a live bar,
+percent, and detail text; Metric Tile and Peak Clock are key-only.
 
 ## Where the data comes from
 
@@ -262,17 +262,18 @@ before a downgrade) is left untouched rather than overwritten.
 
 The unit tests (Rust) and the settings-page tests (`node --test tests/pi/*.test.mjs`)
 cover the logic; these are the things only a live OpenDeck + Stream Deck
-XL+ session can show. Run them before cutting a release and record the
-version you checked them on:
+session can show, on keys only (the dial strips are frozen and no longer
+smoke-tested - see `CLAUDE.md`'s Scope section). Run them before cutting a
+release and record the version you checked them on:
 
 | Check | Last verified |
 |---|---|
-| Every action's keypad tile and dial strip is readable (text not clipped or overlapping, colors right) for each style/view/series. | not recorded |
-| Keys and dials redraw every minute without interaction, and a key that appears shows numbers straight away. | not recorded |
+| Every action's key is readable (text not clipped or overlapping, colors right) for each style/view/series it offers. | not recorded |
+| Keys redraw every minute without interaction, and a key that appears shows numbers straight away. | not recorded |
 | A short press on Usage Gauge, Session + Weekly, Usage Heatmap or Usage Sparkline switches what it shows, and the choice survives an OpenDeck restart; two fast presses advance twice. | not recorded |
-| Holding a key for half a second (or pressing a dial on Gauge/Burn Rate/Combo) refreshes without switching. | not recorded |
+| Holding a key for half a second refreshes without switching. | not recorded |
 | Editing a settings page while a key's style/layout/view/series was changed by a press doesn't undo the press. | not recorded |
-| Removing a key or dial causes no error in the plugin log on the next minute's redraw. | not recorded |
+| Removing a key causes no error in the plugin log on the next minute's redraw. | not recorded |
 | Usage keeps updating with only the Claude desktop app open (no CLI session, no editor extension). | not recorded |
 | Metric Tile and Usage Heatmap totals match `ccusage` (or another transcript tool) for the same day. | not recorded |
 | `~/.local/state/opendeck-claude-usage/history.jsonl` is created owner-only, only grows when usage changes, and survives a restart. | not recorded |
