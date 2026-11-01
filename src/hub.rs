@@ -129,28 +129,62 @@ impl UsageHub {
     /// openaction handles events one at a time, so the press waits at most
     /// `REFRESH_DEADLINE` for the read; past that it draws from the cache
     /// like `render_cached`. The read runs in its own task and is never
-    /// cancelled (its rate-limit cost is already paid): it still updates
-    /// the cache and history, and the next poll draws its result.
+    /// cancelled (its rate-limit cost is already paid): when it lands,
+    /// every tracked instance is redrawn from it.
     pub async fn refresh_one<S: Surface + ?Sized>(
         self: &Arc<Self>,
         surface: &S,
         view: &View,
     ) -> OpenActionResult<()> {
+        self.refresh_one_with(surface, view, openaction::get_instance)
+            .await
+    }
+
+    /// `refresh_one`, with the instance lookup used for the late redraw
+    /// passed in (tests pass a fake).
+    async fn refresh_one_with<S, T, L, LF>(
+        self: &Arc<Self>,
+        surface: &S,
+        view: &View,
+        lookup: L,
+    ) -> OpenActionResult<()>
+    where
+        S: Surface + ?Sized,
+        T: Surface + 'static,
+        L: FnMut(String) -> LF + Send + 'static,
+        LF: Future<Output = Option<T>> + Send,
+    {
         let hub = Arc::clone(self);
-        let read = tokio::spawn(async move { hub.read_and_record().await });
-        let snapshot = match tokio::time::timeout(REFRESH_DEADLINE, read).await {
-            Ok(Ok(Ok(snapshot))) => Some(snapshot),
-            Ok(Ok(Err(e))) => {
+        let mut read = tokio::spawn(async move { hub.read_and_record().await });
+        let snapshot = match tokio::time::timeout(REFRESH_DEADLINE, &mut read).await {
+            Ok(joined) => Self::read_outcome(joined),
+            Err(_) => {
+                let hub = Arc::clone(self);
+                tokio::spawn(async move {
+                    let snapshot = Self::read_outcome(read.await);
+                    hub.render_tracked(snapshot.as_ref(), lookup).await;
+                });
+                self.source.peek().and_then(Result::ok)
+            }
+        };
+        self.push(surface, view, snapshot.as_ref()).await
+    }
+
+    /// The snapshot a spawned read produced, logging why there is none.
+    fn read_outcome(
+        joined: Result<Result<UsageSnapshot, UsageSourceError>, tokio::task::JoinError>,
+    ) -> Option<UsageSnapshot> {
+        match joined {
+            Ok(Ok(snapshot)) => Some(snapshot),
+            Ok(Err(e)) => {
                 log::warn!("usage source read failed: {e}");
                 None
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 log::error!("usage refresh task failed: {e}");
-                self.source.peek().and_then(Result::ok)
+                None
             }
-            Err(_) => self.source.peek().and_then(Result::ok),
-        };
-        self.push(surface, view, snapshot.as_ref()).await
+        }
     }
 
     async fn push<S: Surface + ?Sized>(
@@ -556,7 +590,7 @@ mod tests {
     }
 
     /// Takes 5 s (virtual time) to answer; counts reads started and
-    /// finished.
+    /// finished, and reports 10% per read started.
     #[derive(Clone, Default)]
     struct Slow {
         started: Arc<AtomicUsize>,
@@ -566,10 +600,12 @@ mod tests {
     #[async_trait]
     impl UsageSource for Slow {
         async fn read(&self) -> Result<UsageSnapshot, UsageSourceError> {
-            self.started.fetch_add(1, Ordering::SeqCst);
+            let n = self.started.fetch_add(1, Ordering::SeqCst) + 1;
             tokio::time::sleep(Duration::from_secs(5)).await;
             self.finished.fetch_add(1, Ordering::SeqCst);
-            Ok(snapshot())
+            let mut snapshot = snapshot();
+            snapshot.session.percent = 10.0 * n as f64;
+            Ok(snapshot)
         }
     }
 
@@ -583,19 +619,42 @@ mod tests {
         hub.read_and_record().await.unwrap();
         tokio::time::advance(Duration::from_secs(120)).await; // a fetch is due
 
+        hub.track("ctx1", gauge());
         let dial = FakeSurface::dial("ctx1");
-        let pressed = tokio::time::Instant::now();
-        hub.refresh_one(&dial, &gauge()).await.unwrap();
-        assert_eq!(pressed.elapsed(), REFRESH_DEADLINE);
-        let [Output::Feedback(frame)] = &dial.frames()[..] else {
-            panic!("expected one frame, got {:?}", dial.frames());
+        let lookup = {
+            let dial = dial.clone();
+            move |_: String| std::future::ready(Some(dial.clone()))
         };
-        assert_eq!(frame["percent"], "33%");
+        let pressed = tokio::time::Instant::now();
+        hub.refresh_one_with(&dial, &gauge(), lookup.clone())
+            .await
+            .unwrap();
+        assert_eq!(pressed.elapsed(), REFRESH_DEADLINE);
+        let percent = |frame: &Output| match frame {
+            Output::Feedback(f) => f["percent"].clone(),
+            other => panic!("expected feedback, got {other:?}"),
+        };
+        assert_eq!(percent(&dial.frames()[0]), "10%", "not the cached frame");
+        assert_eq!(source.started.load(Ordering::SeqCst), 2);
+
+        // More presses while that fetch is in flight share it.
+        for _ in 0..3 {
+            hub.refresh_one_with(&dial, &gauge(), lookup.clone())
+                .await
+                .unwrap();
+        }
         assert_eq!(source.started.load(Ordering::SeqCst), 2);
 
         tokio::time::sleep(Duration::from_secs(5)).await;
         assert_eq!(source.finished.load(Ordering::SeqCst), 2, "fetch cancelled");
         assert_eq!(source.started.load(Ordering::SeqCst), 2);
+        // The late read was recorded and drawn.
+        assert_eq!(hub.history.readings().len(), 2);
+        assert_eq!(
+            percent(dial.frames().last().unwrap()),
+            "20%",
+            "the late read was not drawn"
+        );
     }
 
     /// A read that answers within the deadline is drawn at once.
