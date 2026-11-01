@@ -64,7 +64,8 @@ const USAGE_POLICY: CachePolicy = CachePolicy {
     stale_after: Duration::from_secs(15 * 60),
 };
 
-/// Every action, wired to the plugin's shared state.
+/// Every action, wired to the plugin's shared state. `main` must
+/// `register_action` every action field (and `uuids` list it).
 struct Actions {
     hub: Arc<UsageHub>,
     gauge: UsageGaugeAction,
@@ -74,6 +75,37 @@ struct Actions {
     clock: PeakClockAction,
     metric_tile: MetricTileAction,
     heatmap: HeatmapAction,
+}
+
+impl Actions {
+    /// Every action's UUID. Destructured without `..`, so a new field
+    /// doesn't compile until it is listed here - and the manifest test
+    /// below then checks it ships.
+    #[cfg(test)]
+    fn uuids(&self) -> Vec<&'static str> {
+        fn uuid<A: openaction::Action>(_: &A) -> &'static str {
+            A::UUID
+        }
+        let Actions {
+            hub: _,
+            gauge,
+            burn_rate,
+            combo,
+            sparkline,
+            clock,
+            metric_tile,
+            heatmap,
+        } = self;
+        vec![
+            uuid(gauge),
+            uuid(burn_rate),
+            uuid(combo),
+            uuid(sparkline),
+            uuid(clock),
+            uuid(metric_tile),
+            uuid(heatmap),
+        ]
+    }
 }
 
 /// Builds every action around one throttled usage cache and one transcript
@@ -218,6 +250,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(api.0.load(Ordering::SeqCst), 1);
+    }
+
+    /// Every wired action is in the manifest, and every manifest action is
+    /// wired - so a missing one can't ship dead with green tests.
+    #[test]
+    fn the_manifest_lists_exactly_the_wired_actions() {
+        let actions = wire(
+            hub::test_support::NeverCalled,
+            HistoryStore::in_memory(),
+            LogUsageSource::new("/nonexistent".into()),
+        );
+        let wired: std::collections::BTreeSet<&str> = actions.uuids().into_iter().collect();
+        let manifest = crate::test_support::manifest();
+        let shipped: std::collections::BTreeSet<&str> = manifest["Actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["UUID"].as_str().unwrap())
+            .collect();
+        assert_eq!(wired, shipped);
+        assert_eq!(wired.len(), actions.uuids().len(), "a UUID is wired twice");
     }
 
     /// Every file the manifest points at ships in `assets/` (icons are named
