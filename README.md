@@ -192,10 +192,9 @@ or the usage you'd reach at reset if you keep burning at the current rate.
 
 A Usage Gauge key can be drawn as a **Speedometer**, **Bar**, **Soft pill**,
 **Open donut**, **Tracked donut**, or **Thin ring**; every style except the
-speedometer shows your Watch/Risk/Critical marks as tick marks. Tick the
-styles you want under **Cycle styles**; a short press moves to the next
-ticked one (you need at least two) and the key remembers its style across
-restarts. Hold the key for half a second to refresh instead. Dials keep the
+speedometer shows your Watch/Risk/Critical marks as tick marks. A short
+press moves to the next style, in that order, and the key remembers its
+style across restarts. Hold the key for half a second to refresh instead. Dials keep the
 touch-strip bar.
 
 ## Using Burn Rate

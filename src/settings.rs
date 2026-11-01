@@ -7,7 +7,7 @@
 //!
 //! - plain fields use `#[serde(default, deserialize_with = "lenient")]`;
 //! - fields that need their own fallback rules (marks that must increase,
-//!   the style cycle list) go through a `*Wire` struct of raw `Value`s
+//!   the gauge style) go through a `*Wire` struct of raw `Value`s
 //!   (`level::ColorSettingsWire`, `gauge_style::StyleSettingsWire`).
 
 use serde::{Deserialize, Deserializer};
@@ -103,7 +103,7 @@ mod tests {
 
         let probe_color = ("colorNormal", json!("#123456"));
         assert_lenient::<UsageGaugeSettings>(
-            &with_colors(&["window", "style", "cycleStyles"]),
+            &with_colors(&["window", "style"]),
             probe_color.clone(),
             |s| s.colors.palette.normal == "#123456",
         );

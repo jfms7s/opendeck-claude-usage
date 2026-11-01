@@ -32,7 +32,7 @@ pub struct UsageGaugeSettings {
     /// color can't make openaction reset `window` too.
     #[serde(flatten)]
     pub colors: ColorSettings,
-    /// `style` + `cycleStyles`, lenient in the same way.
+    /// `style`, lenient in the same way.
     #[serde(flatten)]
     pub styles: StyleSettings,
 }
@@ -74,13 +74,11 @@ impl HubSettings for UsageGaugeSettings {
         })
     }
 
-    /// The next ticked style, or `None` when fewer than two are ticked.
-    /// (A long press refreshes, which is what a tap did before styles
-    /// existed.)
+    /// The next of the six styles. (A long press refreshes, which is what
+    /// a tap did before styles existed.)
     fn next(&self) -> Option<Self> {
-        let next = next_style(self.styles.style, &self.styles.cycle)?;
         let mut updated = self.clone();
-        updated.styles.style = next;
+        updated.styles.style = next_style(self.styles.style);
         Some(updated)
     }
 
@@ -294,7 +292,18 @@ mod tests {
         assert_eq!(s.window, WindowKind::Session);
         assert_eq!(s.colors.palette.normal, "#123456");
         assert_eq!(s.styles.style, GaugeStyle::Bar);
-        assert_eq!(s.styles.cycle, vec![GaugeStyle::Bar]);
+    }
+
+    #[test]
+    fn bad_style_falls_back_alone() {
+        let s: UsageGaugeSettings = serde_json::from_str(
+            r##"{"window":"weekly","colorNormal":"#123456","watch":40,"style":"hologram"}"##,
+        )
+        .unwrap();
+        assert_eq!(s.styles.style, GaugeStyle::Speedometer);
+        assert_eq!(s.window, WindowKind::Weekly);
+        assert_eq!(s.colors.palette.normal, "#123456");
+        assert_eq!(s.colors.marks.watch, 40.0);
     }
 
     #[test]
@@ -309,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn v070_settings_load_as_speedometer_with_all_styles() {
+    fn v070_settings_load_as_speedometer() {
         let s: UsageGaugeSettings = serde_json::from_str(
             r##"{"window":"weekly","watch":40,"risk":60,"critical":80,"colorNormal":"#112233"}"##,
         )
@@ -318,7 +327,6 @@ mod tests {
         assert_eq!(s.colors.marks.watch, 40.0);
         assert_eq!(s.colors.palette.normal, "#112233");
         assert_eq!(s.styles, StyleSettings::default());
-        assert_eq!(s.styles.cycle, ALL_STYLES.to_vec());
     }
 
     #[test]
@@ -334,24 +342,17 @@ mod tests {
         )
         .unwrap();
         let next = s.next().unwrap();
-        assert_eq!(next.styles.style, GaugeStyle::OpenDonut);
+        // A stored pre-0.19 cycle list is ignored: Bar -> Soft pill.
+        assert_eq!(next.styles.style, GaugeStyle::SoftPill);
         assert_eq!(next.window, WindowKind::Weekly);
         assert_eq!(next.colors, s.colors);
-        assert_eq!(next.styles.cycle, s.styles.cycle);
-    }
-
-    #[test]
-    fn next_is_none_with_one_style() {
-        let s: UsageGaugeSettings = serde_json::from_str(r#"{"cycleStyles":["bar"]}"#).unwrap();
-        assert!(s.next().is_none());
     }
 
     #[test]
     fn full_settings_round_trip() {
-        let s: UsageGaugeSettings = serde_json::from_str(
-            r#"{"window":"monthly","critical":95,"style":"softPill","cycleStyles":["softPill","thinRing"]}"#,
-        )
-        .unwrap();
+        let s: UsageGaugeSettings =
+            serde_json::from_str(r#"{"window":"monthly","critical":95,"style":"softPill"}"#)
+                .unwrap();
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["window"], "monthly");
         assert_eq!(v["style"], "softPill");
