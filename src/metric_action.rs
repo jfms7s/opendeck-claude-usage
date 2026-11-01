@@ -161,23 +161,35 @@ impl MetricTileAction {
             .await
     }
 
-    /// Draws one instance for an event (appear, new settings, tap): the
-    /// Session range takes its reset time from the usage cache without
-    /// fetching, since openaction handles events one at a time.
+    /// Draws one instance for an event (appear, new settings, tap) without
+    /// waiting on anything slow, since openaction handles events one at a
+    /// time: the Session range takes its reset time from the usage cache
+    /// without fetching, and until the first transcript scan (seconds, on
+    /// a big `~/.claude/projects`) has completed the tile draws what is
+    /// already scanned (nothing: NO DATA) instead of waiting for it.
     async fn redraw<S: Surface + ?Sized>(
         &self,
         surface: &S,
         settings: &MetricTileSettings,
     ) -> OpenActionResult<()> {
-        let entries = self.log_source.entries().await;
+        let scanned = self.log_source.scanned();
+        let entries = if scanned {
+            // A warm rescan only tails the files.
+            self.log_source.entries().await
+        } else {
+            self.log_source.peek()
+        };
         let drawn = self
             .render(surface, &entries, settings, UsageRead::Cached)
             .await;
-        // Nothing cached yet (or it went stale): the tile drew the rolling
-        // window, so bring its refresh forward - the tick loop does the
-        // read, off the event loop. The cache bounds what that costs.
-        if settings.range == RangeKind::Session && self.usage.peek().and_then(Result::ok).is_none()
-        {
+        // Either half missing (no scan yet, or no usable usage snapshot
+        // for the Session range): bring the tile's refresh forward, so the
+        // tick loop scans and reads off the event loop and redraws it. The
+        // tick scans once for every tile due, and the usage cache bounds
+        // what a read costs.
+        let usage_cold = settings.range == RangeKind::Session
+            && self.usage.peek().and_then(Result::ok).is_none();
+        if !scanned || usage_cold {
             self.due_now(surface.id());
         }
         drawn
@@ -605,6 +617,7 @@ mod tests {
     async fn an_event_draws_a_session_tile_without_fetching_usage() {
         let root = one_transcript();
         let logs = Arc::new(LogUsageSource::new(root.path().to_path_buf()));
+        logs.entries().await; // the first scan is done
         let action = MetricTileAction::new(Arc::clone(&logs), shared(Hanging));
         action.track("a", session());
         let key = FakeSurface::new("a", true);
@@ -625,6 +638,7 @@ mod tests {
         let resets_at = usage.peek().unwrap().unwrap().session.resets_at;
         let root = one_transcript();
         let logs = Arc::new(LogUsageSource::new(root.path().to_path_buf()));
+        logs.entries().await; // the first scan is done
         let action = MetricTileAction::new(Arc::clone(&logs), usage);
         let key = FakeSurface::new("a", true);
         action.redraw(&key, &session()).await.unwrap();
@@ -647,10 +661,9 @@ mod tests {
         let usage = shared(Counting::default());
         usage.read().await.unwrap();
         let root = one_transcript();
-        let action = MetricTileAction::new(
-            Arc::new(LogUsageSource::new(root.path().to_path_buf())),
-            usage,
-        );
+        let logs = Arc::new(LogUsageSource::new(root.path().to_path_buf()));
+        logs.entries().await; // the first scan is done
+        let action = MetricTileAction::new(logs, usage);
         action.track("a", session());
         let due = action.registry.get("a").unwrap().next_due;
         action
@@ -658,6 +671,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(action.registry.get("a").unwrap().next_due, due);
+    }
+
+    /// Before the first transcript scan an event draws at once, without
+    /// scanning, and makes the tile due; the tick loop then scans and
+    /// draws the data.
+    #[tokio::test(start_paused = true)]
+    async fn an_event_before_the_first_scan_draws_at_once_and_the_tick_fills_it_in() {
+        let root = one_transcript();
+        let logs = Arc::new(LogUsageSource::new(root.path().to_path_buf()));
+        let action = MetricTileAction::new(Arc::clone(&logs), shared(Counting::default()));
+        let today = MetricTileSettings::default();
+        action.track("a", today.clone());
+        let key = FakeSurface::new("a", true);
+        action.redraw(&key, &today).await.unwrap();
+        assert!(!logs.scanned(), "an event waited on the first scan");
+        assert_eq!(
+            key.frames(),
+            vec![Output::Image(build_metric_icon(&error_display()))]
+        );
+        assert!(action.registry.get("a").unwrap().next_due <= Instant::now());
+
+        action
+            .tick_once(|_| std::future::ready(Some(key.clone())))
+            .await;
+        assert!(logs.scanned());
+        let frames = key.frames();
+        assert_eq!(frames.len(), 2, "the tick did not redraw: {frames:?}");
+        let entries = logs.peek();
+        assert!(!entries.is_empty());
+        assert_ne!(frames[1], frames[0]);
+        // The tick reschedules as usual.
+        assert!(action.registry.get("a").unwrap().next_due > Instant::now());
     }
 
     #[test]

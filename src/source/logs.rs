@@ -25,7 +25,7 @@ use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
@@ -253,6 +253,10 @@ impl Store {
 pub struct LogUsageSource {
     projects_dir: PathBuf,
     store: Arc<Mutex<Store>>,
+    /// The entries as of the last completed scan; `None` until one has
+    /// completed. Its own lock, held only to copy the `Arc`, so `peek`
+    /// never waits on a scan that holds `store`.
+    latest: Arc<Mutex<Option<Arc<Vec<LogEntry>>>>>,
 }
 
 /// `projects/<project>/<session>/subagents/<agent>.jsonl` is the deepest
@@ -264,7 +268,26 @@ impl LogUsageSource {
         Self {
             projects_dir,
             store: Arc::new(Mutex::new(Store::default())),
+            latest: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Whether a scan has completed, so `entries()` only tails files
+    /// (milliseconds) instead of reading every transcript from the start.
+    pub fn scanned(&self) -> bool {
+        self.latest_guard().is_some()
+    }
+
+    /// The entries as of the last completed scan (empty before the first),
+    /// without scanning or waiting on a scan.
+    pub fn peek(&self) -> Arc<Vec<LogEntry>> {
+        self.latest_guard().clone().unwrap_or_default()
+    }
+
+    fn latest_guard(&self) -> MutexGuard<'_, Option<Arc<Vec<LogEntry>>>> {
+        // Only ever holds a finished `Arc`, so a poisoned lock is still
+        // consistent.
+        self.latest.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// `~/.claude/projects` - where Claude Code writes its transcripts, one
@@ -281,7 +304,9 @@ impl LogUsageSource {
     pub async fn entries(&self) -> Arc<Vec<LogEntry>> {
         let projects_dir = self.projects_dir.clone();
         let store = Arc::clone(&self.store);
-        match tokio::task::spawn_blocking(move || Self::scan(&projects_dir, &store)).await {
+        let latest = Arc::clone(&self.latest);
+        let scan = move || Self::scan(&projects_dir, &store, &latest);
+        match tokio::task::spawn_blocking(scan).await {
             Ok(entries) => entries,
             Err(e) => {
                 log::error!("scanning Claude Code transcripts failed: {e}");
@@ -334,7 +359,11 @@ impl LogUsageSource {
         }
     }
 
-    fn scan(projects_dir: &Path, store: &Mutex<Store>) -> Arc<Vec<LogEntry>> {
+    fn scan(
+        projects_dir: &Path,
+        store: &Mutex<Store>,
+        latest: &Mutex<Option<Arc<Vec<LogEntry>>>>,
+    ) -> Arc<Vec<LogEntry>> {
         let files = Self::list_files(projects_dir);
         let mut store = Self::lock(store);
         let present: HashSet<&Path> = files.iter().map(|(p, _, _)| p.as_path()).collect();
@@ -365,6 +394,9 @@ impl LogUsageSource {
             };
             store.files.insert(path, FileState { len, mtime, offset });
         }
+        // Published under the store lock, so an older scan's result can't
+        // land after a newer one's.
+        *latest.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&store.entries));
         Arc::clone(&store.entries)
     }
 }
@@ -414,6 +446,22 @@ mod tests {
 
     async fn entries_in(root: &Path) -> Arc<Vec<LogEntry>> {
         LogUsageSource::new(root.to_path_buf()).entries().await
+    }
+
+    #[tokio::test]
+    async fn peek_and_scanned_reflect_only_a_completed_scan() {
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("session.jsonl"), format!("{ASSISTANT_LINE}\n")).unwrap();
+        let source = LogUsageSource::new(root.path().to_path_buf());
+        assert!(!source.scanned());
+        assert!(source.peek().is_empty());
+
+        let entries = source.entries().await;
+        assert!(source.scanned());
+        assert_eq!(entries.len(), 1);
+        assert!(Arc::ptr_eq(&source.peek(), &entries));
     }
 
     #[test]

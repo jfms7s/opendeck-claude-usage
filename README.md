@@ -102,7 +102,10 @@ locally-generated content like compaction summaries) are excluded
 entirely, since they represent no real API call.
 
 Transcripts only grow, so after the first scan only the lines added since
-are read.
+are read. The first scan after OpenDeck starts reads every transcript
+(seconds on a large `~/.claude/projects`). It runs in the background, so
+the other keys are not held up: a Metric Tile shows "no data" and a
+Heatmap shows an empty grid until it finishes, then both redraw.
 
 The tile's **Session** range reuses the Usage Gauge's 5-hour rate-limit
 window (the same `resets_at` the gauge fetches) rather than a fixed
