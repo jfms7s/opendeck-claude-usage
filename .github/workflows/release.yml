@@ -1,6 +1,7 @@
 name: Release
 # Pushing a `vX.Y.Z` tag builds, tests and packages that commit (Linux
-# binaries on Ubuntu, the macOS one on a macOS runner), then
+# binaries on Ubuntu, the macOS one on a macOS runner, each tested on its
+# own platform), then
 # creates the GitHub release as a draft, attaches the bundle and its
 # checksum, and only then publishes it - so a release is never visible
 # without its asset.
@@ -25,6 +26,9 @@ jobs:
         with:
           toolchain: 1.98.1
           targets: aarch64-apple-darwin
+      # Test the macOS code on macOS too; the Linux `build` job can't. No
+      # rust-cache here: a poisoned PR cache must never reach a release build.
+      - run: cargo test --locked
       - run: cargo build --release --locked --target aarch64-apple-darwin
       - name: Check it is a signed arm64 binary that starts
         run: |

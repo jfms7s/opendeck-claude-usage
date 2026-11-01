@@ -1,0 +1,5 @@
+# cargo-deny (see .github/workflows/advisories.yml). Only crates.io; no git
+# or other registries.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
