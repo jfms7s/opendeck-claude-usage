@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use crate::format::{DISABLED_COLOR, format_percent};
 use crate::history::{Reading, same_reset};
 use crate::level::ColorSettings;
-use crate::pace::{pace, window_length};
+use crate::pace::window_length;
 use crate::settings::lenient;
-use crate::source::{WindowKind, WindowUsage};
+use crate::source::WindowKind;
 
 /// The note under the headline while there aren't two readings to plot.
 pub const COLLECTING: &str = "collecting\u{2026}";
