@@ -75,7 +75,7 @@ mod tests {
         }
     }
 
-    const COLOR_FIELDS: [&str; 8] = [
+    const COLOR_FIELDS: [&str; 7] = [
         "watch",
         "risk",
         "critical",
@@ -83,7 +83,6 @@ mod tests {
         "colorWatch",
         "colorRisk",
         "colorCritical",
-        "colorMode",
     ];
 
     fn with_colors(fields: &[&'static str]) -> Vec<&'static str> {

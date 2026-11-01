@@ -57,20 +57,11 @@ pub enum Level {
     Critical,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ColorMode {
-    #[default]
-    Fixed,
-    Pace,
-}
-
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(from = "ColorSettingsWire", into = "ColorSettingsWire")]
 pub struct ColorSettings {
     pub marks: Marks,
     pub palette: Palette,
-    pub mode: ColorMode,
 }
 
 /// The flat JSON the Property Inspector reads and writes. Every field is a
@@ -78,7 +69,8 @@ pub struct ColorSettings {
 /// can't fail deserialization: openaction replaces the *whole* settings
 /// struct with `Default::default()` on any failure, which would otherwise
 /// also silently reset the key's `window`. Conversion to `ColorSettings`
-/// falls back per field instead.
+/// falls back per field instead. A `colorMode` saved before 0.19 (the
+/// removed Pace colour mode) is ignored like any other unknown key.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ColorSettingsWire {
@@ -89,7 +81,6 @@ pub struct ColorSettingsWire {
     color_watch: Value,
     color_risk: Value,
     color_critical: Value,
-    color_mode: Value,
 }
 
 impl Marks {
@@ -138,20 +129,15 @@ impl Level {
 }
 
 impl ColorSettings {
-    /// The level to color a gauge with: actual % only in Fixed mode, the
-    /// worse of actual and projected-at-reset in Pace mode. A `None`
-    /// projection (too early in the window, or no window length) adds no
-    /// extra warning.
-    pub fn level(&self, actual: f64, projected: Option<f64>) -> Level {
-        match self.mode {
-            ColorMode::Fixed => Level::for_percent(actual, &self.marks),
-            ColorMode::Pace => self.pace_level(actual, projected),
-        }
+    /// The level to color a gauge, combo or sparkline with: actual % only.
+    pub fn level(&self, actual: f64) -> Level {
+        Level::for_percent(actual, &self.marks)
     }
 
-    /// Pace-based level regardless of `mode` - Burn Rate always colors this
-    /// way, since a burn readout colored by actual % alone would contradict
-    /// the number it shows.
+    /// The worse of actual and projected-at-reset. Only Burn Rate colors
+    /// this way, since a burn readout colored by actual % alone would
+    /// contradict the number it shows. A `None` projection (too early in
+    /// the window, or no window length) adds no extra warning.
     pub fn pace_level(&self, actual: f64, projected: Option<f64>) -> Level {
         let by_actual = Level::for_percent(actual, &self.marks);
         match projected {
@@ -198,7 +184,6 @@ impl From<ColorSettingsWire> for ColorSettings {
                 risk: color_or(&w.color_risk, DEFAULT_RISK),
                 critical: color_or(&w.color_critical, DEFAULT_CRITICAL),
             },
-            mode: serde_json::from_value(w.color_mode).unwrap_or_default(),
         }
     }
 }
@@ -213,7 +198,6 @@ impl From<ColorSettings> for ColorSettingsWire {
             color_watch: json!(c.palette.watch),
             color_risk: json!(c.palette.risk),
             color_critical: json!(c.palette.critical),
-            color_mode: json!(c.mode),
         }
     }
 }
@@ -273,26 +257,33 @@ mod tests {
     }
 
     #[test]
-    fn fixed_mode_ignores_projection() {
+    fn level_is_by_actual_percent() {
         let c = ColorSettings::default();
-        assert_eq!(c.level(30.0, Some(140.0)), Level::Normal);
+        assert_eq!(c.level(30.0), Level::Normal);
+        assert_eq!(c.level(95.0), Level::Critical);
     }
 
     #[test]
-    fn pace_mode_takes_the_worse_level() {
-        let c = ColorSettings {
-            mode: ColorMode::Pace,
-            ..ColorSettings::default()
-        };
-        assert_eq!(c.level(30.0, Some(80.0)), Level::Risk);
-        assert_eq!(c.level(95.0, Some(60.0)), Level::Critical);
-        assert_eq!(c.level(30.0, None), Level::Normal);
+    fn pace_level_takes_the_worse_level() {
+        let c = ColorSettings::default();
+        assert_eq!(c.pace_level(30.0, Some(80.0)), Level::Risk);
+        assert_eq!(c.pace_level(95.0, Some(60.0)), Level::Critical);
+        assert_eq!(c.pace_level(30.0, None), Level::Normal);
     }
 
+    /// Keys saved before 0.19 may hold `"colorMode":"pace"`; it is ignored
+    /// and the rest of the colour settings load intact.
     #[test]
-    fn pace_level_ignores_mode() {
-        let c = ColorSettings::default(); // Fixed
-        assert_eq!(c.pace_level(30.0, Some(140.0)), Level::Critical);
+    fn stored_pace_color_mode_is_ignored() {
+        let json = r##"{"watch":40,"risk":60,"critical":80,
+            "colorNormal":"#112233","colorRisk":"#778899","colorMode":"pace"}"##;
+        let c: ColorSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(c.marks, marks(40.0, 60.0, 80.0));
+        assert_eq!(c.palette.normal, "#112233");
+        assert_eq!(c.palette.risk, "#778899");
+        assert_eq!(c.level(30.0), Level::Normal);
+        let back = serde_json::to_value(&c).unwrap();
+        assert!(back.get("colorMode").is_none());
     }
 
     #[test]
@@ -305,11 +296,10 @@ mod tests {
     fn full_wire_format_round_trips() {
         let json = r##"{"watch":40,"risk":60,"critical":80,
             "colorNormal":"#112233","colorWatch":"#445566",
-            "colorRisk":"#778899","colorCritical":"#AABBCC","colorMode":"pace"}"##;
+            "colorRisk":"#778899","colorCritical":"#AABBCC"}"##;
         let c: ColorSettings = serde_json::from_str(json).unwrap();
         assert_eq!(c.marks, marks(40.0, 60.0, 80.0));
         assert_eq!(c.palette.critical, "#aabbcc");
-        assert_eq!(c.mode, ColorMode::Pace);
         let back: ColorSettings =
             serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap();
         assert_eq!(back, c);
@@ -324,14 +314,12 @@ mod tests {
 
     #[test]
     fn garbage_field_falls_back_alone() {
-        let c: ColorSettings = serde_json::from_str(
-            r##"{"watch":null,"colorWatch":"yellow","colorRisk":"#123456","colorMode":7}"##,
-        )
-        .unwrap();
+        let c: ColorSettings =
+            serde_json::from_str(r##"{"watch":null,"colorWatch":"yellow","colorRisk":"#123456"}"##)
+                .unwrap();
         assert_eq!(c.marks, Marks::default());
         assert_eq!(c.palette.watch, DEFAULT_WATCH);
         assert_eq!(c.palette.risk, "#123456");
-        assert_eq!(c.mode, ColorMode::Fixed);
     }
 
     #[test]
@@ -354,7 +342,6 @@ mod tests {
             format!("colorWatch: \"{DEFAULT_WATCH}\""),
             format!("colorRisk: \"{DEFAULT_RISK}\""),
             format!("colorCritical: \"{DEFAULT_CRITICAL}\""),
-            "colorMode: \"fixed\"".to_string(),
         ] {
             assert!(js.contains(&needle), "colors.js is missing `{needle}`");
         }

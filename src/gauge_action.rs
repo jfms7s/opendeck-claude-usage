@@ -299,10 +299,9 @@ mod tests {
 
     #[test]
     fn settings_round_trip_through_json() {
-        let s: UsageGaugeSettings = serde_json::from_str(
-            r#"{"window":"weekly","watch":40,"risk":60,"critical":80,"colorMode":"pace"}"#,
-        )
-        .unwrap();
+        let s: UsageGaugeSettings =
+            serde_json::from_str(r#"{"window":"weekly","watch":40,"risk":60,"critical":80}"#)
+                .unwrap();
         let back: UsageGaugeSettings =
             serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
         assert_eq!(back.window, WindowKind::Weekly);

@@ -257,13 +257,8 @@ pub fn build_sparkline<Tz: TimeZone>(
     };
     let color = match readings.last() {
         Some(r) => {
-            let (percent, resets_at) = usage(r, kind);
-            let projected =
-                pace(&WindowUsage { percent, resets_at }, kind, now_utc).map(|p| p.projected);
-            colors
-                .palette
-                .color(colors.level(percent, projected))
-                .to_string()
+            let (percent, _) = usage(r, kind);
+            colors.palette.color(colors.level(percent)).to_string()
         }
         None => DISABLED_COLOR.to_string(),
     };
@@ -301,7 +296,7 @@ pub fn build_sparkline<Tz: TimeZone>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::level::{ColorMode, DEFAULT_CRITICAL, DEFAULT_NORMAL};
+    use crate::level::{DEFAULT_CRITICAL, DEFAULT_NORMAL};
     use chrono::FixedOffset;
     use serde_json::json;
 
@@ -530,19 +525,16 @@ mod tests {
     }
 
     #[test]
-    fn color_follows_the_latest_level_and_pace_mode() {
-        // Colored as of now: 08:15 is 25% into the window, projecting 120%.
+    fn color_follows_the_latest_level_by_actual_percent() {
+        // 08:15 is 25% into the window, projecting 120%: still colored by
+        // the actual 30%.
         let at = "2026-09-30T08:15:00Z";
         let readings = [session(at, 30.0, R)];
-        let fixed = build(&readings, WindowKind::Session, SparkSeries::Trend, at);
-        assert_eq!(fixed.color, DEFAULT_NORMAL);
-        let pace_colors = ColorSettings {
-            mode: ColorMode::Pace,
-            ..ColorSettings::default()
-        };
-        let settings = SparkSettings::default();
-        let paced = build_sparkline(&readings, &settings, &pace_colors, t(at));
-        assert_eq!(paced.color, DEFAULT_CRITICAL);
+        let d = build(&readings, WindowKind::Session, SparkSeries::Trend, at);
+        assert_eq!(d.color, DEFAULT_NORMAL);
+        let high = [session(at, 96.0, R)];
+        let d = build(&high, WindowKind::Session, SparkSeries::Trend, at);
+        assert_eq!(d.color, DEFAULT_CRITICAL);
     }
 
     #[test]

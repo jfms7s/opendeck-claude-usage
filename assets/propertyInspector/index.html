@@ -64,7 +64,7 @@
 			passThrough: ["style"],
 		});
 
-		mountColorSection(document.getElementById("colors"), { showMode: true, onChange: pi.changed });
+		mountColorSection(document.getElementById("colors"), { onChange: pi.changed });
 		styleBoxes().forEach((box) => box.addEventListener("change", pi.changed));
 		document.getElementById("window").addEventListener("change", pi.changed);
 	</script>

@@ -11,10 +11,9 @@ const COLOR_DEFAULTS = {
 	colorWatch: "#eab308",
 	colorRisk: "#f97316",
 	colorCritical: "#ef4444",
-	colorMode: "fixed",
 };
 
-function mountColorSection(container, { showMode, onChange }) {
+function mountColorSection(container, { onChange }) {
 	// Two pi.css cards; the page's container uses display: contents so they
 	// sit in the page grid next to the page's own cards.
 	container.innerHTML = `
@@ -57,19 +56,10 @@ function mountColorSection(container, { showMode, onChange }) {
 					<input type="color" id="colorCritical" />
 				</div>
 			</div>
-			<div class="field" id="colorModeRow">
-				<label for="colorMode">Color by</label>
-				<select id="colorMode">
-					<option value="fixed">Current usage</option>
-					<option value="pace">Pace (also warn when burning too fast)</option>
-				</select>
-			</div>
 			<div class="row">
 				<button type="button" id="colorReset">Reset to defaults</button>
 			</div>
 		</section>`;
-	// .field sets display, which would override the hidden attribute.
-	container.querySelector("#colorModeRow").classList.toggle("hidden", !showMode);
 	for (const key of Object.keys(COLOR_DEFAULTS)) {
 		container.querySelector(`#${key}`).addEventListener("change", () => {
 			touchedColorFields.add(key);
@@ -92,16 +82,12 @@ function mountColorSection(container, { showMode, onChange }) {
 const touchedColorFields = new Set();
 
 // A stored value the field can't show falls back to the default: an
-// <input type=color> would show (and later save) #000000, and a <select>
-// would go blank and save "".
+// <input type=color> would show (and later save) #000000.
 function validColorValue(key, value) {
 	const fallback = COLOR_DEFAULTS[key];
 	if (typeof fallback === "number") {
 		const n = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
 		return typeof n === "number" && Number.isFinite(n) ? n : fallback;
-	}
-	if (key === "colorMode") {
-		return value === "fixed" || value === "pace" ? value : fallback;
 	}
 	return isHexColor(value) ? value.toLowerCase() : fallback;
 }

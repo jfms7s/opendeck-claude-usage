@@ -24,8 +24,7 @@ pub struct BurnRateSettings {
     pub window: WindowKind,
     #[serde(default, deserialize_with = "lenient")]
     pub metric: BurnMetric,
-    /// Only marks and palette matter here - Burn Rate always colors
-    /// pace-based, so a stored `colorMode` is ignored.
+    /// Burn Rate always colors pace-based (`ColorSettings::pace_level`).
     #[serde(flatten)]
     pub colors: ColorSettings,
 }
