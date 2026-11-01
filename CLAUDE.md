@@ -56,3 +56,15 @@ Shared plumbing:
 - New features are designed in the vault's `specs/` and planned in its `plans/` (dated filenames) before implementation.
 - User-visible behavior changes should be reflected in the README (action usage section and smoke-test checklist).
 - When a new Claude model ships, add its exact id to `pricing.rs` (and to the test of published rates) - Cost shows a trailing `+` until then.
+
+## Scope (frozen surfaces)
+
+Ruled 2026-11-01 from the 2026-10-07 feature-fit review (vault: `specs/2026-11-01-freeze-list-design.md`). A frozen surface keeps its code and tests and gets bug fixes, but no new options, styles, layouts, fields or `Encoder` variants. To add to one, lift the freeze here first (edit this list, with the reason) in its own PR.
+
+- **Dial strip render mode**: `assets/layouts/*.json`, `tile.rs::strip_svg` and every `*_strip`/strip renderer, the `Encoder` controller on the five actions that have it. No new action gets an `Encoder` controller; the README smoke checklist does not test strips.
+- **Colors & thresholds cards**: `assets/propertyInspector/colors.js` + `level.rs` (marks, palette, "Color by"). The colour model stays; no new fields or colour modes.
+- **Gauge styles**: the six in `gauge_style.rs` / `styles/`. No seventh style.
+- **Session + Weekly**: `combo.rs`, `combo_action.rs`, `styles/combo.rs`. No new layouts or content.
+- **Burn Rate metrics Pace and Even burn** (`burn.rs`): no new metrics.
+- **Usage Heatmap Cost measure and colour picker** (`heatmap.rs`), **Peak Clock days** (`peak.rs`): no new options.
+- **macOS**: the Keychain reader and macOS branches in `source/api.rs`, the manifest's macOS entries, the `macos`/`msrv-macos` CI jobs and `build-macos`. No more Mac work until the README's Mac checklist has been run once on a real Mac.
