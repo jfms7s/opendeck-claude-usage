@@ -1,5 +1,5 @@
-//! Usage Gauge keypad styles and the short-press cycle through them. Pure,
-//! so the cycle rules and the lenient settings wire format are unit-testable.
+//! Usage Gauge keypad styles and the short-press cycle through all six.
+//! Pure, so the cycle and the lenient settings wire format are unit-testable.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -16,8 +16,7 @@ pub enum GaugeStyle {
     ThinRing,
 }
 
-/// Every style, in the order the Property Inspector lists them and the
-/// default cycle visits them.
+/// Every style, in the order a short press visits them.
 pub const ALL_STYLES: [GaugeStyle; 6] = [
     GaugeStyle::Speedometer,
     GaugeStyle::Bar,
@@ -27,70 +26,38 @@ pub const ALL_STYLES: [GaugeStyle; 6] = [
     GaugeStyle::ThinRing,
 ];
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(from = "StyleSettingsWire", into = "StyleSettingsWire")]
 pub struct StyleSettings {
     /// The style the key currently shows - changed only by a short press.
     pub style: GaugeStyle,
-    /// The styles a short press visits, in order.
-    pub cycle: Vec<GaugeStyle>,
 }
 
-impl Default for StyleSettings {
-    fn default() -> Self {
-        Self {
-            style: GaugeStyle::default(),
-            cycle: ALL_STYLES.to_vec(),
-        }
-    }
-}
-
-/// Raw `Value` fields for the same reason as `level::ColorSettingsWire`:
-/// a malformed value must fall back on its own rather than make openaction
-/// reset the key's whole settings struct.
+/// A raw `Value` for the same reason as `level::ColorSettingsWire`: a
+/// malformed style must fall back on its own rather than make openaction
+/// reset the key's whole settings struct. A `cycleStyles` list saved
+/// before 0.19 (the removed Cycle styles checklist) is ignored like any
+/// other unknown key.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct StyleSettingsWire {
     style: Value,
-    cycle_styles: Value,
 }
 
-/// The style a short press moves to: the one after `current` in `cycle`
-/// (wrapping), or `cycle[0]` if `current` was unticked since. `None` when
-/// fewer than two styles are ticked - there's nothing to cycle between.
-pub fn next_style(current: GaugeStyle, cycle: &[GaugeStyle]) -> Option<GaugeStyle> {
-    if cycle.len() < 2 {
-        return None;
-    }
-    Some(match cycle.iter().position(|s| *s == current) {
-        Some(i) => cycle[(i + 1) % cycle.len()],
-        None => cycle[0],
-    })
+/// The style a short press moves to: the one after `current` in
+/// `ALL_STYLES`, wrapping.
+pub fn next_style(current: GaugeStyle) -> GaugeStyle {
+    let i = ALL_STYLES
+        .iter()
+        .position(|s| *s == current)
+        .unwrap_or_default();
+    ALL_STYLES[(i + 1) % ALL_STYLES.len()]
 }
 
 impl From<StyleSettingsWire> for StyleSettings {
     fn from(w: StyleSettingsWire) -> Self {
-        // A missing or non-array value means "never configured": cycle
-        // everything. An array - even one that filters down to nothing - is
-        // the user's explicit choice, and unticking every box means "don't
-        // cycle", not "cycle all six".
-        let cycle = match w.cycle_styles.as_array() {
-            None => ALL_STYLES.to_vec(),
-            Some(entries) => {
-                let mut cycle: Vec<GaugeStyle> = Vec::new();
-                for entry in entries {
-                    if let Ok(style) = serde_json::from_value::<GaugeStyle>(entry.clone())
-                        && !cycle.contains(&style)
-                    {
-                        cycle.push(style);
-                    }
-                }
-                cycle
-            }
-        };
         Self {
             style: serde_json::from_value(w.style).unwrap_or_default(),
-            cycle,
         }
     }
 }
@@ -99,7 +66,6 @@ impl From<StyleSettings> for StyleSettingsWire {
     fn from(s: StyleSettings) -> Self {
         Self {
             style: json!(s.style),
-            cycle_styles: json!(s.cycle),
         }
     }
 }
@@ -110,95 +76,64 @@ mod tests {
     use GaugeStyle::*;
 
     #[test]
-    fn next_wraps_around() {
-        assert_eq!(next_style(Bar, &[Speedometer, Bar]), Some(Speedometer));
-        assert_eq!(next_style(Speedometer, &[Speedometer, Bar]), Some(Bar));
-    }
-
-    #[test]
-    fn next_skips_unticked_styles() {
-        assert_eq!(next_style(Bar, &[Bar, ThinRing]), Some(ThinRing));
-    }
-
-    #[test]
-    fn current_not_in_cycle_goes_to_first() {
+    fn six_presses_visit_every_style_once() {
+        let mut style = Speedometer;
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            style = next_style(style);
+            seen.push(style);
+        }
+        assert_eq!(style, Speedometer);
         assert_eq!(
-            next_style(Speedometer, &[OpenDonut, ThinRing]),
-            Some(OpenDonut)
+            seen,
+            [
+                Bar,
+                SoftPill,
+                OpenDonut,
+                TrackedDonut,
+                ThinRing,
+                Speedometer
+            ]
         );
-    }
-
-    #[test]
-    fn single_style_cycle_has_no_next() {
-        assert_eq!(next_style(Bar, &[Bar]), None);
-        assert_eq!(next_style(Bar, &[]), None);
     }
 
     #[test]
     fn empty_json_is_the_default() {
         let s: StyleSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(s, StyleSettings::default());
-        assert_eq!(s.cycle, ALL_STYLES.to_vec());
-    }
-
-    #[test]
-    fn unknown_style_falls_back_to_speedometer() {
-        let s: StyleSettings = serde_json::from_str(r#"{"style":"hologram"}"#).unwrap();
         assert_eq!(s.style, Speedometer);
     }
 
     #[test]
-    fn unknown_and_duplicate_cycle_entries_are_dropped() {
-        let s: StyleSettings =
-            serde_json::from_str(r#"{"cycleStyles":["thinRing","nope","bar","thinRing",3]}"#)
-                .unwrap();
-        assert_eq!(s.cycle, vec![ThinRing, Bar]);
-    }
-
-    #[test]
-    fn missing_or_non_array_cycle_falls_back_to_all() {
+    fn unknown_style_falls_back_to_speedometer() {
         for json in [
-            r#"{}"#,
-            r#"{"cycleStyles":"bar"}"#,
-            r#"{"cycleStyles":null}"#,
+            r#"{"style":"hologram"}"#,
+            r#"{"style":3}"#,
+            r#"{"style":null}"#,
         ] {
             let s: StyleSettings = serde_json::from_str(json).unwrap();
-            assert_eq!(s.cycle, ALL_STYLES.to_vec(), "for {json}");
+            assert_eq!(s.style, Speedometer, "for {json}");
         }
     }
 
+    /// Keys saved before 0.19 may hold a `cycleStyles` list (even a subset
+    /// or an empty one): it is ignored and every press moves through all six.
     #[test]
-    fn explicitly_empty_cycle_means_no_cycling() {
-        // Unticking every box must stop cycling, not turn on all six.
-        for json in [r#"{"cycleStyles":[]}"#, r#"{"cycleStyles":["x"]}"#] {
-            let s: StyleSettings = serde_json::from_str(json).unwrap();
-            assert!(s.cycle.is_empty(), "for {json}");
-            assert_eq!(next_style(s.style, &s.cycle), None);
-        }
+    fn stored_cycle_styles_is_ignored() {
+        let s: StyleSettings =
+            serde_json::from_str(r#"{"style":"bar","cycleStyles":["bar"]}"#).unwrap();
+        assert_eq!(s.style, Bar);
+        assert_eq!(next_style(s.style), SoftPill);
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v, json!({"style": "bar"}));
     }
 
     #[test]
     fn wire_round_trips() {
-        let s = StyleSettings {
-            style: SoftPill,
-            cycle: vec![SoftPill, OpenDonut],
-        };
+        let s = StyleSettings { style: SoftPill };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["style"], "softPill");
-        assert_eq!(v["cycleStyles"], json!(["softPill", "openDonut"]));
         let back: StyleSettings = serde_json::from_value(v).unwrap();
         assert_eq!(back, s);
-    }
-
-    /// The Property Inspector's checkboxes must offer exactly the wire
-    /// names the plugin accepts.
-    #[test]
-    fn property_inspector_lists_every_style() {
-        let html = include_str!("../assets/propertyInspector/index.html");
-        for style in ALL_STYLES {
-            let name = serde_json::to_value(style).unwrap();
-            let needle = format!(r#"value="{}""#, name.as_str().unwrap());
-            assert!(html.contains(&needle), "index.html is missing {needle}");
-        }
     }
 }

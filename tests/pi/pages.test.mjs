@@ -16,15 +16,15 @@ test("gauge: an unknown stored window shows (and saves) Session, not \"\" (KI-10
 	assert.equal(saved.style, "thinRing", "the press-picked style passes through (KI-14)");
 });
 
-test("gauge: no stored cycle list shows every style ticked", async () => {
+test("gauge: saving keeps a press-picked style and drops a stored cycleStyles", async () => {
 	const page = loadPage("index.html");
-	await page.open({});
+	await page.open({ window: "session", style: "bar", cycleStyles: ["bar"] });
 	page.change("window", "weekly");
-	page.runTimers(); // no reply to getSettings
+	page.receive({ window: "session", style: "softPill", cycleStyles: ["bar"] }); // reply to getSettings
 	const [saved] = page.saves();
 	assert.equal(saved.window, "weekly");
-	assert.equal(saved.cycleStyles.length, 6);
-	assert.ok(!("style" in saved));
+	assert.equal(saved.style, "softPill", "the press-picked style passes through (KI-14)");
+	assert.ok(!("cycleStyles" in saved));
 });
 
 test("burn rate: unknown window and metric fall back (KI-10)", async () => {
