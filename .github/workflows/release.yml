@@ -1,10 +1,11 @@
 name: Release
 # Pushing a `vX.Y.Z` tag builds, tests and packages that commit (Linux
 # binaries on Ubuntu, the macOS one on a macOS runner, each tested on its
-# own platform), then
-# creates the GitHub release as a draft, attaches the bundle and its
-# checksum, and only then publishes it - so a release is never visible
-# without its asset.
+# own platform), then creates a *draft* GitHub release with the bundle, its
+# checksum and a build-provenance attestation, so a release is never
+# visible without its asset. Nothing here publishes it: the owner runs the
+# README's smoke-test checklist on the draft's bundle, records it in the
+# release's smoke log, and publishes the draft by hand.
 on:
   push:
     tags: ["v*"]
@@ -145,13 +146,10 @@ jobs:
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ github.ref_name }}
+          # Left as a draft for the owner's smoke run; never published here.
           draft: true
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
             opendeck-claude-usage.streamDeckPlugin
             SHA256SUMS
-      - name: Publish the release now that its assets are attached
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"
