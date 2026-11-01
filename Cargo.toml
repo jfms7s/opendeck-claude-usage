@@ -23,7 +23,8 @@ log = "0.4"
 simplelog = "0.12"
 base64 = "0.22"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
-# O_NOFOLLOW for the history file (already in the tree via tokio).
+# O_NOFOLLOW for the history file and getpwuid_r for the login user
+# (already in the tree via tokio).
 libc = "0.2"
 
 [dev-dependencies]
@@ -33,7 +34,7 @@ tokio = { version = "1.48", features = ["test-util", "macros", "rt"] }
 
 # Smaller shipped binaries (about a quarter to a third off). `panic` stays
 # `unwind` on purpose: a panicking background task is logged and restarted
-# (see `supervise.rs`), which `abort` would turn into a dead plugin.
+# (see `spawn_supervised` in `src/tasks.rs`), which `abort` would turn into a dead plugin.
 [profile.release]
 lto = true
 codegen-units = 1

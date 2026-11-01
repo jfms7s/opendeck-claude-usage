@@ -140,8 +140,10 @@ async fn main() -> OpenActionResult<()> {
         .expect("logger init");
 
     // Recorded %-of-limit readings for Usage Sparkline, kept in a small
-    // file under ~/.local/state so trends survive restarts. Loading reads
-    // and rewrites the file - keep that off the async threads.
+    // file under the state dir (`paths::state_base`: ~/.local/state on
+    // Linux, ~/Library/Application Support on macOS, or $XDG_STATE_HOME)
+    // so trends survive restarts. Loading reads and rewrites the file -
+    // keep that off the async threads.
     let history = tokio::task::spawn_blocking(|| {
         HistoryStore::load(HistoryStore::default_path(), chrono::Utc::now())
     })
