@@ -12,6 +12,7 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use dashmap::DashMap;
@@ -44,6 +45,9 @@ pub trait HubView: Debug + Send + Sync {
 }
 
 pub type View = Arc<dyn HubView>;
+
+/// How long a press waits for a usage read before drawing from the cache.
+const REFRESH_DEADLINE: Duration = Duration::from_millis(500);
 
 pub struct UsageHub {
     source: Arc<dyn SharedUsage>,
@@ -121,16 +125,32 @@ impl UsageHub {
 
     /// Reads (through the throttle) and renders just this instance - a dial
     /// press or a long keypad press, without waiting for the next tick.
+    ///
+    /// openaction handles events one at a time, so the press waits at most
+    /// `REFRESH_DEADLINE` for the read; past that it draws from the cache
+    /// like `render_cached`. The read runs in its own task and is never
+    /// cancelled (its rate-limit cost is already paid): it still updates
+    /// the cache and history, and the next poll draws its result.
     pub async fn refresh_one<S: Surface + ?Sized>(
-        &self,
+        self: &Arc<Self>,
         surface: &S,
         view: &View,
     ) -> OpenActionResult<()> {
-        let result = self.read_and_record().await;
-        if let Err(e) = &result {
-            log::warn!("usage source read failed: {e}");
-        }
-        self.push(surface, view, result.as_ref().ok()).await
+        let hub = Arc::clone(self);
+        let read = tokio::spawn(async move { hub.read_and_record().await });
+        let snapshot = match tokio::time::timeout(REFRESH_DEADLINE, read).await {
+            Ok(Ok(Ok(snapshot))) => Some(snapshot),
+            Ok(Ok(Err(e))) => {
+                log::warn!("usage source read failed: {e}");
+                None
+            }
+            Ok(Err(e)) => {
+                log::error!("usage refresh task failed: {e}");
+                self.source.peek().and_then(Result::ok)
+            }
+            Err(_) => self.source.peek().and_then(Result::ok),
+        };
+        self.push(surface, view, snapshot.as_ref()).await
     }
 
     async fn push<S: Surface + ?Sized>(
@@ -533,6 +553,63 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(source.reads.load(Ordering::SeqCst), 0);
+    }
+
+    /// Takes 5 s (virtual time) to answer; counts reads started and
+    /// finished.
+    #[derive(Clone, Default)]
+    struct Slow {
+        started: Arc<AtomicUsize>,
+        finished: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl UsageSource for Slow {
+        async fn read(&self) -> Result<UsageSnapshot, UsageSourceError> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            self.finished.fetch_add(1, Ordering::SeqCst);
+            Ok(snapshot())
+        }
+    }
+
+    /// A press during a slow fetch draws the cached frame after the
+    /// deadline - and the fetch runs to completion, once, instead of being
+    /// cancelled with its rate-limit cost already paid.
+    #[tokio::test(start_paused = true)]
+    async fn a_press_during_a_slow_fetch_draws_the_cache_and_lets_the_fetch_finish() {
+        let source = Slow::default();
+        let hub = UsageHub::new(shared(source.clone()), HistoryStore::in_memory());
+        hub.read_and_record().await.unwrap();
+        tokio::time::advance(Duration::from_secs(120)).await; // a fetch is due
+
+        let dial = FakeSurface::dial("ctx1");
+        let pressed = tokio::time::Instant::now();
+        hub.refresh_one(&dial, &gauge()).await.unwrap();
+        assert_eq!(pressed.elapsed(), REFRESH_DEADLINE);
+        let [Output::Feedback(frame)] = &dial.frames()[..] else {
+            panic!("expected one frame, got {:?}", dial.frames());
+        };
+        assert_eq!(frame["percent"], "33%");
+        assert_eq!(source.started.load(Ordering::SeqCst), 2);
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(source.finished.load(Ordering::SeqCst), 2, "fetch cancelled");
+        assert_eq!(source.started.load(Ordering::SeqCst), 2);
+    }
+
+    /// A read that answers within the deadline is drawn at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_press_draws_a_read_that_answers_in_time() {
+        let source = Counting::default();
+        let hub = hub_over(&source);
+        let dial = FakeSurface::dial("ctx1");
+        hub.refresh_one(&dial, &gauge()).await.unwrap();
+        let [Output::Feedback(frame)] = &dial.frames()[..] else {
+            panic!("expected one frame, got {:?}", dial.frames());
+        };
+        assert_eq!(frame["percent"], "33%");
+        assert_eq!(source.reads.load(Ordering::SeqCst), 1);
     }
 
     /// The poll loop doesn't read the API at all while no key is visible,

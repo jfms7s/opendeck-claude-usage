@@ -208,7 +208,12 @@ mod tests {
         };
         actions
             .metric_tile
-            .render(&FakeSurface::new("tile", true), &[entry], &session)
+            .render(
+                &FakeSurface::new("tile", true),
+                &[entry],
+                &session,
+                crate::metric_action::UsageRead::Fetch,
+            )
             .await
             .unwrap();
         assert_eq!(api.0.load(Ordering::SeqCst), 1);
