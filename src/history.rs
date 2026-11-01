@@ -405,6 +405,7 @@ mod tests {
                 used_dollars: None,
                 limit_dollars: None,
             },
+            details: Default::default(),
         }
     }
 

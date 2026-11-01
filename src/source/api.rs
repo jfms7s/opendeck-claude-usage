@@ -1,4 +1,7 @@
-use super::{MonthlyUsage, UsageSnapshot, UsageSource, UsageSourceError, WindowUsage};
+use super::{
+    Limit, MonthlyUsage, SurfaceShare, UsageDetails, UsageSnapshot, UsageSource, UsageSourceError,
+    WindowUsage,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -485,12 +488,76 @@ struct RawUsage {
     /// only means extra usage isn't enabled, not that nothing parsed.
     #[serde(default)]
     extra_usage: Option<RawExtraUsage>,
+    /// Taken as raw JSON and read leniently (`parse_details`): a change
+    /// in their shape must never fail the windows above.
+    #[serde(default)]
+    seven_day_breakdown: serde_json::Value,
+    #[serde(default)]
+    limits: serde_json::Value,
 }
 
 #[derive(Deserialize)]
 struct RawWindow {
     utilization: f64,
     resets_at: Option<String>,
+    #[serde(default)]
+    locked_reason: serde_json::Value,
+}
+
+/// A non-empty string, or nothing (whatever else the value is).
+fn text(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn timestamp(value: &serde_json::Value) -> Option<DateTime<Utc>> {
+    value
+        .as_str()
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+/// `seven_day_breakdown.rows` and `limits[]`. A row or entry missing
+/// what identifies it (or its share) is skipped, not an error.
+fn parse_details(raw: &RawUsage) -> UsageDetails {
+    let rows = raw.seven_day_breakdown["rows"].as_array();
+    let weekly_shares = rows
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let key = text(&row["key"])?;
+            Some(SurfaceShare {
+                name: text(&row["display_name"]).unwrap_or_else(|| key.clone()),
+                percent: row["percent"].as_f64()?,
+                key,
+            })
+        })
+        .collect();
+    let limits = raw
+        .limits
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            Some(Limit {
+                kind: text(&entry["kind"])?,
+                group: text(&entry["group"]),
+                percent: entry["percent"].as_f64(),
+                severity: text(&entry["severity"]),
+                resets_at: timestamp(&entry["resets_at"]),
+                is_active: entry["is_active"].as_bool().unwrap_or(false),
+            })
+        })
+        .collect();
+    UsageDetails {
+        weekly_shares,
+        limits,
+        session_locked: text(&raw.five_hour.locked_reason),
+        weekly_locked: text(&raw.seven_day.locked_reason),
+    }
 }
 
 #[derive(Deserialize)]
@@ -504,7 +571,7 @@ struct RawExtraUsage {
     utilization: Option<f64>,
 }
 
-fn parse_window(raw: RawWindow) -> WindowUsage {
+fn parse_window(raw: &RawWindow) -> WindowUsage {
     WindowUsage {
         percent: raw.utilization,
         // A malformed timestamp is treated as "no reset info" rather than a
@@ -520,9 +587,10 @@ fn parse_window(raw: RawWindow) -> WindowUsage {
 fn parse_snapshot(json: &str) -> Result<UsageSnapshot, UsageSourceError> {
     let raw: RawUsage =
         serde_json::from_str(json).map_err(|e| UsageSourceError::Parse(e.to_string()))?;
+    let details = parse_details(&raw);
     Ok(UsageSnapshot {
-        session: parse_window(raw.five_hour),
-        weekly: parse_window(raw.seven_day),
+        session: parse_window(&raw.five_hour),
+        weekly: parse_window(&raw.seven_day),
         // `used_credits`/`monthly_limit` are taken as-is and treated as
         // decimal dollar amounts (e.g. 12.5 == $12.50), not minor units
         // that would need scaling by some `decimal_places` field. This is
@@ -544,6 +612,7 @@ fn parse_snapshot(json: &str) -> Result<UsageSnapshot, UsageSourceError> {
                 limit_dollars: None,
             },
         },
+        details,
     })
 }
 
@@ -644,6 +713,153 @@ mod tests {
         let snapshot = parse_snapshot(DISABLED_MONTHLY).unwrap();
         assert!(!snapshot.monthly.enabled);
         assert_eq!(snapshot.monthly.percent, None);
+    }
+
+    // Synthetic, in the shape of a 2026-09-23 capture of the real response
+    // (key names and types copied, values made up), including the fields
+    // the plugin ignores: codename windows, `spend`, more `extra_usage`.
+    const WITH_DETAILS: &str = r#"{
+        "five_hour": {"utilization": 100.0, "resets_at": "2026-09-13T22:40:00+00:00",
+            "limit_dollars": null, "used_dollars": null, "remaining_dollars": null,
+            "locked_reason": "session_limit"},
+        "seven_day": {"utilization": 61.0, "resets_at": "2026-09-17T06:00:00+00:00",
+            "limit_dollars": null, "used_dollars": null, "remaining_dollars": null,
+            "locked_reason": null},
+        "seven_day_opus": null,
+        "nimbus_quill": {"utilization": 3.0, "resets_at": null, "locked_reason": null},
+        "extra_usage": {"is_enabled": false, "monthly_limit": null, "used_credits": null,
+            "utilization": null, "currency": null, "decimal_places": null,
+            "user_disabled": false, "daily": null},
+        "limits": [
+            {"kind": "session", "group": "session", "percent": 100, "severity": "critical",
+             "resets_at": "2026-09-13T22:40:00+00:00", "scope": null, "is_active": true},
+            {"kind": "weekly_all", "group": "weekly", "percent": 61, "severity": "warning",
+             "resets_at": "2026-09-17T06:00:00+00:00", "scope": null, "is_active": false}
+        ],
+        "spend": {"used": {"amount_minor": 0, "currency": "USD", "exponent": 2}, "percent": 0},
+        "member_dashboard_available": false,
+        "seven_day_breakdown": {
+            "as_of": "2026-09-13T20:00:00+00:00",
+            "window_started_at": "2026-09-10T06:00:00+00:00",
+            "rows": [
+                {"key": "claude_code", "display_name": "Claude Code", "percent": 48},
+                {"key": "chat", "display_name": "Chats", "percent": 9},
+                {"key": "cowork", "display_name": "Cowork", "percent": 0},
+                {"key": "other", "display_name": "Other", "percent": 4}
+            ]
+        }
+    }"#;
+
+    #[test]
+    fn a_response_without_the_details_parses_as_before() {
+        let snapshot = parse_snapshot(DISABLED_MONTHLY).unwrap();
+        assert_eq!(snapshot.session.percent, 33.0);
+        assert_eq!(snapshot.weekly.percent, 29.0);
+        assert_eq!(snapshot.details, UsageDetails::default());
+    }
+
+    #[test]
+    fn parses_the_weekly_breakdown_limits_and_lock_reason() {
+        let snapshot = parse_snapshot(WITH_DETAILS).unwrap();
+        assert_eq!(snapshot.session.percent, 100.0);
+        assert_eq!(snapshot.weekly.percent, 61.0);
+        let d = &snapshot.details;
+        let shares: Vec<_> = d
+            .weekly_shares
+            .iter()
+            .map(|s| (s.key.as_str(), s.name.as_str(), s.percent))
+            .collect();
+        assert_eq!(
+            shares,
+            [
+                ("claude_code", "Claude Code", 48.0),
+                ("chat", "Chats", 9.0),
+                ("cowork", "Cowork", 0.0),
+                ("other", "Other", 4.0),
+            ]
+        );
+        assert_eq!(
+            d.limits,
+            [
+                Limit {
+                    kind: "session".into(),
+                    group: Some("session".into()),
+                    percent: Some(100.0),
+                    severity: Some("critical".into()),
+                    resets_at: Some(Utc.with_ymd_and_hms(2026, 9, 13, 22, 40, 0).unwrap()),
+                    is_active: true,
+                },
+                Limit {
+                    kind: "weekly_all".into(),
+                    group: Some("weekly".into()),
+                    percent: Some(61.0),
+                    severity: Some("warning".into()),
+                    resets_at: Some(Utc.with_ymd_and_hms(2026, 9, 17, 6, 0, 0).unwrap()),
+                    is_active: false,
+                },
+            ]
+        );
+        assert_eq!(d.session_locked.as_deref(), Some("session_limit"));
+        assert_eq!(d.weekly_locked, None);
+    }
+
+    #[test]
+    fn unexpected_detail_shapes_never_fail_the_windows() {
+        for details in [
+            // Wrong types for every new field.
+            r#""seven_day_breakdown": "soon", "limits": {"kind": "session"}"#,
+            r#""seven_day_breakdown": {"rows": {"key": "x"}}, "limits": 7"#,
+            r#""seven_day_breakdown": null, "limits": null"#,
+            // Rows and entries missing what identifies them, or mistyped.
+            r#""seven_day_breakdown": {"rows": [{"display_name": "Chats", "percent": 9},
+                {"key": "chat", "percent": "9"}, 3, null]},
+               "limits": [{"percent": 5}, {"kind": 1}, "weekly", null]"#,
+        ] {
+            let json = format!(
+                r#"{{
+                    "five_hour": {{"utilization": 33.0, "resets_at": null, "locked_reason": 5}},
+                    "seven_day": {{"utilization": 29.0, "resets_at": null, "locked_reason": ["x"]}},
+                    {details}
+                }}"#
+            );
+            let snapshot = parse_snapshot(&json).unwrap_or_else(|e| panic!("{details}: {e}"));
+            assert_eq!(snapshot.session.percent, 33.0, "{details}");
+            assert_eq!(snapshot.weekly.percent, 29.0, "{details}");
+            assert_eq!(snapshot.details, UsageDetails::default(), "{details}");
+        }
+    }
+
+    #[test]
+    fn partial_details_keep_what_parses() {
+        let json = r#"{
+            "five_hour": {"utilization": 1.0, "resets_at": null, "locked_reason": "  "},
+            "seven_day": {"utilization": 2.0, "resets_at": null, "locked_reason": "weekly_limit"},
+            "seven_day_breakdown": {"rows": [{"key": "chat", "percent": 9.5}, {"key": "x"}]},
+            "limits": [{"kind": "weekly_all", "resets_at": "not a date"}]
+        }"#;
+        let d = parse_snapshot(json).unwrap().details;
+        // No display name: the key stands in for it.
+        assert_eq!(
+            d.weekly_shares,
+            [SurfaceShare {
+                key: "chat".into(),
+                name: "chat".into(),
+                percent: 9.5
+            }]
+        );
+        assert_eq!(
+            d.limits,
+            [Limit {
+                kind: "weekly_all".into(),
+                group: None,
+                percent: None,
+                severity: None,
+                resets_at: None,
+                is_active: false,
+            }]
+        );
+        assert_eq!(d.session_locked, None);
+        assert_eq!(d.weekly_locked.as_deref(), Some("weekly_limit"));
     }
 
     #[test]
@@ -760,6 +976,31 @@ mod tests {
     async fn live_read_against_the_real_api() {
         let snapshot = ApiUsageSource::default().read().await.unwrap();
         println!("{snapshot:?}");
+        // The details the plugin parses but doesn't draw yet: the
+        // response shape is undocumented, so check it still matches.
+        let d = &snapshot.details;
+        assert!(
+            !d.weekly_shares.is_empty(),
+            "no seven_day_breakdown rows parsed"
+        );
+        for share in &d.weekly_shares {
+            assert!(
+                (0.0..=100.0).contains(&share.percent),
+                "{} share out of range: {}",
+                share.key,
+                share.percent
+            );
+        }
+        assert!(!d.limits.is_empty(), "no limits[] entries parsed");
+        for limit in &d.limits {
+            assert!(limit.severity.is_some(), "{} has no severity", limit.kind);
+            assert!(
+                limit.percent.is_some_and(|p| (0.0..=100.0).contains(&p)),
+                "{} percent missing or out of range: {:?}",
+                limit.kind,
+                limit.percent
+            );
+        }
         for (name, window) in [("session", &snapshot.session), ("weekly", &snapshot.weekly)] {
             assert!(
                 (0.0..=100.0).contains(&window.percent),
