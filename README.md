@@ -236,21 +236,20 @@ touch-strip bar.
 
 1. Add a **Usage Sparkline** key on a dial or a keypad tile and pick the
    window: **Session**, **Weekly**, or **Monthly** (extra usage).
-2. A short press (key or dial) cycles the series; hold to refresh:
+2. A short press (key or dial) switches between two series; hold to refresh:
    - **Trend** — % of limit over the current window.
-   - **Per poll** — how much each reading added (e.g. `+2.1pp`).
    - **Today** — running increase since local midnight (e.g. `8.4pp`). If
      OpenDeck wasn't running (or couldn't read usage) around midnight, it
      counts from the day's first reading instead of guessing how much of
      the gap was yesterday's.
-   - **Vs even** — pace vs an even burn over the window (`1.0x` = on track).
+
+   Burn Rate's **Even burn** shows pace against an even burn.
 3. The line takes the key's level color (**Colors & thresholds**). A new key
    says "collecting…" until at least two readings exist.
 4. **Monthly** plots extra usage as a % of your monthly cap, but only as far
    back as the recorded history (8 days); a drop in the percentage is taken
-   as the start of a new month. **Vs even** shows "—" for Monthly, since the
-   usage data has no monthly reset time. If extra usage isn't enabled, the
-   key says "off · not enabled".
+   as the start of a new month. If extra usage isn't enabled, the key says
+   "off · not enabled".
 
 Anthropic's usage endpoint only reports the current percentages, so the
 plugin records them itself: each successful poll whose numbers changed (plus the

@@ -189,8 +189,9 @@ mod tests {
     #[test]
     fn strip_headline_shrinks_to_clear_a_long_caption() {
         let mut d = display(rising());
-        d.caption = "PER POLL \u{b7} 5H".to_string();
-        d.headline = "+12.3pp".to_string();
+        // Any 13-character caption and 7-character headline.
+        d.caption = "ABCDEFGH \u{b7} 5H".to_string();
+        d.headline = "123.4pp".to_string();
         let s = render_strip(&d);
         let size: f64 = s
             .split(r#"x="190" y="20" text-anchor="end" font-family="sans-serif" font-size=""#)
