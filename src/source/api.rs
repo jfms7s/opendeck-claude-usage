@@ -64,7 +64,9 @@ impl ApiUsageSource {
         if !token.expired {
             return Ok(token.access);
         }
-        let Some(renewer) = &self.renewer else {
+        // Without a refresh token there is nothing Claude Code could renew
+        // with (e.g. it has just signed out): don't run it.
+        let Some(renewer) = self.renewer.as_ref().filter(|_| token.renewable) else {
             return Err(expired(EXPIRED_OPEN_CLAUDE));
         };
         match renewer.renew().await {
@@ -111,7 +113,8 @@ impl Default for ApiUsageSource {
 }
 
 const EXPIRED_OPEN_CLAUDE: &str = "open Claude Code to renew it";
-const EXPIRED_RETRYING: &str = "renewal was tried recently and is retried shortly";
+const EXPIRED_RETRYING: &str =
+    "Claude Code could not renew it less than 10 minutes ago; open Claude Code to renew it now";
 
 fn expired(detail: &str) -> UsageSourceError {
     UsageSourceError::Credentials(format!("access token expired; {detail}"))
@@ -122,18 +125,22 @@ fn expired(detail: &str) -> UsageSourceError {
 /// 2.1.310 with fixture credentials) refreshes an expired access token
 /// through Claude Code's own refresh path and writes the new tokens back
 /// to its store, and sends no token request while the token is fresh.
-/// The plugin never sees the refresh token, so it can't race Claude Code
-/// over a rotated one. Its output (account email, org) is discarded.
+/// The plugin never uses the refresh token (it only checks one is there),
+/// so it can't race Claude Code over a rotated one; concurrent Claude Code
+/// processes serialise their refreshes themselves (two simultaneous runs
+/// against a rotating fixture endpoint made one token request). Its
+/// output (account email, org) is discarded.
 pub struct Renewer {
     /// Where to look for `claude` when `PATH` has none (OpenDeck started
     /// from a desktop session often lacks `~/.local/bin`).
     home: Option<PathBuf>,
     /// `PATH` to search, as for `std::env::split_paths`.
     path: Option<std::ffi::OsString>,
-    /// A run is killed after this. The usage cache waits for it, so keep
-    /// it short.
+    /// A run (its whole process group) is killed after this. The usage
+    /// cache waits for it, so no longer than the Keychain read's 10 s.
     timeout: Duration,
-    /// At most one run per this long, whatever its outcome.
+    /// At most one run per this long, whatever its outcome. (Finding no
+    /// `claude` is not a run.)
     cooldown: Duration,
     last_run: Mutex<Option<Instant>>,
 }
@@ -165,7 +172,7 @@ impl Renewer {
         Self {
             home,
             path,
-            timeout: Duration::from_secs(15),
+            timeout: Duration::from_secs(10),
             cooldown: Duration::from_secs(10 * 60),
             last_run: Mutex::new(None),
         }
@@ -195,6 +202,9 @@ impl Renewer {
     }
 
     async fn renew(&self) -> Renewal {
+        let Some(claude) = self.claude() else {
+            return Renewal::Unavailable;
+        };
         {
             let mut last = self.last_run.lock().unwrap_or_else(|e| e.into_inner());
             if last.is_some_and(|at| at.elapsed() < self.cooldown) {
@@ -202,9 +212,6 @@ impl Renewer {
             }
             *last = Some(Instant::now());
         }
-        let Some(claude) = self.claude() else {
-            return Renewal::Unavailable;
-        };
         log::info!("OAuth access token expired; asking Claude Code to renew it");
         let mut command = tokio::process::Command::new(&claude);
         command
@@ -212,6 +219,10 @@ impl Renewer {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
+            // Its own process group, so a timeout kills anything it started.
+            .process_group(0)
+            // The credentials read here are `~/.claude`'s, so renew those.
+            .env_remove("CLAUDE_CONFIG_DIR")
             .kill_on_drop(true);
         // Not the plugin's folder: run where a user's own `claude` would.
         if let Some(home) = self.home.as_deref().filter(|h| h.is_dir()) {
@@ -221,8 +232,16 @@ impl Renewer {
             Ok(child) => child,
             Err(e) => return Renewal::Failed(format!("could not run claude: {}", e.kind())),
         };
+        let pid = child.id();
         match tokio::time::timeout(self.timeout, child.wait()).await {
-            Err(_) => Renewal::Failed("`claude auth status` timed out".to_string()),
+            Err(_) => {
+                if let Some(pgid) = pid.and_then(|p| libc::pid_t::try_from(p).ok()) {
+                    // SAFETY: plain syscall; the child has not been reaped
+                    // (`wait` did not finish), so its id still names its group.
+                    unsafe { libc::kill(-pgid, libc::SIGKILL) };
+                }
+                Renewal::Failed("`claude auth status` timed out".to_string())
+            }
             Ok(Err(e)) => Renewal::Failed(format!("`claude auth status` failed: {}", e.kind())),
             Ok(Ok(status)) if status.success() => Renewal::Ran,
             Ok(Ok(status)) => Renewal::Failed(match status.code() {
@@ -402,6 +421,16 @@ struct RawOauth {
     /// Unix epoch milliseconds.
     #[serde(rename = "expiresAt")]
     expires_at: Option<i64>,
+    /// Only whether there is one: the value is never kept or used.
+    #[serde(rename = "refreshToken", default, deserialize_with = "is_present")]
+    has_refresh_token: bool,
+}
+
+/// True for a non-empty string; any other value (or type) is false, never
+/// a parse error.
+fn is_present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(matches!(value, serde_json::Value::String(s) if !s.is_empty()))
 }
 
 /// The access token from the credentials JSON, and whether it has expired
@@ -409,6 +438,8 @@ struct RawOauth {
 struct Token {
     access: String,
     expired: bool,
+    /// Whether a refresh token is there for Claude Code to renew with.
+    renewable: bool,
 }
 
 /// Pulls the access token out of the credentials file's contents, refusing
@@ -442,6 +473,7 @@ fn read_token(json: &str, now: DateTime<Utc>) -> Result<Token, UsageSourceError>
     Ok(Token {
         access: raw.oauth.access_token,
         expired,
+        renewable: raw.oauth.has_refresh_token,
     })
 }
 
@@ -1085,7 +1117,10 @@ mod renewer_tests {
         let first = token(&source).await.unwrap_err();
         let second = source.token().await.unwrap_err();
         assert!(first.to_string().contains("exited 1"), "{first}");
-        assert!(second.to_string().contains("retried shortly"), "{second}");
+        assert!(
+            second.to_string().contains("less than 10 minutes ago"),
+            "{second}"
+        );
         assert_eq!(f.runs(), 1);
 
         // Once the cooldown has passed, it tries again.
@@ -1132,6 +1167,55 @@ mod renewer_tests {
         assert_eq!(f.runs(), 0);
     }
 
+    #[tokio::test]
+    async fn without_a_refresh_token_claude_is_not_run() {
+        let f = Fixture::expired();
+        let past = (Utc::now() - chrono::Duration::hours(1)).timestamp_millis();
+        for oauth in [
+            format!(r#"{{"accessToken": "{SECRET}", "expiresAt": {past}}}"#),
+            r#"{"accessToken": "", "refreshToken": "", "expiresAt": 0}"#.to_string(),
+            format!(r#"{{"accessToken": "{SECRET}", "refreshToken": 7, "expiresAt": {past}}}"#),
+        ] {
+            let json = format!(r#"{{"claudeAiOauth": {oauth}}}"#);
+            std::fs::write(f.credentials_path(), json).unwrap();
+            let claude = f.renewing_claude();
+            let source = f.source(Some(f.renewer(&[claude.parent().unwrap().into()])));
+            let err = token(&source).await.unwrap_err();
+            assert!(err.to_string().contains("open Claude Code"), "{err}");
+        }
+        assert_eq!(f.runs(), 0);
+    }
+
+    #[tokio::test]
+    async fn not_finding_claude_does_not_start_the_cooldown() {
+        let f = Fixture::expired();
+        let bin = f.home().join("bin");
+        let source = f.source(Some(f.renewer(std::slice::from_ref(&bin))));
+        token(&source).await.unwrap_err();
+        // `claude` is installed afterwards: the next read uses it at once.
+        f.renewing_claude();
+        assert_eq!(token(&source).await.unwrap(), "sk-ant-oat01-RENEWED");
+        assert_eq!(f.runs(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_timeout_kills_what_claude_started() {
+        let f = Fixture::expired();
+        let marker = f.home().join("grandchild-ran");
+        // A grandchild that would write the marker if it outlived the kill.
+        let body = format!("(sleep 1; touch '{}') &\nwait", marker.display());
+        let claude = f.claude_at("bin/claude", &body);
+        let mut renewer = f.renewer(&[claude.parent().unwrap().into()]);
+        renewer.timeout = Duration::from_millis(200);
+        let err = token(&f.source(Some(renewer))).await.unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            !marker.exists(),
+            "a process claude started outlived the timeout"
+        );
+    }
+
     #[test]
     fn claude_is_found_on_path_first_then_in_home() {
         let f = Fixture::expired();
@@ -1151,8 +1235,11 @@ mod renewer_tests {
         // A file that isn't executable doesn't count.
         std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(f.renewer(&[]).claude(), None);
-        // Nor does a relative home.
+        // Nor does a directory called claude, a relative home, or no home.
+        std::fs::create_dir_all(f.home().join("dir/claude")).unwrap();
+        assert_eq!(f.renewer(&[f.home().join("dir")]).claude(), None);
         let r = Renewer::new(Some(PathBuf::from("home")), None);
         assert_eq!(r.claude(), None);
+        assert_eq!(Renewer::new(None, None).claude(), None);
     }
 }
