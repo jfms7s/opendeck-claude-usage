@@ -138,6 +138,10 @@ fn wire(
 async fn main() -> OpenActionResult<()> {
     simplelog::SimpleLogger::init(log::LevelFilter::Info, simplelog::Config::default())
         .expect("logger init");
+    log::info!(
+        "opendeck-claude-usage {} starting",
+        env!("CARGO_PKG_VERSION")
+    );
 
     // Recorded %-of-limit readings for Usage Sparkline, kept in a small
     // file under the state dir (`paths::state_base`: ~/.local/state on

@@ -100,6 +100,15 @@ pub fn same_reset(a: Option<DateTime<Utc>>, b: Option<DateTime<Utc>>) -> bool {
     }
 }
 
+/// Whether `line` is a JSON object - a well-formed line, as opposed to a
+/// torn write.
+fn is_json_object(line: &str) -> bool {
+    matches!(
+        serde_json::from_str::<serde_json::Value>(line),
+        Ok(serde_json::Value::Object(_))
+    )
+}
+
 impl HistoryStore {
     /// `state_base()` plus the plugin's own directory.
     pub fn default_path() -> PathBuf {
@@ -128,10 +137,11 @@ impl HistoryStore {
 
     /// Loads, prunes and sorts the recorded readings, rewriting the file
     /// pruned so it never grows beyond a few days of readings across
-    /// restarts. A missing file just starts empty; unreadable lines (e.g.
-    /// a crash mid-append) are skipped. A file that can't be read at all,
-    /// or in which not one line parses (a newer version's format), is
-    /// never rewritten: that would wipe readings this version can't see.
+    /// restarts. A missing file just starts empty; lines that aren't JSON
+    /// (e.g. a crash mid-append) are skipped. A file that can't be read at
+    /// all, or with any line that is a JSON object this version can't read
+    /// (a newer version's format), is never rewritten: that would wipe
+    /// readings this version can't see. Its readable lines still load.
     pub fn load(path: PathBuf, now: DateTime<Utc>) -> Arc<Self> {
         let mut store = Self {
             readings: Mutex::new(Vec::new()),
@@ -148,10 +158,24 @@ impl HistoryStore {
             Ok(bytes) => {
                 let text = String::from_utf8_lossy(&bytes);
                 let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
-                let parsed: Vec<Reading> = text
-                    .lines()
-                    .filter_map(|l| serde_json::from_str(l).ok())
-                    .collect();
+                let mut parsed: Vec<Reading> = Vec::new();
+                let mut newer = 0;
+                for line in text.lines() {
+                    match serde_json::from_str(line) {
+                        Ok(reading) => parsed.push(reading),
+                        Err(_) if is_json_object(line) => newer += 1,
+                        Err(_) => {}
+                    }
+                }
+                if newer > 0 && !parsed.is_empty() {
+                    log::warn!(
+                        "usage history {} has {newer} lines this version can't read \
+                         (written by a newer version?); loading the rest and leaving the \
+                         file untouched",
+                        path.display()
+                    );
+                    store.rewritable = false;
+                }
                 if lines > 0 && parsed.is_empty() {
                     log::warn!(
                         "usage history {} has {lines} lines but none this version can read \
@@ -183,7 +207,10 @@ impl HistoryStore {
         readings.sort_by_key(|r| r.at);
         // Only rewrite what was actually read - rewriting after a failed
         // read would wipe the file.
-        if loaded && let Err(e) = store.rewrite(&readings) {
+        if loaded
+            && store.rewritable
+            && let Err(e) = store.rewrite(&readings)
+        {
             store.warn_write(&path, &e);
         }
         *store
@@ -709,6 +736,24 @@ mod tests {
         assert!(store.readings().is_empty());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), future);
         // And nothing compacts it later either.
+        assert!(!store.rewritable);
+    }
+
+    /// Older readings plus a line from a newer schema: the readable ones
+    /// load, and the file is never rewritten (or compacted) over the line
+    /// this version can't see.
+    #[test]
+    fn a_file_with_some_newer_lines_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let original = format!(
+            "{}\n{{\"at\":\"2026-09-30T09:30:00Z\",\"v\":2}}\n",
+            line(&reading(at(9), 20.0))
+        );
+        std::fs::write(&path, &original).unwrap();
+        let store = HistoryStore::load(path.clone(), at(10));
+        assert_eq!(store.readings(), vec![reading(at(9), 20.0)]);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         assert!(!store.rewritable);
     }
 

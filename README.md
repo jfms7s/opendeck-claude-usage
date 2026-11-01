@@ -267,8 +267,9 @@ times - no tokens, credentials or account data - and anything older than 8
 days is dropped as it goes. The file and its folder are owner-only. Delete
 the file any time to reset the history. If the folder can't be written, the
 plugin logs one warning and keeps the history in memory until OpenDeck
-restarts. A file this version can't read (say, written by a newer version
-before a downgrade) is left untouched rather than overwritten.
+restarts. A file with lines this version can't read (say, written by a newer
+version before a downgrade) is left untouched rather than overwritten;
+the lines it can read still load.
 
 ## Manual smoke-test checklist
 
