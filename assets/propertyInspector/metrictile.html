@@ -36,15 +36,6 @@
 				</div>
 			</div>
 		</section>
-
-		<section class="card">
-			<h2>Updates</h2>
-			<div class="field">
-				<label for="refresh_seconds">Refresh every</label>
-				<input type="number" id="refresh_seconds" min="5" max="3600" step="1" />
-				<p class="hint">Seconds (5 to 3600).</p>
-			</div>
-		</section>
 	</main>
 	<script src="pi-common.js"></script>
 
@@ -54,18 +45,15 @@
 				selectKnown(document.getElementById("metric"), settings.metric, "tokens");
 				selectKnown(document.getElementById("range"), settings.range, "today");
 				selectKnown(document.getElementById("scope"), settings.scope, "all");
-				const seconds = Number(settings.refresh_seconds);
-				document.getElementById("refresh_seconds").value = Number.isInteger(seconds) && seconds > 0 ? seconds : 60;
 			},
 			read: () => ({
 				metric: document.getElementById("metric").value,
 				range: document.getElementById("range").value,
 				scope: document.getElementById("scope").value,
-				refresh_seconds: Math.min(3600, Math.max(5, parseInt(document.getElementById("refresh_seconds").value, 10) || 60)),
 			}),
 		});
 
-		for (const id of ["metric", "range", "scope", "refresh_seconds"]) {
+		for (const id of ["metric", "range", "scope"]) {
 			document.getElementById(id).addEventListener("change", pi.changed);
 		}
 	</script>

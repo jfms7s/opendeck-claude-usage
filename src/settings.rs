@@ -126,9 +126,9 @@ mod tests {
             |s| s.color == "#123456",
         );
         assert_lenient::<MetricTileSettings>(
-            &["metric", "range", "scope", "refresh_seconds"],
-            ("refresh_seconds", json!(30)),
-            |s| s.refresh_seconds == 30,
+            &["metric", "range", "scope"],
+            ("scope", json!("opus")),
+            |s| s.scope == crate::metric::ModelScope::Opus,
         );
         assert_lenient::<PeakClockSettings>(
             &["peak_start", "peak_end", "peak_days"],
