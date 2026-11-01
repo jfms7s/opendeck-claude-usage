@@ -18,6 +18,7 @@ mod metric;
 mod metric_action;
 mod metric_icon;
 mod pace;
+mod paths;
 mod peak;
 mod press;
 mod pricing;

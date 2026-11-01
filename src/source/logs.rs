@@ -291,8 +291,7 @@ impl LogUsageSource {
     /// `~/.claude/projects` - where Claude Code writes its transcripts, one
     /// directory per project.
     pub fn default_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        PathBuf::from(home).join(".claude/projects")
+        crate::paths::home().join(".claude/projects")
     }
 
     /// Every parsed, deduplicated `LogEntry`. Never fails: a missing or
