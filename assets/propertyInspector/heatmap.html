@@ -17,6 +17,15 @@
 						<option value="cost">Cost (estimated)</option>
 					</select>
 				</div>
+				<div class="field">
+					<label for="scope">Models</label>
+					<select id="scope">
+						<option value="all">All models</option>
+						<option value="opus">Opus</option>
+						<option value="sonnet">Sonnet</option>
+						<option value="haiku">Haiku</option>
+					</select>
+				</div>
 				<div class="field narrow">
 					<label for="color">Color</label>
 					<input type="color" id="color" />
@@ -33,12 +42,14 @@
 		const pi = connectPI({
 			apply(settings) {
 				selectKnown(document.getElementById("metric"), settings.metric, "tokens");
+				selectKnown(document.getElementById("scope"), settings.scope, "all");
 				document.getElementById("color").value = isHexColor(settings.color)
 					? settings.color.toLowerCase()
 					: DEFAULT_COLOR;
 			},
 			read: () => ({
 				metric: document.getElementById("metric").value,
+				scope: document.getElementById("scope").value,
 				color: document.getElementById("color").value,
 			}),
 			// The view changes only by pressing the key.
@@ -46,6 +57,7 @@
 		});
 
 		document.getElementById("metric").addEventListener("change", pi.changed);
+		document.getElementById("scope").addEventListener("change", pi.changed);
 		document.getElementById("color").addEventListener("change", pi.changed);
 	</script>
 </body>

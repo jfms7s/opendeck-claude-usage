@@ -164,6 +164,10 @@ green/yellow/red at 50/80% to copper with Watch 50, Risk 75 and Critical
    (5 to 3600 seconds). **Today** is since local midnight (the same day as
    the Heatmap's and the Sparkline's "today"); **7 days** is the last 7×24
    hours; **Session** is the current 5-hour usage window.
+   **Models** limits the count to one family (**Opus**, **Sonnet** or
+   **Haiku**, matched in the model id) or keeps **All models**; a scoped
+   tile names the family under the number (`today · opus`) and shows `0`,
+   not "no data", when that family has no usage in range.
 3. It updates automatically on that schedule; tap the tile for an
    immediate refresh (this doesn't reset the schedule - the next
    automatic refresh still happens on time). A Session tile's tap uses the
@@ -237,7 +241,9 @@ touch-strip bar.
 
 1. Add a **Usage Heatmap** key on a dial or a keypad tile.
 2. Pick what to measure — **Tokens** or estimated **Cost**, from the same
-   local Claude Code logs as Metric Tile — and a color.
+   local Claude Code logs as Metric Tile — and a color. **Models** limits
+   it to one family (Opus, Sonnet or Haiku) as on Metric Tile; the caption
+   then names the family (`OPUS · 1.2M`) instead of the view.
 3. Each cell is one local calendar day, shaded relative to the busiest day
    shown; days with no usage stay grey. The caption shows the total.
 4. A short press (key or dial) flips between **7 days** (today on the

@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
-use crate::metric::{MetricDisplay, MetricKind, RangeKind, build_metric_display, error_display};
+use crate::metric::{
+    MetricDisplay, MetricKind, ModelScope, RangeKind, build_scoped_metric_display, error_display,
+};
 use crate::metric_icon::build_metric_icon;
 use crate::settings::lenient;
 use crate::source::cached::SharedUsage;
@@ -32,6 +34,9 @@ pub struct MetricTileSettings {
     pub metric: MetricKind,
     #[serde(default, deserialize_with = "lenient")]
     pub range: RangeKind,
+    /// Which models count (all, or one family).
+    #[serde(default, deserialize_with = "lenient")]
+    pub scope: ModelScope,
     #[serde(default = "default_refresh", deserialize_with = "lenient_refresh")]
     pub refresh_seconds: u64,
 }
@@ -50,6 +55,7 @@ impl Default for MetricTileSettings {
         Self {
             metric: MetricKind::default(),
             range: RangeKind::default(),
+            scope: ModelScope::default(),
             refresh_seconds: default_refresh(),
         }
     }
@@ -139,10 +145,11 @@ impl MetricTileAction {
         } else {
             None
         };
-        build_metric_display(
+        build_scoped_metric_display(
             entries,
             settings.metric,
             settings.range,
+            settings.scope,
             chrono::Local::now(),
             session_resets_at,
         )
@@ -320,6 +327,7 @@ impl Action for MetricTileAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metric::build_metric_display;
     use crate::source::cached::test_support::shared;
     use crate::source::{MonthlyUsage, UsageSnapshot, UsageSource, UsageSourceError, WindowUsage};
     use crate::surface::test_support::FakeSurface;
@@ -416,8 +424,39 @@ mod tests {
                 metric: MetricKind::Cost,
                 range: RangeKind::SevenDay,
                 refresh_seconds: 120,
+                ..MetricTileSettings::default()
             }
         );
+    }
+
+    /// A tile scoped to a family that has no usage shows a real zero
+    /// with the family named, not "no data".
+    #[tokio::test]
+    async fn a_scoped_tile_with_no_matching_usage_shows_zero() {
+        let action = action();
+        let key = FakeSurface::new("a", true);
+        let haiku = MetricTileSettings {
+            scope: ModelScope::Haiku,
+            ..MetricTileSettings::default()
+        };
+        action
+            .render(&key, &[entry()], &haiku, UsageRead::Cached)
+            .await
+            .unwrap();
+        let [Output::Image(frame)] = &key.frames()[..] else {
+            panic!("expected one frame");
+        };
+        let display = build_scoped_metric_display(
+            &[entry()],
+            MetricKind::Tokens,
+            RangeKind::Today,
+            ModelScope::Haiku,
+            chrono::Local::now(),
+            None,
+        );
+        assert_eq!(display.value_text, "0");
+        assert_eq!(display.subtitle, "today \u{b7} haiku");
+        assert_eq!(*frame, build_metric_icon(&display));
     }
 
     #[test]
@@ -451,6 +490,7 @@ mod tests {
                 metric: MetricKind::Cost,
                 range: RangeKind::Session,
                 refresh_seconds: 30,
+                ..MetricTileSettings::default()
             },
         );
         let tracked = action.registry.get("ctx1").unwrap();

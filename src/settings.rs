@@ -121,12 +121,12 @@ mod tests {
             |s| s.colors.palette.normal == "#123456",
         );
         assert_lenient::<HeatmapSettings>(
-            &["metric", "view", "color"],
+            &["metric", "view", "color", "scope"],
             ("color", json!("#123456")),
             |s| s.color == "#123456",
         );
         assert_lenient::<MetricTileSettings>(
-            &["metric", "range", "refresh_seconds"],
+            &["metric", "range", "scope", "refresh_seconds"],
             ("refresh_seconds", json!(30)),
             |s| s.refresh_seconds == 30,
         );
