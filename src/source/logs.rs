@@ -25,7 +25,8 @@ use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
@@ -253,10 +254,8 @@ impl Store {
 pub struct LogUsageSource {
     projects_dir: PathBuf,
     store: Arc<Mutex<Store>>,
-    /// The entries as of the last completed scan; `None` until one has
-    /// completed. Its own lock, held only to copy the `Arc`, so `peek`
-    /// never waits on a scan that holds `store`.
-    latest: Arc<Mutex<Option<Arc<Vec<LogEntry>>>>>,
+    /// Set once a scan has completed.
+    scanned: Arc<AtomicBool>,
 }
 
 /// `projects/<project>/<session>/subagents/<agent>.jsonl` is the deepest
@@ -268,26 +267,25 @@ impl LogUsageSource {
         Self {
             projects_dir,
             store: Arc::new(Mutex::new(Store::default())),
-            latest: Arc::new(Mutex::new(None)),
+            scanned: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Whether a scan has completed, so `entries()` only tails files
-    /// (milliseconds) instead of reading every transcript from the start.
+    /// Whether a scan has completed, so `entries()` normally only tails
+    /// the files (milliseconds) instead of reading every transcript from
+    /// the start. (A shrunk or vanished transcript still makes a later scan
+    /// start over.)
     pub fn scanned(&self) -> bool {
-        self.latest_guard().is_some()
+        self.scanned.load(Ordering::Acquire)
     }
 
-    /// The entries as of the last completed scan (empty before the first),
-    /// without scanning or waiting on a scan.
+    /// The entries already scanned, without scanning or waiting: empty
+    /// before the first scan, and while a scan holds the store.
     pub fn peek(&self) -> Arc<Vec<LogEntry>> {
-        self.latest_guard().clone().unwrap_or_default()
-    }
-
-    fn latest_guard(&self) -> MutexGuard<'_, Option<Arc<Vec<LogEntry>>>> {
-        // Only ever holds a finished `Arc`, so a poisoned lock is still
-        // consistent.
-        self.latest.lock().unwrap_or_else(PoisonError::into_inner)
+        match self.store.try_lock() {
+            Ok(store) => Arc::clone(&store.entries),
+            Err(_) => Arc::default(),
+        }
     }
 
     /// `~/.claude/projects` - where Claude Code writes its transcripts, one
@@ -304,8 +302,12 @@ impl LogUsageSource {
     pub async fn entries(&self) -> Arc<Vec<LogEntry>> {
         let projects_dir = self.projects_dir.clone();
         let store = Arc::clone(&self.store);
-        let latest = Arc::clone(&self.latest);
-        let scan = move || Self::scan(&projects_dir, &store, &latest);
+        let scanned = Arc::clone(&self.scanned);
+        let scan = move || {
+            let entries = Self::scan(&projects_dir, &store);
+            scanned.store(true, Ordering::Release);
+            entries
+        };
         match tokio::task::spawn_blocking(scan).await {
             Ok(entries) => entries,
             Err(e) => {
@@ -359,11 +361,7 @@ impl LogUsageSource {
         }
     }
 
-    fn scan(
-        projects_dir: &Path,
-        store: &Mutex<Store>,
-        latest: &Mutex<Option<Arc<Vec<LogEntry>>>>,
-    ) -> Arc<Vec<LogEntry>> {
+    fn scan(projects_dir: &Path, store: &Mutex<Store>) -> Arc<Vec<LogEntry>> {
         let files = Self::list_files(projects_dir);
         let mut store = Self::lock(store);
         let present: HashSet<&Path> = files.iter().map(|(p, _, _)| p.as_path()).collect();
@@ -394,9 +392,6 @@ impl LogUsageSource {
             };
             store.files.insert(path, FileState { len, mtime, offset });
         }
-        // Published under the store lock, so an older scan's result can't
-        // land after a newer one's.
-        *latest.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&store.entries));
         Arc::clone(&store.entries)
     }
 }

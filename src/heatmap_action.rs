@@ -111,7 +111,13 @@ impl HeatmapAction {
         let pushed = self.frames.push(surface, output).await;
         if !self.first_scan_spawned.swap(true, Ordering::SeqCst) {
             let this = self.clone();
-            tokio::spawn(async move { this.render_tracked(lookup).await });
+            tokio::spawn(async move {
+                this.render_tracked(lookup).await;
+                // A scan that panicked leaves the next event to retry.
+                if !this.logs.scanned() {
+                    this.first_scan_spawned.store(false, Ordering::SeqCst);
+                }
+            });
         }
         pushed
     }
@@ -314,12 +320,20 @@ mod tests {
         assert_ne!(frames[1], empty);
     }
 
-    /// Once scanned, an event reads the (tailed) transcripts directly.
+    /// Once scanned, an event reads the (tailed) transcripts directly:
+    /// a line written since the scan is drawn.
     #[tokio::test]
     async fn an_event_after_the_first_scan_draws_fresh_entries() {
         let root = one_transcript();
         let logs = Arc::new(LogUsageSource::new(root.path().to_path_buf()));
-        logs.entries().await;
+        let before = logs.entries().await;
+        let line = std::fs::read_to_string(root.path().join("project/session.jsonl")).unwrap();
+        let newer = line.replace("\"input_tokens\":2000", "\"input_tokens\":9000");
+        std::fs::write(
+            root.path().join("project/later.jsonl"),
+            format!("{newer}\n"),
+        )
+        .unwrap();
         let action = HeatmapAction::new(Arc::clone(&logs));
         let settings = HeatmapSettings::default();
         let key = FakeSurface::new("a", true);
@@ -329,11 +343,38 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(
-            key.frames(),
-            vec![output_from(&logs.peek(), &settings, true)]
-        );
+        let after = logs.peek();
+        assert_eq!(after.len(), before.len() + 1);
+        assert_eq!(key.frames(), vec![output_from(&after, &settings, true)]);
+        assert_ne!(key.frames()[0], output_from(&before, &settings, true));
         assert!(!action.first_scan_spawned.load(Ordering::SeqCst));
+    }
+
+    /// A heatmap removed before the first scan finishes isn't redrawn.
+    #[tokio::test]
+    async fn the_first_scan_does_not_redraw_a_removed_heatmap() {
+        let root = one_transcript();
+        let logs = Arc::new(LogUsageSource::new(root.path().to_path_buf()));
+        let action = HeatmapAction::new(Arc::clone(&logs));
+        let settings = HeatmapSettings::default();
+        let key = FakeSurface::new("a", true);
+        action.track("a", &settings);
+        let lookup = {
+            let key = key.clone();
+            move |_: String| std::future::ready(Some(key.clone()))
+        };
+        action.render_with(&key, &settings, lookup).await.unwrap();
+        // Removed before the spawned scan gets to run (one-thread runtime).
+        action.presses.forget("a");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !logs.scanned() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(key.frames().len(), 1, "a removed key was redrawn");
     }
 
     #[test]
