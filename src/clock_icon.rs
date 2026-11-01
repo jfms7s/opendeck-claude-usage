@@ -18,6 +18,15 @@ const POINTER_LENGTH: f64 = 21.0;
 const POINTER_WIDTH: f64 = 4.0;
 const PIVOT_RADIUS: f64 = 4.0;
 
+/// The usage ring inside the face: 24 hour segments, each shaded by how
+/// much that hour is used relative to the busiest one.
+const USAGE_RING_RADIUS: f64 = 18.0;
+const USAGE_RING_WIDTH: f64 = 5.0;
+const USAGE_RING_COLOR: &str = "#38bdf8";
+/// Minutes left blank at each end of an hour's segment, so the hours read
+/// as separate cells.
+const USAGE_RING_GAP: u32 = 3;
+
 const STATUS_BASELINE: f64 = 82.0;
 const STATUS_SIZE: f64 = 17.0;
 const COUNTDOWN_BASELINE: f64 = 97.0;
@@ -65,6 +74,32 @@ fn peak_arcs(window: PeakWindow, active: bool) -> String {
         .collect()
 }
 
+/// The hour-of-day usage ring: one arc per hour with any usage, its
+/// opacity `0.15 + 0.6 x` its share of the busiest hour. Nothing when no
+/// hour has usage (or the values aren't finite), so a clock without data
+/// is drawn exactly as before.
+fn usage_ring(hours: &[f64; 24]) -> String {
+    let max = hours.iter().copied().fold(0.0_f64, f64::max);
+    if !(max.is_finite() && max > 0.0) {
+        return String::new();
+    }
+    hours
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| **v > 0.0)
+        .map(|(hour, v)| {
+            let start = hour as u32 * 60 + USAGE_RING_GAP;
+            let end = (hour as u32 + 1) * 60 - USAGE_RING_GAP;
+            let (sx, sy) = point_on_ring(start, USAGE_RING_RADIUS);
+            let (ex, ey) = point_on_ring(end, USAGE_RING_RADIUS);
+            let opacity = 0.15 + 0.6 * (v / max).clamp(0.0, 1.0);
+            format!(
+                r#"<path d="M {sx:.2} {sy:.2} A {USAGE_RING_RADIUS} {USAGE_RING_RADIUS} 0 0 1 {ex:.2} {ey:.2}" fill="none" stroke="{USAGE_RING_COLOR}" stroke-opacity="{opacity:.2}" stroke-width="{USAGE_RING_WIDTH}" />"#
+            )
+        })
+        .collect()
+}
+
 /// Renders the tile as an SVG string: a dark card, the 24h clock face (a
 /// full ring, red arc(s) over the peak window, and a light pointer at
 /// `now_minutes`; the arcs dimmed when `arcs_active` is false because the
@@ -76,8 +111,10 @@ fn render_svg(
     now_minutes: u32,
     arcs_active: bool,
     status: &PeakStatus,
+    usage: Option<&[f64; 24]>,
 ) -> String {
     let arcs = peak_arcs(window, arcs_active);
+    let ring = usage.map(usage_ring).unwrap_or_default();
     let (tx, ty) = point_on_ring(now_minutes, POINTER_LENGTH);
     let status_line = tile::text_line(
         STATUS_BASELINE,
@@ -95,7 +132,7 @@ fn render_svg(
     );
 
     tile::svg(&format!(
-        r#"<circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{FACE_RADIUS}" fill="none" stroke="{FACE_COLOR}" stroke-width="{RING_STROKE_WIDTH}" />{arcs}<line x1="{CENTER_X}" y1="{CENTER_Y}" x2="{tx:.2}" y2="{ty:.2}" stroke="{POINTER_COLOR}" stroke-width="{POINTER_WIDTH}" stroke-linecap="round" /><circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{PIVOT_RADIUS}" fill="{POINTER_COLOR}" />{status_line}{countdown_line}"#
+        r#"<circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{FACE_RADIUS}" fill="none" stroke="{FACE_COLOR}" stroke-width="{RING_STROKE_WIDTH}" />{arcs}{ring}<line x1="{CENTER_X}" y1="{CENTER_Y}" x2="{tx:.2}" y2="{ty:.2}" stroke="{POINTER_COLOR}" stroke-width="{POINTER_WIDTH}" stroke-linecap="round" /><circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{PIVOT_RADIUS}" fill="{POINTER_COLOR}" />{status_line}{countdown_line}"#
     ))
 }
 
@@ -108,13 +145,16 @@ fn status_color(is_peak: bool) -> &'static str {
 }
 
 /// Builds the `image` string OpenDeck's `setImage` event expects.
+/// `usage` is tokens per local hour (index 0 = midnight); `None` draws no
+/// usage ring.
 pub fn build_clock_icon(
     window: PeakWindow,
     now_minutes: u32,
     arcs_active: bool,
     status: &PeakStatus,
+    usage: Option<&[f64; 24]>,
 ) -> String {
-    tile::data_uri(&render_svg(window, now_minutes, arcs_active, status))
+    tile::data_uri(&render_svg(window, now_minutes, arcs_active, status, usage))
 }
 
 #[cfg(test)]
@@ -153,7 +193,13 @@ mod tests {
     }
 
     fn render(window: PeakWindow, now_minutes: u32) -> String {
-        decode(&build_clock_icon(window, now_minutes, true, &status(false)))
+        decode(&build_clock_icon(
+            window,
+            now_minutes,
+            true,
+            &status(false),
+            None,
+        ))
     }
 
     fn pointer_tip(x: f64, y: f64) -> String {
@@ -168,6 +214,47 @@ mod tests {
     }
 
     const PINNED_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><rect x=\"0\" y=\"0\" width=\"100\" height=\"100\" fill=\"#111827\" /><circle cx=\"50\" cy=\"36\" r=\"27\" fill=\"none\" stroke=\"#4b5563\" stroke-width=\"8\" /><path d=\"M 69.09 55.09 A 27 27 0 0 1 23.92 42.99\" fill=\"none\" stroke=\"#ef4444\" stroke-width=\"8\" stroke-linecap=\"round\" /><line x1=\"50\" y1=\"36\" x2=\"60.50\" y2=\"54.19\" stroke=\"#f9fafb\" stroke-width=\"4\" stroke-linecap=\"round\" /><circle cx=\"50\" cy=\"36\" r=\"4\" fill=\"#f9fafb\" /><text x=\"50\" y=\"82\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"17\" font-weight=\"700\" fill=\"#4ade80\">Off-peak</text><text x=\"50\" y=\"97\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"13\" font-weight=\"500\" fill=\"#d1d5db\" textLength=\"94\" lengthAdjust=\"spacingAndGlyphs\">peak in 01:00</text></svg>";
+
+    /// No profile, or one with no usage, draws the clock exactly as before.
+    #[test]
+    fn no_usage_draws_no_ring() {
+        for usage in [None, Some(&[0.0; 24])] {
+            let svg = decode(&build_clock_icon(
+                normal_window(),
+                600,
+                true,
+                &status(false),
+                usage,
+            ));
+            assert_eq!(svg, PINNED_SVG);
+        }
+    }
+
+    /// One segment per hour with usage, the busiest hour the most opaque.
+    #[test]
+    fn a_profile_adds_one_ring_segment_per_used_hour() {
+        let mut hours = [1.0; 24];
+        hours[9] = 4.0;
+        hours[3] = 0.0;
+        let svg = decode(&build_clock_icon(
+            normal_window(),
+            600,
+            true,
+            &status(false),
+            Some(&hours),
+        ));
+        assert_eq!(svg.matches(USAGE_RING_COLOR).count(), 23);
+        assert_eq!(svg.matches(r#"stroke-opacity="0.75""#).count(), 1);
+        assert_eq!(svg.matches(r#"stroke-opacity="0.30""#).count(), 22);
+        // Drawn under the pointer.
+        assert!(svg.find(USAGE_RING_COLOR).unwrap() < svg.find("<line").unwrap());
+        // Hour 0 starts just after the top of the face (00:03).
+        let (x, y) = point_on_ring(USAGE_RING_GAP, USAGE_RING_RADIUS);
+        assert!(
+            svg.contains(&format!("M {x:.2} {y:.2} A 18 18")),
+            "got: {svg}"
+        );
+    }
 
     #[test]
     fn builds_a_valid_svg_data_uri() {
@@ -231,7 +318,13 @@ mod tests {
 
     #[test]
     fn status_text_is_red_when_peak_and_green_when_off_peak() {
-        let peak = decode(&build_clock_icon(normal_window(), 600, true, &status(true)));
+        let peak = decode(&build_clock_icon(
+            normal_window(),
+            600,
+            true,
+            &status(true),
+            None,
+        ));
         assert!(peak.contains(&format!("fill=\"{PEAK_TEXT_COLOR}\">Peak</text>")));
         let off = render(normal_window(), 600);
         assert!(off.contains(&format!("fill=\"{OFF_PEAK_TEXT_COLOR}\">Off-peak</text>")));
@@ -244,6 +337,7 @@ mod tests {
             600,
             false,
             &status(false),
+            None,
         ));
         assert_eq!(svg.matches(PEAK_COLOR).count(), 0);
         assert_eq!(svg.matches(INACTIVE_PEAK_COLOR).count(), 1);

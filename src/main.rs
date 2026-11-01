@@ -125,7 +125,7 @@ fn wire(
         burn_rate: BurnRateAction::new(Arc::clone(&hub)),
         combo: ComboAction::new(Arc::clone(&hub)),
         sparkline: SparklineAction::new(Arc::clone(&hub)),
-        clock: PeakClockAction::new(),
+        clock: PeakClockAction::new(Arc::clone(&logs)),
         metric_tile: MetricTileAction::new(Arc::clone(&logs), usage),
         heatmap: HeatmapAction::new(logs),
         hub,
