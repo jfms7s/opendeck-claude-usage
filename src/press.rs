@@ -5,6 +5,7 @@
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 
 /// Held at least this long, a press refreshes instead of changing the view.
 pub const LONG_PRESS: Duration = Duration::from_millis(500);
@@ -124,15 +125,24 @@ impl<S: Clone> LatestSettings<S> {
         fallback: &S,
         decide: impl FnOnce(&S) -> Release<S>,
     ) -> Release<S> {
-        let mut entry = self
-            .by_instance
-            .entry(instance_id.to_string())
-            .or_insert_with(|| fallback.clone());
-        let release = decide(&entry);
-        if let Release::Switch(updated) = &release {
-            *entry = updated.clone();
+        // Only a switch keeps anything: a release for an instance that is
+        // not kept (already forgotten) must not re-track it.
+        match self.by_instance.entry(instance_id.to_string()) {
+            Entry::Occupied(mut kept) => {
+                let release = decide(kept.get());
+                if let Release::Switch(updated) = &release {
+                    kept.insert(updated.clone());
+                }
+                release
+            }
+            Entry::Vacant(vacant) => {
+                let release = decide(fallback);
+                if let Release::Switch(updated) = &release {
+                    vacant.insert(updated.clone());
+                }
+                release
+            }
         }
-        release
     }
 }
 
@@ -337,6 +347,21 @@ mod tests {
         );
         assert_eq!(latest.release("a", &1, |_| Release::Stay), Release::Stay);
         assert_eq!(latest.current("a", &1), 5);
+    }
+
+    /// A release for a forgotten instance doesn't re-track it unless it
+    /// switches (for Heatmap the kept settings are the tick registry).
+    #[test]
+    fn a_release_after_forget_does_not_re_track_the_instance() {
+        let latest = LatestSettings::default();
+        latest.set("a", &5);
+        latest.forget("a");
+        assert_eq!(
+            latest.release("a", &1, |_| Release::Refresh),
+            Release::Refresh
+        );
+        assert_eq!(latest.release("a", &1, |_| Release::Stay), Release::Stay);
+        assert!(latest.is_empty());
     }
 
     #[test]

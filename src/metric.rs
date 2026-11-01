@@ -36,12 +36,11 @@ pub struct MetricDisplay {
 /// `[start, end]` bounds for `range`, in UTC. `Today` runs from local
 /// midnight (in `now`'s time zone, like the Heatmap's days and the
 /// Sparkline's "Today"); `SevenDay` is a rolling 7x24h ending at `now`.
-/// `Session`
-/// mirrors the existing Usage Gauge's 5-hour rate-limit window:
-/// `[resets_at - 5h, resets_at]` when `session_resets_at` is known
-/// (from the same usage fetch the gauge renders), falling
-/// back to a rolling last-5h window when it isn't - a fallback, not an
-/// error, matching this plugin's existing convention.
+/// `Session` mirrors the Usage Gauge's 5-hour rate-limit window:
+/// `[resets_at - 5h, resets_at]` when `session_resets_at` is known (from
+/// the same usage fetch the gauge renders), falling back to a rolling
+/// last-5h window when it isn't - a fallback, not an error, matching this
+/// plugin's existing convention.
 pub fn range_bounds<Tz: TimeZone>(
     range: RangeKind,
     now: DateTime<Tz>,

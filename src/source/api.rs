@@ -95,8 +95,7 @@ impl ApiUsageSource {
     /// `~/.claude/.credentials.json` - where Claude Code stores its OAuth
     /// login on Linux (and on macOS when it can't use the Keychain).
     pub fn default_credentials_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        PathBuf::from(home).join(".claude/.credentials.json")
+        crate::paths::home().join(".claude/.credentials.json")
     }
 }
 
