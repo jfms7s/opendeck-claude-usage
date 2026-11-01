@@ -37,8 +37,17 @@ CLI, the desktop app, or an IDE extension, as long as one of them has logged
 in on this machine.
 
 The token is only read and sent in the request's `Authorization` header. The
-plugin never refreshes it (that would log Claude Code out); if it has
-expired, the dials show "no data" until Claude Code next runs and renews it.
+plugin never refreshes it or writes the credentials itself (a second
+refresher racing Claude Code could log it out). On Linux, when the token has
+expired, the plugin asks Claude Code to renew it by running
+`claude auth status --json` - found on `PATH`, else in `~/.local/bin` or
+`~/.claude/local` - which refreshes the login through Claude Code's own code
+path; its output (your account email and org) is discarded. That runs at most
+once every 10 minutes, is stopped after 10 seconds, and is skipped when the
+login has no refresh token (Claude Code has signed out). If there is no
+`claude`, or it can't renew the login (a revoked login is signed out, as
+opening Claude Code would), the keys show "no data" until Claude
+Code next runs (on macOS this is still the only behaviour).
 
 That endpoint is undocumented and rate-limited per account - and the limit
 is shared with anything else that calls it (Claude Code's `/usage`, editor
@@ -274,6 +283,7 @@ release and record the version you checked them on:
 | Holding a key for half a second refreshes without switching. | not recorded |
 | Editing a settings page while a key's style/layout/view/series was changed by a press doesn't undo the press. | not recorded |
 | Removing a key causes no error in the plugin log on the next minute's redraw. | not recorded |
+| With every Claude Code client closed past the access token's expiry, usage keys recover within about 10 minutes (plugin log: "Claude Code renewed the expired OAuth access token"). | not recorded |
 | Usage keeps updating with only the Claude desktop app open (no CLI session, no editor extension). | not recorded |
 | Metric Tile and Usage Heatmap totals match `ccusage` (or another transcript tool) for the same day. | not recorded |
 | `~/.local/state/opendeck-claude-usage/history.jsonl` is created owner-only, only grows when usage changes, and survives a restart. | not recorded |
