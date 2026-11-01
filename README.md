@@ -317,7 +317,9 @@ cp -r dist/com.jfms7s.claudeusage.sdPlugin ~/.config/opendeck/plugins/
 Releases are cut by pushing a `vX.Y.Z` tag matching the version in
 `Cargo.toml` and `assets/manifest.json`: the Release workflow tests, builds
 both Linux architectures and the macOS one (on a macOS runner), and publishes the release with the bundle, its
-`SHA256SUMS` and a build-provenance attestation.
+`SHA256SUMS` and a build-provenance attestation. Before the release PR, `cargo update` refreshes
+the lockfile (except `openaction`, which moves in its own PR) and open Dependabot
+PRs are merged or closed.
 
 ## License
 

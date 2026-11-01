@@ -49,7 +49,7 @@ Shared plumbing:
 ## Conventions
 
 - **Version lives in two places**: `Cargo.toml` and `assets/manifest.json` must match (`build.mjs` refuses to build otherwise); a release bumps both plus `Cargo.lock` in a `chore: release X.Y.Z` commit, then pushes the `vX.Y.Z` tag. The Release workflow checks the tag matches, runs fmt/clippy/tests, builds x86_64 + aarch64 in a read-only job, then a separate job attests the bundle and creates the GitHub release as a draft with the bundle and `SHA256SUMS`, publishing it only once both are attached.
-- Workflow actions are pinned to full commit SHAs (with a `# vX.Y.Z` comment) and every cargo command runs `--locked`; Dependabot proposes monthly grouped updates for both.
+- Workflow actions are pinned to full commit SHAs (with a `# vX.Y.Z` comment) and every cargo command runs `--locked`; Dependabot proposes monthly grouped updates for both. Dependabot moves only direct dependencies, so before the release PR: `cargo update` (taking `openaction` deliberately, in its own PR), and merge or close any open Dependabot PRs.
 - Conventional Commits (`feat:`, `fix:`, `chore:`, `test:`); PRs squash-merged to `master`.
 - Project docs live in the Obsidian vault at `~/git/obsidian-vault/personal/projects/opendeck-claude-usage/`, not in this repo. Follow the vault's `CLAUDE.md` conventions (frontmatter `title` + `tags` including `projects` and `opendeck-claude-usage`; add each new note to the folder note it lives in).
 - `~/git/obsidian-vault/personal/projects/opendeck-claude-usage/known-issues.md` tracks deferred issues by ID (`KI-NN`) with a status column; record new ones there, reference the ID in fix commits, and update its status when it lands.
