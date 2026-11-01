@@ -181,8 +181,14 @@ green/yellow/red at 50/80% to copper with Watch 50, Risk 75 and Critical
    (dimmed on a day they don't apply to) and a pointer at the current
    time, and under it **Peak** (red, with `ends in HH:MM`) or **Off-peak**
    (green, with `peak in HH:MM`, or `no peak set`). It redraws every
-   minute; tap it to redraw now. The clock uses local time and has no data
-   source, so it never says "no data".
+   minute; tap it to redraw now. The clock uses local time.
+4. Inside the face, a faint blue ring shows when in the day you use
+   Claude: one segment per local hour, shaded by the tokens used in that
+   hour over the last 28 days (from the same transcripts as Metric Tile and
+   Usage Heatmap), the busiest hour the most opaque. Hours with no usage
+   are left out. The ring is refreshed with each minute's redraw, so it
+   appears up to a minute after OpenDeck starts. With no transcripts there
+   is no ring, and the clock never says "no data".
 
 ## Colors & thresholds
 
@@ -290,6 +296,7 @@ release and record the version you checked them on:
 | With every Claude Code client closed past the access token's expiry, usage keys recover within about 10 minutes (plugin log: "Claude Code renewed the expired OAuth access token"). | not recorded |
 | Usage keeps updating with only the Claude desktop app open (no CLI session, no editor extension). | not recorded |
 | Metric Tile and Usage Heatmap totals match `ccusage` (or another transcript tool) for the same day. | not recorded |
+| Peak Clock's usage ring is darkest at the hours you actually work, and appears within a minute of OpenDeck starting. | not recorded |
 | `~/.local/state/opendeck-claude-usage/history.jsonl` is created owner-only, only grows when usage changes, and survives a restart. | not recorded |
 
 On a Mac (Apple Silicon), with the release bundle installed through OpenDeck:

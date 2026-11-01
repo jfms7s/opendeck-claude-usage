@@ -2,7 +2,7 @@
 //! shaded relative to the busiest day in view. Pure - the time zone comes
 //! in with `now`, so tests pin it with a `FixedOffset`.
 
-use chrono::{DateTime, Datelike, Days, TimeZone, Weekday};
+use chrono::{DateTime, Datelike, Days, TimeZone, Timelike, Weekday};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -127,6 +127,25 @@ pub fn daily_totals<Tz: TimeZone>(
     let mut totals = vec![0.0; days];
     for (day, entry) in entries_by_day(entries, &now, days) {
         totals[day] += entry_value(entry, metric);
+    }
+    totals
+}
+
+/// Totals per local hour of the day (index 0 = 00:00-00:59) over the
+/// `days` local calendar days ending today, in `now`'s time zone - each
+/// entry in the hour its own date's offset puts it, so a DST change
+/// doesn't shift it.
+pub fn hourly_totals<Tz: TimeZone>(
+    entries: &[LogEntry],
+    metric: MetricKind,
+    now: DateTime<Tz>,
+    days: usize,
+) -> [f64; 24] {
+    let tz = now.timezone();
+    let mut totals = [0.0; 24];
+    for (_, entry) in entries_by_day(entries, &now, days) {
+        let hour = entry.timestamp.with_timezone(&tz).hour() as usize;
+        totals[hour] += entry_value(entry, metric);
     }
     totals
 }
@@ -258,6 +277,64 @@ mod tests {
         ];
         let t = daily_totals(&entries, MetricKind::Tokens, now, 7);
         assert_eq!(&t[4..], &[1.0, 110.0, 1000.0]);
+    }
+
+    #[test]
+    fn hourly_totals_bucket_by_local_hour() {
+        // 07:30Z and 07:59Z are 09:30 and 09:59 at UTC+2.
+        let entries = [
+            entry("2026-09-30T07:30:00Z", 10),
+            entry("2026-09-30T07:59:00Z", 5),
+            entry("2026-09-29T08:00:00Z", 1), // 10:00 yesterday
+        ];
+        let t = hourly_totals(&entries, MetricKind::Tokens, now(), 28);
+        assert_eq!(t[9], 15.0);
+        assert_eq!(t[10], 1.0);
+        assert_eq!(t.iter().sum::<f64>(), 16.0);
+    }
+
+    #[test]
+    fn hourly_totals_cover_only_the_last_28_local_days() {
+        let entries = [
+            entry("2026-09-03T10:00:00Z", 7),  // 28th day back: kept
+            entry("2026-09-01T10:00:00Z", 99), // 29 days old: dropped
+        ];
+        let t = hourly_totals(&entries, MetricKind::Tokens, now(), 28);
+        assert_eq!(t[12], 7.0);
+        assert_eq!(t.iter().sum::<f64>(), 7.0);
+    }
+
+    /// The zone moves an entry across midnight: 23:30Z is 00:30 at +01:00.
+    #[test]
+    fn hourly_totals_follow_the_time_zone() {
+        let entries = [entry("2026-09-29T23:30:00Z", 3)];
+        let plus_one = FixedOffset::east_opt(3600)
+            .unwrap()
+            .with_ymd_and_hms(2026, 9, 30, 12, 0, 0)
+            .unwrap();
+        assert_eq!(
+            hourly_totals(&entries, MetricKind::Tokens, plus_one, 28)[0],
+            3.0
+        );
+        let utc = Utc.with_ymd_and_hms(2026, 9, 30, 12, 0, 0).unwrap();
+        assert_eq!(
+            hourly_totals(&entries, MetricKind::Tokens, utc, 28)[23],
+            3.0
+        );
+    }
+
+    /// Each entry uses its own date's offset: 12:30 local on both sides of
+    /// the UK autumn change.
+    #[test]
+    fn hourly_totals_across_a_dst_change() {
+        use chrono_tz::Europe::London;
+        let now = London.with_ymd_and_hms(2026, 10, 26, 18, 0, 0).unwrap();
+        let entries = [
+            entry("2026-10-24T11:30:00Z", 1), // 12:30 BST
+            entry("2026-10-26T12:30:00Z", 2), // 12:30 GMT
+        ];
+        let t = hourly_totals(&entries, MetricKind::Tokens, now, 28);
+        assert_eq!(t[12], 3.0);
     }
 
     /// The spring change: the 23-hour Sunday is still one cell.

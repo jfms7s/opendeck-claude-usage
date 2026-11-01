@@ -1,9 +1,10 @@
 //! Peak Clock: a 24-hour clock face with the configured peak hours marked,
-//! whether it's peak now, and how long until that changes. Keypad only; a
-//! tap redraws it.
+//! a faint ring of when in the day Claude is used (tokens per local hour
+//! over the last 28 days, from the transcripts), whether it's peak now, and
+//! how long until that changes. Keypad only; a tap redraws it.
 
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use chrono::{Datelike, Local, NaiveDateTime, Timelike};
@@ -12,11 +13,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use crate::clock_icon::build_clock_icon;
+use crate::heatmap::hourly_totals;
+use crate::metric::MetricKind;
 use crate::peak::{
     DEFAULT_PEAK_DAYS, DEFAULT_PEAK_END, DEFAULT_PEAK_START, PeakDays, PeakSchedule, PeakWindow,
     peak_status,
 };
 use crate::press::LatestSettings;
+use crate::source::logs::LogUsageSource;
 use crate::surface::{Frames, Output, Surface, for_each_tracked};
 use crate::tasks::{park_while_empty, sleep_to_next_minute};
 
@@ -75,9 +79,13 @@ fn schedule_from(settings: &PeakClockSettings) -> PeakSchedule {
     }
 }
 
-/// The tile for `schedule` at local time `now`. A clock tile has no
-/// external data source, so it's always computed fresh.
-fn output_at(schedule: PeakSchedule, now: NaiveDateTime) -> Output {
+/// How many local days the usage ring covers.
+const PROFILE_DAYS: usize = 28;
+
+/// The tile for `schedule` at local time `now`, with the usage ring from
+/// `usage` (tokens per local hour) when there is one. The face itself has
+/// no data source, so it's always computed fresh.
+fn output_at(schedule: PeakSchedule, now: NaiveDateTime, usage: Option<&[f64; 24]>) -> Output {
     let now_minutes = now.time().num_seconds_from_midnight() / 60;
     let status = peak_status(schedule, now);
     // Dim the arcs on a day the window doesn't apply to, unless a
@@ -88,6 +96,7 @@ fn output_at(schedule: PeakSchedule, now: NaiveDateTime) -> Output {
         now_minutes,
         arcs_active,
         &status,
+        usage,
     ))
 }
 
@@ -96,15 +105,35 @@ pub struct PeakClockAction {
     registry: Arc<LatestSettings<PeakSchedule>>,
     frames: Arc<Frames>,
     wake: Arc<Notify>,
+    logs: Arc<LogUsageSource>,
+    /// Tokens per local hour, as of the tick loop's last scan; `None`
+    /// until one has run. Events only read this - they never scan, since
+    /// openaction handles events one at a time and a first scan takes
+    /// seconds.
+    usage: Arc<Mutex<Option<[f64; 24]>>>,
 }
 
 impl PeakClockAction {
-    pub fn new() -> Self {
+    pub fn new(logs: Arc<LogUsageSource>) -> Self {
         Self {
             registry: Arc::new(LatestSettings::default()),
             frames: Arc::new(Frames::default()),
             wake: Arc::new(Notify::new()),
+            logs,
+            usage: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn usage(&self) -> Option<[f64; 24]> {
+        *self.usage.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Re-reads the transcripts (off the event loop: only the tick loop
+    /// calls this) and recomputes the hour-of-day profile.
+    async fn refresh_usage(&self) {
+        let entries = self.logs.entries().await;
+        let hours = hourly_totals(&entries, MetricKind::Tokens, Local::now(), PROFILE_DAYS);
+        *self.usage.lock().unwrap_or_else(PoisonError::into_inner) = Some(hours);
     }
 
     fn track(&self, instance_id: &str, settings: &PeakClockSettings) {
@@ -122,18 +151,21 @@ impl PeakClockAction {
         surface: &S,
         schedule: PeakSchedule,
     ) -> OpenActionResult<()> {
-        let output = output_at(schedule, Local::now().naive_local());
+        let usage = self.usage();
+        let output = output_at(schedule, Local::now().naive_local(), usage.as_ref());
         self.frames.push(surface, output).await
     }
 
     /// Runs forever: just after every minute boundary - the face has
-    /// minute resolution - redraws every visible clock. Parks while none is
-    /// visible. Spawned once from `main.rs`, supervised; independent of the
-    /// usage hub (a clock has no data source).
+    /// minute resolution - rescans the transcripts once for every clock
+    /// (after the first scan that only tails new lines) and redraws every
+    /// visible clock. Parks while none is visible. Spawned once from
+    /// `main.rs`, supervised; independent of the usage hub.
     pub async fn tick_loop(self) {
         loop {
             park_while_empty(|| self.registry.is_empty(), &self.wake).await;
             sleep_to_next_minute().await;
+            self.refresh_usage().await;
             self.render_tracked(openaction::get_instance).await;
         }
     }
@@ -242,9 +274,13 @@ mod tests {
         assert_eq!(s.peak_days, PeakClockSettings::default().peak_days);
     }
 
+    fn action() -> PeakClockAction {
+        PeakClockAction::new(Arc::new(LogUsageSource::new("/nonexistent".into())))
+    }
+
     #[test]
     fn track_then_untrack_round_trips_through_the_registry() {
-        let action = PeakClockAction::new();
+        let action = action();
         let settings = PeakClockSettings {
             peak_start: "10:00".to_string(),
             peak_end: "20:00".to_string(),
@@ -270,7 +306,7 @@ mod tests {
     /// the instance lookup is the one drawn.
     #[tokio::test]
     async fn a_schedule_saved_during_the_lookup_is_the_one_drawn() {
-        let action = PeakClockAction::new();
+        let action = action();
         let old = PeakClockSettings::default();
         let new = PeakClockSettings {
             peak_start: "01:00".to_string(),
@@ -285,8 +321,59 @@ mod tests {
                 std::future::ready(Some(key.clone()))
             })
             .await;
-        let expected = output_at(schedule_from(&new), Local::now().naive_local());
+        let expected = output_at(schedule_from(&new), Local::now().naive_local(), None);
         assert_eq!(key.frames(), vec![expected]);
+    }
+
+    /// A projects dir with one transcript line from an hour ago.
+    fn one_transcript() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let at = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        std::fs::write(
+            project.join("session.jsonl"),
+            format!(
+                r#"{{"type":"assistant","timestamp":"{at}","message":{{"model":"claude-sonnet-5","usage":{{"input_tokens":2,"output_tokens":3}}}}}}"#
+            ),
+        )
+        .unwrap();
+        root
+    }
+
+    /// An event never scans: before the tick loop has read the transcripts
+    /// the clock is drawn at once without the ring, and the scan is left
+    /// for the tick, which adds the ring.
+    #[tokio::test]
+    async fn an_event_draws_without_scanning_and_the_tick_adds_the_ring() {
+        let root = one_transcript();
+        let logs = Arc::new(LogUsageSource::new(root.path().to_path_buf()));
+        let action = PeakClockAction::new(Arc::clone(&logs));
+        let settings = PeakClockSettings::default();
+        action.track("ctx1", &settings);
+        let key = FakeSurface::new("ctx1", true);
+        action.render(&key, schedule_from(&settings)).await.unwrap();
+        assert!(!logs.scanned(), "an event scanned the transcripts");
+        let plain = output_at(schedule_from(&settings), Local::now().naive_local(), None);
+        assert_eq!(key.frames(), vec![plain.clone()]);
+
+        action.refresh_usage().await;
+        action
+            .render_tracked(|_| std::future::ready(Some(key.clone())))
+            .await;
+        let frames = key.frames();
+        assert_eq!(frames.len(), 2, "the tick did not redraw: {frames:?}");
+        let usage = action.usage().unwrap();
+        assert_eq!(usage.iter().sum::<f64>(), 5.0);
+        assert_eq!(
+            frames[1],
+            output_at(
+                schedule_from(&settings),
+                Local::now().naive_local(),
+                Some(&usage)
+            )
+        );
+        assert_ne!(frames[1], plain);
     }
 
     #[test]
