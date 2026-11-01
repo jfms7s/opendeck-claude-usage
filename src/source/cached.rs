@@ -68,8 +68,10 @@ pub struct CachedUsageSource<S> {
 struct Inner<S> {
     source: S,
     policy: CachePolicy,
-    /// Held across the inner read, so concurrent callers that all find the
-    /// cache expired wait for one request instead of each firing their own.
+    /// Held across the inner read, so there is only ever one request in
+    /// flight. A caller that finds it held is served from `served` at once
+    /// and waits only when nothing is servable yet (before the first read
+    /// finished); then it shares that request instead of firing its own.
     fetch: Mutex<Schedule>,
     /// What callers are served. Only briefly locked, never across an
     /// await, so `peek` never waits on a slow request.
@@ -162,7 +164,19 @@ fn random_unit() -> f64 {
 impl<S: UsageSource> SharedUsage for CachedUsageSource<S> {
     async fn read(&self) -> Outcome {
         let policy = &self.inner.policy;
-        let mut schedule = self.inner.fetch.lock().await;
+        let mut schedule = match self.inner.fetch.try_lock() {
+            Ok(schedule) => schedule,
+            // Another read holds the lock - usually a fetch in flight. Don't
+            // queue behind it while there's something to serve (KI-39); the
+            // holder updates the cache. Only a cache with nothing in it
+            // yet waits, and then shares that one request.
+            Err(_) => {
+                if let Some(outcome) = self.served().outcome(Instant::now(), policy.stale_after) {
+                    return outcome;
+                }
+                self.inner.fetch.lock().await
+            }
+        };
         let now = Instant::now();
         if schedule.next_attempt.is_some_and(|at| now < at)
             && let Some(outcome) = self.served().outcome(now, policy.stale_after)
@@ -349,6 +363,62 @@ mod tests {
             assert_eq!(read.await.unwrap().unwrap().session.percent, 1.0);
         }
         assert_eq!(flaky.reads(), 1);
+    }
+
+    /// KI-39: a read that lands while a fetch is in flight is served the
+    /// cached snapshot at once instead of waiting for the fetch.
+    #[tokio::test(start_paused = true)]
+    async fn a_read_during_a_fetch_serves_the_cached_snapshot_without_waiting() {
+        let (cached, flaky) = cached();
+        cached.read().await.unwrap(); // percent 1.0
+        advance_secs(60).await;
+        flaky.delay_secs.store(5, Ordering::SeqCst);
+        let fetching = tokio::spawn({
+            let cached = cached.clone();
+            async move { cached.read().await }
+        });
+        tokio::task::yield_now().await; // the spawned read takes the lock and starts fetching
+        assert_eq!(flaky.reads(), 2);
+
+        let served = tokio::time::timeout(Duration::from_millis(1), cached.read())
+            .await
+            .expect("waited for the in-flight fetch")
+            .unwrap();
+        assert_eq!(served.session.percent, 1.0);
+
+        assert_eq!(fetching.await.unwrap().unwrap().session.percent, 2.0);
+        assert_eq!(
+            flaky.reads(),
+            2,
+            "the waiting reader started no fetch of its own"
+        );
+        assert_eq!(cached.read().await.unwrap().session.percent, 2.0);
+        assert_eq!(flaky.reads(), 2);
+    }
+
+    /// With only an error recorded, a reader during a retry gets that error
+    /// at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_read_during_a_retry_serves_the_recorded_error_without_waiting() {
+        let (cached, flaky) = cached();
+        flaky.set_failing(true);
+        cached.read().await.unwrap_err(); // failure 1 -> next attempt in 120s
+        advance_secs(120).await;
+        flaky.delay_secs.store(5, Ordering::SeqCst);
+        let retrying = tokio::spawn({
+            let cached = cached.clone();
+            async move { cached.read().await }
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(flaky.reads(), 2);
+
+        let served = tokio::time::timeout(Duration::from_millis(1), cached.read())
+            .await
+            .expect("waited for the in-flight retry");
+        assert!(matches!(served, Err(UsageSourceError::RateLimited { .. })));
+
+        retrying.await.unwrap().unwrap_err();
+        assert_eq!(flaky.reads(), 2);
     }
 
     #[tokio::test(start_paused = true)]
