@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn next_changes_only_the_layout() {
         let s: ComboSettings =
-            serde_json::from_str(r#"{"critical":95,"colorMode":"pace"}"#).unwrap();
+            serde_json::from_str(r##"{"critical":95,"colorNormal":"#112233"}"##).unwrap();
         let f = s.next().unwrap();
         assert_eq!(f.layout, ComboLayout::Vertical);
         assert_eq!(f.colors, s.colors);
@@ -299,7 +299,6 @@ mod tests {
     fn property_inspector_mounts_colors_and_keeps_layout() {
         let html = include_str!("../assets/propertyInspector/combo.html");
         assert!(html.contains(r#"<script src="colors.js"></script>"#));
-        assert!(html.contains("showMode: true"));
         assert!(html.contains(r#"passThrough: ["layout"]"#));
     }
 

@@ -2,7 +2,6 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
 use crate::level::{ColorSettings, Marks, Palette};
-use crate::pace::pace;
 use crate::source::{MonthlyUsage, UsageSnapshot, WindowKind, WindowUsage};
 
 pub const DISABLED_COLOR: &str = "#6b7280";
@@ -124,8 +123,7 @@ fn window_display(
         ),
         None => ("no reset info".to_string(), "\u{2014}".to_string()),
     };
-    let projected = pace(window, kind, now).map(|p| p.projected);
-    let level = colors.level(window.percent, projected);
+    let level = colors.level(window.percent);
     make_display(
         window_label(kind),
         window.percent,
@@ -136,8 +134,6 @@ fn window_display(
     )
 }
 
-/// Monthly has no window length, so it's colored by actual % whatever the
-/// key's color mode says.
 fn monthly_display(monthly: &MonthlyUsage, colors: &ColorSettings) -> UsageDisplay {
     if !monthly.enabled {
         return UsageDisplay {
@@ -161,7 +157,7 @@ fn monthly_display(monthly: &MonthlyUsage, colors: &ColorSettings) -> UsageDispl
         ),
         _ => ("spend unavailable".to_string(), "no spend".to_string()),
     };
-    let level = colors.level(percent, None);
+    let level = colors.level(percent);
     make_display(
         "MONTHLY",
         percent,
@@ -240,7 +236,7 @@ pub fn error_display() -> UsageDisplay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::level::{ColorMode, ColorSettings, DEFAULT_NORMAL, DEFAULT_RISK, DEFAULT_WATCH};
+    use crate::level::{ColorSettings, DEFAULT_NORMAL, DEFAULT_WATCH};
     use chrono::TimeZone;
 
     fn dt(hour: u32, minute: u32, second: u32) -> DateTime<Utc> {
@@ -510,39 +506,18 @@ mod tests {
     }
 
     #[test]
-    fn pace_mode_warns_on_fast_burn() {
-        // Session 17:40-22:40; at 18:55 (25% elapsed) 20% used projects to 80% -> Risk.
+    fn fast_burn_is_colored_by_actual_percent() {
+        // Session 17:40-22:40; at 18:55 (25% elapsed) 20% used would project
+        // to 80%, but only Burn Rate colors by pace.
         let mut s = snapshot();
         s.session.percent = 20.0;
-        let colors = ColorSettings {
-            mode: ColorMode::Pace,
-            ..ColorSettings::default()
-        };
-        let d = build_display(&s, WindowKind::Session, &colors, dt(18, 55, 0));
-        assert_eq!(d.color, DEFAULT_RISK);
-    }
-
-    #[test]
-    fn pace_mode_ignores_too_early_projection() {
-        // 5 minutes into the session: 3% would "project" to 180%.
-        let mut s = snapshot();
-        s.session.percent = 3.0;
-        let colors = ColorSettings {
-            mode: ColorMode::Pace,
-            ..ColorSettings::default()
-        };
-        let d = build_display(&s, WindowKind::Session, &colors, dt(17, 45, 0));
+        let d = build_display(
+            &s,
+            WindowKind::Session,
+            &ColorSettings::default(),
+            dt(18, 55, 0),
+        );
         assert_eq!(d.color, DEFAULT_NORMAL);
-    }
-
-    #[test]
-    fn pace_mode_on_monthly_uses_actual_only() {
-        let colors = ColorSettings {
-            mode: ColorMode::Pace,
-            ..ColorSettings::default()
-        };
-        let d = build_display(&snapshot(), WindowKind::Monthly, &colors, dt(20, 30, 0));
-        assert_eq!(d.color, DEFAULT_NORMAL); // 25%
     }
 
     #[test]

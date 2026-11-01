@@ -25,9 +25,13 @@ test("a stored value a field can't show falls back to the default (KI-11)", () =
 	assert.equal(colors.validColorValue("watch", "40"), 40);
 	assert.equal(colors.validColorValue("watch", ""), 50);
 	assert.equal(colors.validColorValue("watch", null), 50);
-	assert.equal(colors.validColorValue("colorMode", "bogus"), "fixed");
 	colors.applyColorSettings({ colorWatch: "yellow" });
 	assert.equal(page.el("colorWatch").value, "#eab308", "not the #000000 a color input falls back to");
+});
+
+test("a stored colorMode (the removed Pace colour mode) is dropped on save", () => {
+	colors.applyColorSettings({ colorMode: "pace", risk: 70 });
+	assert.deepEqual(colors.readColorSettings(), { risk: 70 });
 });
 
 test("saving leaves untouched defaults out (KI-12)", () => {

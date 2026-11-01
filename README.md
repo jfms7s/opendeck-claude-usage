@@ -184,12 +184,9 @@ used): **Watch** (default 50), **Risk** (75), **Critical** (90), each with
 its own editable color. Marks must increase; if they don't, the defaults
 are used (the settings page warns about it).
 
-On a Usage Gauge, Session + Weekly or Usage Sparkline you can also color by
-**pace**: the key warns at
-whichever level is worse, current usage or the usage you'd reach at reset
-if you keep burning at the current rate. Pace is only computed after 10%
-of the window has passed (earlier projections are noise), and never for
-Monthly.
+Usage Gauge, Session + Weekly and Usage Sparkline keys color by current
+usage. Burn Rate colors by **pace**: whichever level is worse, current usage
+or the usage you'd reach at reset if you keep burning at the current rate.
 
 ## Styles (keypad)
 

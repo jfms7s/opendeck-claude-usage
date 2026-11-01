@@ -49,7 +49,7 @@
 			}),
 		});
 
-		mountColorSection(document.getElementById("colors"), { showMode: false, onChange: pi.changed });
+		mountColorSection(document.getElementById("colors"), { onChange: pi.changed });
 		document.getElementById("window").addEventListener("change", pi.changed);
 		document.getElementById("metric").addEventListener("change", pi.changed);
 	</script>
