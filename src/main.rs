@@ -25,9 +25,6 @@ mod settings;
 mod source;
 mod sparkline;
 mod sparkline_action;
-mod spend;
-mod spend_action;
-mod spend_icon;
 mod styles;
 mod surface;
 mod tasks;
@@ -49,11 +46,9 @@ use metric_action::MetricTileAction;
 use openaction::{OpenActionResult, register_action, run};
 use source::UsageSource;
 use source::api::ApiUsageSource;
-use source::cached::{CachePolicy, CachedSource, CachedUsageSource, SharedUsage};
-use source::console::{ConsoleData, ConsoleSource};
+use source::cached::{CachePolicy, CachedUsageSource, SharedUsage};
 use source::logs::LogUsageSource;
 use sparkline_action::SparklineAction;
-use spend_action::ApiSpendAction;
 use tasks::spawn_supervised;
 
 /// The usage endpoint's rate limit is per account and shared with Claude
@@ -68,18 +63,6 @@ const USAGE_POLICY: CachePolicy = CachePolicy {
     stale_after: Duration::from_secs(15 * 60),
 };
 
-/// Console spend (Admin API) gets its own cache: a different key and rate
-/// limit from the OAuth endpoint above, so neither can starve or break the
-/// other. Its data lags ~5 minutes, so asking more often buys nothing; a
-/// missing key file is re-checked every read without a request, and a
-/// replaced one is retried at once.
-const CONSOLE_POLICY: CachePolicy = CachePolicy {
-    min_interval: Duration::from_secs(5 * 60),
-    jitter: 0.1,
-    max_backoff: Duration::from_secs(30 * 60),
-    stale_after: Duration::from_secs(60 * 60),
-};
-
 /// Every action, wired to the plugin's shared state.
 struct Actions {
     hub: Arc<UsageHub>,
@@ -90,22 +73,18 @@ struct Actions {
     clock: PeakClockAction,
     metric_tile: MetricTileAction,
     heatmap: HeatmapAction,
-    api_spend: ApiSpendAction,
 }
 
-/// Builds every action around one throttled usage cache, one throttled
-/// Console cache and one transcript scanner. This is the only place a
-/// source is wrapped, so every action - the hub's four and Metric Tile's
-/// Session range - shares one usage request budget (tested below), and API
-/// Spend and Console-sourced Metric Tiles share one Console budget.
+/// Builds every action around one throttled usage cache and one transcript
+/// scanner. This is the only place a usage source is wrapped, so every
+/// action - the hub's four and Metric Tile's Session range - shares one
+/// request budget (tested below).
 fn wire(
     api: impl UsageSource + 'static,
     history: Arc<HistoryStore>,
     logs: LogUsageSource,
-    console: ConsoleSource,
 ) -> Actions {
     let usage: Arc<dyn SharedUsage> = Arc::new(CachedUsageSource::new(api, USAGE_POLICY));
-    let console: Arc<dyn ConsoleData> = Arc::new(CachedSource::new(console, CONSOLE_POLICY));
     let hub = UsageHub::new(Arc::clone(&usage), history);
     let logs = Arc::new(logs);
     Actions {
@@ -114,9 +93,8 @@ fn wire(
         combo: ComboAction::new(Arc::clone(&hub)),
         sparkline: SparklineAction::new(Arc::clone(&hub)),
         clock: PeakClockAction::new(),
-        metric_tile: MetricTileAction::new(Arc::clone(&logs), usage, Arc::clone(&console)),
+        metric_tile: MetricTileAction::new(Arc::clone(&logs), usage),
         heatmap: HeatmapAction::new(logs),
-        api_spend: ApiSpendAction::new(console),
         hub,
     }
 }
@@ -141,7 +119,6 @@ async fn main() -> OpenActionResult<()> {
         ApiUsageSource::default(),
         history,
         LogUsageSource::default(),
-        ConsoleSource::default(),
     );
 
     // Each background loop restarts (and logs why) if it ever panics.
@@ -155,8 +132,6 @@ async fn main() -> OpenActionResult<()> {
     });
     let heatmap = actions.heatmap.clone();
     spawn_supervised("heatmap tick loop", move || heatmap.clone().tick_loop());
-    let api_spend = actions.api_spend.clone();
-    spawn_supervised("api spend tick loop", move || api_spend.clone().tick_loop());
 
     register_action(actions.gauge).await;
     register_action(actions.clock).await;
@@ -165,7 +140,6 @@ async fn main() -> OpenActionResult<()> {
     register_action(actions.combo).await;
     register_action(actions.heatmap).await;
     register_action(actions.sparkline).await;
-    register_action(actions.api_spend).await;
     run(std::env::args().collect()).await
 }
 
@@ -216,7 +190,6 @@ mod tests {
             api.clone(),
             HistoryStore::in_memory(),
             LogUsageSource::new("/nonexistent".into()),
-            ConsoleSource::new("/nonexistent".into()),
         );
         let dial = FakeSurface::dial("gauge");
         actions
