@@ -77,7 +77,6 @@ fn render_svg(
     arcs_active: bool,
     status: &PeakStatus,
 ) -> String {
-    let card = tile::card();
     let arcs = peak_arcs(window, arcs_active);
     let (tx, ty) = point_on_ring(now_minutes, POINTER_LENGTH);
     let status_line = tile::text_line(
@@ -95,9 +94,9 @@ fn render_svg(
         &status.countdown_text,
     );
 
-    format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">{card}<circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{FACE_RADIUS}" fill="none" stroke="{FACE_COLOR}" stroke-width="{RING_STROKE_WIDTH}" />{arcs}<line x1="{CENTER_X}" y1="{CENTER_Y}" x2="{tx:.2}" y2="{ty:.2}" stroke="{POINTER_COLOR}" stroke-width="{POINTER_WIDTH}" stroke-linecap="round" /><circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{PIVOT_RADIUS}" fill="{POINTER_COLOR}" />{status_line}{countdown_line}</svg>"#
-    )
+    tile::svg(&format!(
+        r#"<circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{FACE_RADIUS}" fill="none" stroke="{FACE_COLOR}" stroke-width="{RING_STROKE_WIDTH}" />{arcs}<line x1="{CENTER_X}" y1="{CENTER_Y}" x2="{tx:.2}" y2="{ty:.2}" stroke="{POINTER_COLOR}" stroke-width="{POINTER_WIDTH}" stroke-linecap="round" /><circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{PIVOT_RADIUS}" fill="{POINTER_COLOR}" />{status_line}{countdown_line}"#
+    ))
 }
 
 fn status_color(is_peak: bool) -> &'static str {
@@ -160,6 +159,15 @@ mod tests {
     fn pointer_tip(x: f64, y: f64) -> String {
         format!("x2=\"{x:.2}\" y2=\"{y:.2}\"")
     }
+
+    /// The whole image, byte for byte - the envelope is shared, so a
+    /// change to it shows up here.
+    #[test]
+    fn the_full_svg_is_pinned() {
+        assert_eq!(render(normal_window(), 600), PINNED_SVG);
+    }
+
+    const PINNED_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><rect x=\"0\" y=\"0\" width=\"100\" height=\"100\" fill=\"#111827\" /><circle cx=\"50\" cy=\"36\" r=\"27\" fill=\"none\" stroke=\"#4b5563\" stroke-width=\"8\" /><path d=\"M 69.09 55.09 A 27 27 0 0 1 23.92 42.99\" fill=\"none\" stroke=\"#ef4444\" stroke-width=\"8\" stroke-linecap=\"round\" /><line x1=\"50\" y1=\"36\" x2=\"60.50\" y2=\"54.19\" stroke=\"#f9fafb\" stroke-width=\"4\" stroke-linecap=\"round\" /><circle cx=\"50\" cy=\"36\" r=\"4\" fill=\"#f9fafb\" /><text x=\"50\" y=\"82\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"17\" font-weight=\"700\" fill=\"#4ade80\">Off-peak</text><text x=\"50\" y=\"97\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"13\" font-weight=\"500\" fill=\"#d1d5db\" textLength=\"94\" lengthAdjust=\"spacingAndGlyphs\">peak in 01:00</text></svg>";
 
     #[test]
     fn builds_a_valid_svg_data_uri() {

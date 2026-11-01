@@ -26,6 +26,17 @@ pub fn card() -> String {
     format!(r#"<rect x="0" y="0" width="100" height="100" fill="{CARD_COLOR}" />"#)
 }
 
+/// Unfilled part of every bar/arc - dark enough to read as "empty" on the
+/// card, light enough to show the track's extent.
+pub const TRACK_COLOR: &str = "#374151";
+
+/// The 100x100 key image: an `<svg>` with the shared dark card under
+/// `body`. Every keypad tile is drawn through this.
+pub fn svg(body: &str) -> String {
+    let card = card();
+    format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">{card}{body}</svg>"#)
+}
+
 /// A 200x100 dial touch-strip image on the same dark card. Strip text is
 /// placed directly (`text_at`/`text_line` assume a 100-wide key and would
 /// squeeze text that fits easily here).

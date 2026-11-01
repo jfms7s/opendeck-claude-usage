@@ -12,7 +12,6 @@ const SUBTITLE_BASELINE: f64 = 86.0;
 const SUBTITLE_SIZE: f64 = 14.0;
 
 fn render_svg(display: &BurnDisplay) -> String {
-    let card = tile::card();
     let label = tile::text_line(
         LABEL_BASELINE,
         LABEL_SIZE,
@@ -34,9 +33,7 @@ fn render_svg(display: &BurnDisplay) -> String {
         MUTED_TEXT_COLOR,
         &display.subtitle,
     );
-    format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">{card}{label}{value}{subtitle}</svg>"#
-    )
+    tile::svg(&format!(r#"{label}{value}{subtitle}"#))
 }
 
 /// Builds the `image` string OpenDeck's `setImage` event expects.
@@ -66,6 +63,15 @@ mod tests {
             bar_value: 100.0,
         }
     }
+
+    /// The whole image, byte for byte - the envelope is shared, so a
+    /// change to it shows up here.
+    #[test]
+    fn the_full_svg_is_pinned() {
+        assert_eq!(render_svg(&display()), PINNED_SVG);
+    }
+
+    const PINNED_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><rect x=\"0\" y=\"0\" width=\"100\" height=\"100\" fill=\"#111827\" /><text x=\"50\" y=\"24\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"13\" font-weight=\"700\" fill=\"#d1d5db\">EVEN BURN</text><text x=\"50\" y=\"62\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"30\" font-weight=\"700\" fill=\"#ef4444\">1.4x</text><text x=\"50\" y=\"86\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"14\" font-weight=\"500\" fill=\"#d1d5db\">even burn</text></svg>";
 
     #[test]
     fn draws_label_value_and_subtitle() {

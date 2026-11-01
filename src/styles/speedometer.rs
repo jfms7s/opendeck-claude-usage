@@ -101,7 +101,6 @@ pub(super) fn render(display: &UsageDisplay) -> String {
     let nx2 = CENTER_X + NEEDLE_HALF_WIDTH;
     let tip_y = CENTER_Y - NEEDLE_LENGTH;
 
-    let card = tile::card();
     // The percent carries the level color - on a keypad it's the only
     // place a pace-based warning shows, since the zones follow actual %.
     let percent = tile::text_line(
@@ -119,9 +118,9 @@ pub(super) fn render(display: &UsageDisplay) -> String {
         &display.tile_detail,
     );
 
-    format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">{card}{arcs}<polygon points="{nx1},{CENTER_Y} {nx2},{CENTER_Y} {CENTER_X},{tip_y}" fill="{NEEDLE_COLOR}" stroke-linejoin="round" transform="rotate({rotation:.2} {CENTER_X} {CENTER_Y})" /><circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{PIVOT_RADIUS}" fill="{NEEDLE_COLOR}" />{percent}{detail}</svg>"#
-    )
+    tile::svg(&format!(
+        r#"{arcs}<polygon points="{nx1},{CENTER_Y} {nx2},{CENTER_Y} {CENTER_X},{tip_y}" fill="{NEEDLE_COLOR}" stroke-linejoin="round" transform="rotate({rotation:.2} {CENTER_X} {CENTER_Y})" /><circle cx="{CENTER_X}" cy="{CENTER_Y}" r="{PIVOT_RADIUS}" fill="{NEEDLE_COLOR}" />{percent}{detail}"#
+    ))
 }
 
 #[cfg(test)]
@@ -160,6 +159,15 @@ mod tests {
         let bytes = STANDARD.decode(&uri[prefix.len()..]).unwrap();
         String::from_utf8(bytes).unwrap()
     }
+
+    /// The whole image, byte for byte - the envelope is shared, so a
+    /// change to it shows up here.
+    #[test]
+    fn the_full_svg_is_pinned() {
+        assert_eq!(render(&display(42.0)), PINNED_SVG);
+    }
+
+    const PINNED_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><rect x=\"0\" y=\"0\" width=\"100\" height=\"100\" fill=\"#111827\" /><path d=\"M 18.00 48.00 A 32 32 0 0 1 50.00 16.00\" fill=\"none\" stroke=\"#d97757\" stroke-width=\"10\" stroke-linecap=\"round\" /><path d=\"M 50.00 16.00 A 32 32 0 0 1 72.63 25.37\" fill=\"none\" stroke=\"#eab308\" stroke-width=\"10\" stroke-linecap=\"round\" /><path d=\"M 72.63 25.37 A 32 32 0 0 1 80.43 38.11\" fill=\"none\" stroke=\"#f97316\" stroke-width=\"10\" stroke-linecap=\"round\" /><path d=\"M 80.43 38.11 A 32 32 0 0 1 82.00 48.00\" fill=\"none\" stroke=\"#ef4444\" stroke-width=\"10\" stroke-linecap=\"round\" /><polygon points=\"47,48 53,48 50,23\" fill=\"#f9fafb\" stroke-linejoin=\"round\" transform=\"rotate(-14.40 50 48)\" /><circle cx=\"50\" cy=\"48\" r=\"5\" fill=\"#f9fafb\" /><text x=\"50\" y=\"79\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"26\" font-weight=\"700\" fill=\"#d97757\">42%</text><text x=\"50\" y=\"96\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"15\" font-weight=\"500\" fill=\"#d1d5db\">1h</text></svg>";
 
     #[test]
     fn builds_a_valid_svg_data_uri() {
