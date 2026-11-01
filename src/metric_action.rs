@@ -61,6 +61,17 @@ impl MetricTileSettings {
     }
 }
 
+/// Where the Session range takes its reset time from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UsageRead {
+    /// Through the throttled cache, which may fetch - only the tick loop,
+    /// which runs off openaction's serial event loop.
+    Fetch,
+    /// Only what the cache already holds, never a fetch - event handlers,
+    /// so a slow usage request can't stall every key on the deck.
+    Cached,
+}
+
 struct TrackedInstance {
     settings: MetricTileSettings,
     next_due: Instant,
@@ -108,16 +119,23 @@ impl MetricTileAction {
 
     /// What one instance shows, from already-scanned entries (so a tick
     /// scans once for all its due instances).
-    async fn display(&self, entries: &[LogEntry], settings: &MetricTileSettings) -> MetricDisplay {
+    async fn display(
+        &self,
+        entries: &[LogEntry],
+        settings: &MetricTileSettings,
+        read: UsageRead,
+    ) -> MetricDisplay {
         if entries.is_empty() {
             return error_display();
         }
+        // Without a reset time the Session range falls back to a rolling
+        // 5-hour window (see `build_metric_display`).
         let session_resets_at = if settings.range == RangeKind::Session {
-            self.usage
-                .read()
-                .await
-                .ok()
-                .and_then(|s| s.session.resets_at)
+            let snapshot = match read {
+                UsageRead::Fetch => self.usage.read().await.ok(),
+                UsageRead::Cached => self.usage.peek().and_then(Result::ok),
+            };
+            snapshot.and_then(|s| s.session.resets_at)
         } else {
             None
         };
@@ -135,11 +153,42 @@ impl MetricTileAction {
         surface: &S,
         entries: &[LogEntry],
         settings: &MetricTileSettings,
+        read: UsageRead,
     ) -> OpenActionResult<()> {
-        let display = self.display(entries, settings).await;
+        let display = self.display(entries, settings, read).await;
         self.frames
             .push(surface, Output::Image(build_metric_icon(&display)))
             .await
+    }
+
+    /// Draws one instance for an event (appear, new settings, tap): the
+    /// Session range takes its reset time from the usage cache without
+    /// fetching, since openaction handles events one at a time.
+    async fn redraw<S: Surface + ?Sized>(
+        &self,
+        surface: &S,
+        settings: &MetricTileSettings,
+    ) -> OpenActionResult<()> {
+        let entries = self.log_source.entries().await;
+        let drawn = self
+            .render(surface, &entries, settings, UsageRead::Cached)
+            .await;
+        // Nothing cached yet (or it went stale): the tile drew the rolling
+        // window, so bring its refresh forward - the tick loop does the
+        // read, off the event loop. The cache bounds what that costs.
+        if settings.range == RangeKind::Session && self.usage.peek().and_then(Result::ok).is_none()
+        {
+            self.due_now(surface.id());
+        }
+        drawn
+    }
+
+    /// Makes a tracked instance due at once and wakes the tick loop.
+    fn due_now(&self, instance_id: &str) {
+        if let Some(mut tracked) = self.registry.get_mut(instance_id) {
+            tracked.next_due = Instant::now();
+        }
+        self.wake.notify_one();
     }
 
     /// When the soonest instance is due, if any is tracked.
@@ -195,7 +244,10 @@ impl MetricTileAction {
             |id| self.registry.get(id).map(|t| t.settings.clone()),
             lookup,
             |surface, settings| async move {
-                if let Err(e) = self.render(&surface, entries, &settings).await {
+                if let Err(e) = self
+                    .render(&surface, entries, &settings, UsageRead::Fetch)
+                    .await
+                {
                     log::warn!("metric tile render failed: {e}");
                 }
             },
@@ -225,8 +277,7 @@ impl Action for MetricTileAction {
     ) -> OpenActionResult<()> {
         self.frames.forget(&instance.instance_id);
         self.track(&instance.instance_id, settings.clone());
-        let entries = self.log_source.entries().await;
-        self.render(instance, &entries, settings).await
+        self.redraw(instance, settings).await
     }
 
     async fn did_receive_settings(
@@ -235,8 +286,7 @@ impl Action for MetricTileAction {
         settings: &Self::Settings,
     ) -> OpenActionResult<()> {
         self.track(&instance.instance_id, settings.clone());
-        let entries = self.log_source.entries().await;
-        self.render(instance, &entries, settings).await
+        self.redraw(instance, settings).await
     }
 
     async fn will_disappear(
@@ -251,8 +301,7 @@ impl Action for MetricTileAction {
     /// A tap refreshes just that tile - and doesn't move its next scheduled
     /// refresh, since a tap is a bonus, not a reason to skip one.
     async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-        let entries = self.log_source.entries().await;
-        self.render(instance, &entries, settings).await
+        self.redraw(instance, settings).await
     }
 }
 
@@ -458,7 +507,12 @@ mod tests {
         };
         for id in ["a", "b", "c"] {
             action
-                .render(&FakeSurface::new(id, true), &[entry()], &session)
+                .render(
+                    &FakeSurface::new(id, true),
+                    &[entry()],
+                    &session,
+                    UsageRead::Fetch,
+                )
                 .await
                 .unwrap();
         }
@@ -474,12 +528,136 @@ mod tests {
             range: RangeKind::Session,
             ..MetricTileSettings::default()
         };
-        action.render(&key, &[], &session).await.unwrap();
+        action
+            .render(&key, &[], &session, UsageRead::Fetch)
+            .await
+            .unwrap();
         assert_eq!(source.0.load(Ordering::SeqCst), 0);
         assert_eq!(
             key.frames(),
             vec![Output::Image(build_metric_icon(&error_display()))]
         );
+    }
+
+    /// A usage source whose fetch never answers.
+    struct Hanging;
+
+    #[async_trait]
+    impl UsageSource for Hanging {
+        async fn read(&self) -> Result<UsageSnapshot, UsageSourceError> {
+            std::future::pending().await
+        }
+    }
+
+    /// A usage cache holding one good snapshot (from `Counting`) whose
+    /// next fetch is already due - so a `read()` would fetch.
+    async fn cache_due_for_a_fetch(source: Counting) -> Arc<dyn SharedUsage> {
+        let usage = shared(source);
+        usage.read().await.unwrap();
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        usage
+    }
+
+    /// A projects dir with one transcript line, 4.5 hours old: inside the
+    /// rolling 5-hour fallback, but outside the window `Counting`'s reset
+    /// time (an hour from now) implies.
+    fn one_transcript() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let at = (chrono::Utc::now() - chrono::Duration::minutes(270)).to_rfc3339();
+        std::fs::write(
+            project.join("session.jsonl"),
+            format!(
+                r#"{{"type":"assistant","timestamp":"{at}","message":{{"model":"claude-sonnet-5","usage":{{"input_tokens":2,"output_tokens":3}}}}}}"#
+            ),
+        )
+        .unwrap();
+        root
+    }
+
+    fn session() -> MetricTileSettings {
+        MetricTileSettings {
+            range: RangeKind::Session,
+            ..MetricTileSettings::default()
+        }
+    }
+
+    /// What a Session tile over `logs` shows for `resets_at`.
+    async fn expected(
+        logs: &LogUsageSource,
+        resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Output {
+        let entries = logs.entries().await;
+        Output::Image(build_metric_icon(&build_metric_display(
+            &entries,
+            MetricKind::Tokens,
+            RangeKind::Session,
+            chrono::Local::now(),
+            resets_at,
+        )))
+    }
+
+    /// An event never waits on a usage fetch: with the upstream hanging
+    /// and nothing cached, a Session tile's appear/settings/tap path
+    /// still draws (the rolling window) and brings its refresh forward.
+    #[tokio::test]
+    async fn an_event_draws_a_session_tile_without_fetching_usage() {
+        let root = one_transcript();
+        let logs = Arc::new(LogUsageSource::new(root.path().to_path_buf()));
+        let action = MetricTileAction::new(Arc::clone(&logs), shared(Hanging));
+        action.track("a", session());
+        let key = FakeSurface::new("a", true);
+        tokio::time::timeout(Duration::from_millis(100), action.redraw(&key, &session()))
+            .await
+            .expect("an event waited on the usage fetch")
+            .unwrap();
+        assert_eq!(key.frames(), vec![expected(&logs, None).await]);
+        assert!(action.registry.get("a").unwrap().next_due <= Instant::now());
+    }
+
+    /// An event uses the cached reset time, and makes no request even when
+    /// one is due; the tick loop's read is the one that fetches.
+    #[tokio::test(start_paused = true)]
+    async fn an_event_reads_the_cached_reset_time_and_only_a_tick_fetches() {
+        let source = Counting::default();
+        let usage = cache_due_for_a_fetch(source.clone()).await;
+        let resets_at = usage.peek().unwrap().unwrap().session.resets_at;
+        let root = one_transcript();
+        let logs = Arc::new(LogUsageSource::new(root.path().to_path_buf()));
+        let action = MetricTileAction::new(Arc::clone(&logs), usage);
+        let key = FakeSurface::new("a", true);
+        action.redraw(&key, &session()).await.unwrap();
+        assert_eq!(source.0.load(Ordering::SeqCst), 1, "an event fetched");
+        let cached = expected(&logs, resets_at).await;
+        assert_ne!(cached, expected(&logs, None).await, "the test can't tell");
+        assert_eq!(key.frames(), vec![cached]);
+
+        action.track("a", session());
+        tokio::time::advance(Duration::from_secs(60)).await;
+        action
+            .tick_once(|_| std::future::ready(Some(key.clone())))
+            .await;
+        assert_eq!(source.0.load(Ordering::SeqCst), 2, "the tick did not fetch");
+    }
+
+    /// With a usable snapshot cached, an event leaves the schedule alone.
+    #[tokio::test(start_paused = true)]
+    async fn a_warm_cache_keeps_the_tap_from_moving_the_schedule() {
+        let usage = shared(Counting::default());
+        usage.read().await.unwrap();
+        let root = one_transcript();
+        let action = MetricTileAction::new(
+            Arc::new(LogUsageSource::new(root.path().to_path_buf())),
+            usage,
+        );
+        action.track("a", session());
+        let due = action.registry.get("a").unwrap().next_due;
+        action
+            .redraw(&FakeSurface::new("a", true), &session())
+            .await
+            .unwrap();
+        assert_eq!(action.registry.get("a").unwrap().next_due, due);
     }
 
     #[test]

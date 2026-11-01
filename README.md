@@ -150,7 +150,9 @@ green/yellow/red at 50/80% to copper with Watch 50, Risk 75 and Critical
 3. It redraws every minute (the numbers behind it are fetched about every
    three minutes - see above). On a dial, press for an immediate refresh.
    On a keypad tile, a short press switches to the next style (see below)
-   and holding for half a second refreshes.
+   and holding for half a second refreshes. A refresh still goes through
+   the shared throttle; if a fetch takes longer than half a second, the key
+   shows the cached numbers and redraws as soon as the fetch lands.
 
 ## Using a Metric Tile
 
@@ -161,7 +163,10 @@ green/yellow/red at 50/80% to copper with Watch 50, Risk 75 and Critical
    hours; **Session** is the current 5-hour usage window.
 3. It updates automatically on that schedule; tap the tile for an
    immediate refresh (this doesn't reset the schedule - the next
-   automatic refresh still happens on time).
+   automatic refresh still happens on time). A Session tile's tap uses the
+   last fetched session reset time; when none has been fetched yet, it
+   shows a rolling 5-hour window and refreshes again right after with the
+   fetched reset time (that one refresh does restart the schedule).
 
 ## Using Peak Clock
 
