@@ -135,12 +135,16 @@ xattr -dr com.apple.quarantine ~/Library/Application\ Support/opendeck/plugins/c
 
 The plugin can read your Claude login, so check the download is the one CI
 built before installing it - either against the checksum, or against the
-build provenance GitHub recorded for it:
+build provenance GitHub recorded for it, which only the Release workflow
+can produce:
 
 ```bash
 sha256sum -c SHA256SUMS                    # macOS: shasum -a 256 -c SHA256SUMS
-gh attestation verify opendeck-claude-usage.streamDeckPlugin --repo jfms7s/opendeck-claude-usage
+gh attestation verify opendeck-claude-usage.streamDeckPlugin --repo jfms7s/opendeck-claude-usage --signer-workflow jfms7s/opendeck-claude-usage/.github/workflows/release.yml
 ```
+
+Add `--source-ref refs/tags/vX.Y.Z` (the release you downloaded) to also pin
+it to that tag.
 
 **Upgrading from 0.6.0:** existing Usage Gauge keys switch from
 green/yellow/red at 50/80% to copper with Watch 50, Risk 75 and Critical
