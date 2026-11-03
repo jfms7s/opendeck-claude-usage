@@ -12,9 +12,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use crate::metric::{
-    MetricDisplay, MetricKind, ModelScope, RangeKind, build_scoped_metric_display, error_display,
+    MetricDisplay, MetricKind, RangeKind, Scope, build_scoped_metric_display, error_display,
 };
 use crate::metric_icon::build_metric_icon;
+use crate::project_list::{is_projects_request, send_projects};
 use crate::settings::lenient;
 use crate::source::cached::SharedUsage;
 use crate::source::logs::{LogEntry, LogUsageSource};
@@ -29,10 +30,13 @@ pub struct MetricTileSettings {
     pub metric: MetricKind,
     #[serde(default, deserialize_with = "lenient")]
     pub range: RangeKind,
-    /// Which models count (all, or one family).
+    /// What counts: every model, one family, or one project.
     #[serde(default, deserialize_with = "lenient")]
-    pub scope: ModelScope,
+    pub scope: Scope,
 }
+
+/// How long a project's name may be in the subtitle, after the range.
+const PROJECT_CAPTION_CHARS: usize = 12;
 
 /// Where the Session range takes its reset time from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,11 +111,15 @@ impl MetricTileAction {
         } else {
             None
         };
+        let caption = settings.scope.caption(PROJECT_CAPTION_CHARS, |id| {
+            Some(self.log_source.project_name(id))
+        });
         build_scoped_metric_display(
             entries,
             settings.metric,
             settings.range,
-            settings.scope,
+            &settings.scope,
+            caption.as_deref(),
             chrono::Local::now(),
             session_resets_at,
         )
@@ -245,11 +253,33 @@ impl Action for MetricTileAction {
     async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
         self.redraw(instance, settings).await
     }
+
+    async fn property_inspector_did_appear(
+        &self,
+        instance: &Instance,
+        _settings: &Self::Settings,
+    ) -> OpenActionResult<()> {
+        send_projects(Arc::clone(&self.log_source), instance.instance_id.clone());
+        Ok(())
+    }
+
+    async fn send_to_plugin(
+        &self,
+        instance: &Instance,
+        _settings: &Self::Settings,
+        payload: &serde_json::Value,
+    ) -> OpenActionResult<()> {
+        if is_projects_request(payload) {
+            send_projects(Arc::clone(&self.log_source), instance.instance_id.clone());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metric::ModelScope;
     use crate::metric::build_metric_display;
     use crate::source::cached::test_support::shared;
     use crate::source::{MonthlyUsage, UsageSnapshot, UsageSource, UsageSourceError, WindowUsage};
@@ -311,7 +341,7 @@ mod tests {
         let settings = MetricTileSettings::default();
         assert_eq!(settings.metric, MetricKind::Tokens);
         assert_eq!(settings.range, RangeKind::Today);
-        assert_eq!(settings.scope, ModelScope::All);
+        assert_eq!(settings.scope, Scope::default());
     }
 
     /// A tile saved with the cut `refresh_seconds` loads with its other
@@ -346,7 +376,7 @@ mod tests {
                 .unwrap();
         assert_eq!(s.metric, MetricKind::Tokens);
         assert_eq!(s.range, RangeKind::SevenDay);
-        assert_eq!(s.scope, ModelScope::Opus);
+        assert_eq!(s.scope, ModelScope::Opus.into());
     }
 
     /// A tile saved on v0.16 with the removed Console source still loads with
@@ -374,7 +404,7 @@ mod tests {
         let action = action();
         let key = FakeSurface::new("a", true);
         let haiku = MetricTileSettings {
-            scope: ModelScope::Haiku,
+            scope: ModelScope::Haiku.into(),
             ..MetricTileSettings::default()
         };
         action
@@ -388,13 +418,43 @@ mod tests {
             &[entry()],
             MetricKind::Tokens,
             RangeKind::Today,
-            ModelScope::Haiku,
+            &ModelScope::Haiku.into(),
+            Some("haiku"),
             chrono::Local::now(),
             None,
         );
         assert_eq!(display.value_text, "0");
         assert_eq!(display.subtitle, "today \u{b7} haiku");
         assert_eq!(*frame, build_metric_icon(&display));
+    }
+
+    /// A tile scoped to a project with no usage shows a real zero with
+    /// the project named (from its transcripts' cwd once scanned).
+    #[tokio::test]
+    async fn a_project_scoped_tile_with_no_usage_shows_zero_and_the_project() {
+        let action = action();
+        let key = FakeSurface::new("a", true);
+        let settings = MetricTileSettings {
+            scope: Scope::Project("-home-u-git-repo".into()),
+            ..MetricTileSettings::default()
+        };
+        action
+            .render(&key, &[entry()], &settings, UsageRead::Cached)
+            .await
+            .unwrap();
+        let [Output::Image(frame)] = &key.frames()[..] else {
+            panic!("expected one frame");
+        };
+        let svg = String::from_utf8(
+            base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                frame.trim_start_matches("data:image/svg+xml;base64,"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(svg.contains(">0</text>"), "{svg}");
+        assert!(svg.contains("today \u{b7} -home-u-git\u{2026}"), "{svg}");
     }
 
     #[test]

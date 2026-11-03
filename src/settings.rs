@@ -128,7 +128,7 @@ mod tests {
         assert_lenient::<MetricTileSettings>(
             &["metric", "range", "scope"],
             ("scope", json!("opus")),
-            |s| s.scope == crate::metric::ModelScope::Opus,
+            |s| s.scope == crate::metric::ModelScope::Opus.into(),
         );
         assert_lenient::<PeakClockSettings>(
             &["peak_start", "peak_end", "peak_days"],

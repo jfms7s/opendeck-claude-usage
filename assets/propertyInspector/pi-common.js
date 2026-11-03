@@ -22,6 +22,38 @@
 		return select.value;
 	}
 
+	const PROJECT = "project:";
+
+	// Fills `select`'s project options ("project:<id>", shown as
+	// "Project: <name>") from the plugin's list, after its fixed options,
+	// and shows `current`. A saved project the list doesn't have (not used
+	// lately, or the list hasn't arrived yet) is kept as an option named by
+	// its id, so a save never drops it (KI-10). Names are set as text,
+	// never as markup.
+	function setProjectOptions(select, projects, current, doc = root.document) {
+		for (let i = select.options.length - 1; i >= 0; i--) {
+			if (String(select.options[i].value).startsWith(PROJECT)) select.remove(i);
+		}
+		const list = Array.isArray(projects)
+			? projects.filter(
+					(p) => p && typeof p.id === "string" && p.id !== "" && typeof p.name === "string",
+				)
+			: [];
+		const add = (value, label) => {
+			const option = doc.createElement("option");
+			option.value = value;
+			option.textContent = label;
+			select.add(option);
+		};
+		for (const project of list) add(PROJECT + project.id, `Project: ${project.name}`);
+		const saved =
+			typeof current === "string" && current.startsWith(PROJECT) && current.length > PROJECT.length;
+		if (saved && !list.some((project) => PROJECT + project.id === current)) {
+			add(current, `Project: ${current.slice(PROJECT.length)}`);
+		}
+		return selectKnown(select, current, "all");
+	}
+
 	// How a PI saves. `read()` returns the form's settings; `passThrough`
 	// names fields the PI never edits because only a key press changes
 	// them (the gauge style, the heatmap view, ...).
@@ -88,7 +120,10 @@
 
 	// Connects a PI page to OpenDeck: registers, shows the stored settings
 	// with `apply`, and returns `changed` for the page's inputs to call.
-	function connectPI({ apply, read, passThrough = [] }) {
+	// With `onPluginMessage`, the page also asks the plugin for its project
+	// list once connected and hands every sendToPropertyInspector payload
+	// to it.
+	function connectPI({ apply, read, passThrough = [], onPluginMessage }) {
 		let websocket;
 		let uuid;
 		const channel = createSettingsChannel({
@@ -110,18 +145,30 @@
 			websocket.onopen = () => {
 				websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
 				show(actionInfo.payload.settings || {});
+				if (onPluginMessage) {
+					websocket.send(
+						JSON.stringify({
+							event: "sendToPlugin",
+							action: actionInfo.action,
+							context: uuid,
+							payload: { request: "projects" },
+						}),
+					);
+				}
 			};
 			websocket.onmessage = (event) => {
 				const message = JSON.parse(event.data);
 				if (message.event === "didReceiveSettings") {
 					show(message.payload.settings || {});
+				} else if (message.event === "sendToPropertyInspector" && onPluginMessage) {
+					onPluginMessage(message.payload || {});
 				}
 			};
 		});
 		return { changed: () => channel.changed() };
 	}
 
-	const api = { isHexColor, selectKnown, createSettingsChannel, connectPI };
+	const api = { isHexColor, selectKnown, setProjectOptions, createSettingsChannel, connectPI };
 	if (typeof module !== "undefined" && module.exports) {
 		module.exports = api;
 	} else {

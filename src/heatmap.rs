@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::level::{DEFAULT_NORMAL, is_hex_color};
-use crate::metric::{MetricKind, ModelScope, format_cost, format_tokens};
+use crate::metric::{MetricKind, Scope, format_cost, format_tokens};
 use crate::pricing::{CostTotal, cost_for_entry};
 use crate::settings::lenient;
 use crate::source::logs::LogEntry;
@@ -30,9 +30,9 @@ pub struct HeatmapSettings {
     pub view: HeatmapView,
     #[serde(default = "default_color", deserialize_with = "hex_color")]
     pub color: String,
-    /// Which models count (all, or one family).
+    /// What counts: every model, one family, or one project.
     #[serde(default, deserialize_with = "lenient")]
-    pub scope: ModelScope,
+    pub scope: Scope,
 }
 
 fn default_color() -> String {
@@ -54,7 +54,7 @@ impl Default for HeatmapSettings {
             metric: MetricKind::default(),
             view: HeatmapView::default(),
             color: DEFAULT_NORMAL.to_string(),
-            scope: ModelScope::default(),
+            scope: Scope::default(),
         }
     }
 }
@@ -164,9 +164,39 @@ fn weekday_letter(day: Weekday) -> char {
     }
 }
 
+/// How long a project's name may be in the caption, before its total.
+pub const PROJECT_CAPTION_CHARS: usize = 10;
+
+/// What the caption calls `scope`: the family in capitals, or the
+/// project's name (from `name_of`, else its id) cut to fit. `None` when
+/// unscoped, so the view's name shows.
+pub fn scope_caption(
+    scope: &Scope,
+    name_of: impl FnOnce(&str) -> Option<String>,
+) -> Option<String> {
+    let caption = scope.caption(PROJECT_CAPTION_CHARS, name_of)?;
+    Some(match scope {
+        Scope::Models(_) => caption.to_uppercase(),
+        Scope::Project(_) => caption,
+    })
+}
+
+#[cfg(test)]
 pub fn build_heatmap<Tz: TimeZone>(
     entries: &[LogEntry],
     settings: &HeatmapSettings,
+    now: DateTime<Tz>,
+) -> HeatmapDisplay {
+    let caption = scope_caption(&settings.scope, |_| None);
+    build_scoped_heatmap(entries, settings, caption.as_deref(), now)
+}
+
+/// The heatmap for `settings`, its caption naming the scope as
+/// `scope_caption` (see `scope_caption`) in place of the view's name.
+pub fn build_scoped_heatmap<Tz: TimeZone>(
+    entries: &[LogEntry],
+    settings: &HeatmapSettings,
+    scope_caption: Option<&str>,
     now: DateTime<Tz>,
 ) -> HeatmapDisplay {
     let days = settings.view.days();
@@ -183,19 +213,18 @@ pub fn build_heatmap<Tz: TimeZone>(
             color: settings.color.clone(),
         };
     }
-    // Scoped after the "no data" check: a family with no usage is a real
-    // zero.
+    // Scoped after the "no data" check: a family or project with no usage
+    // is a real zero.
     let scoped: Vec<LogEntry>;
-    let entries = match settings.scope {
-        ModelScope::All => entries,
-        scope => {
-            scoped = entries
-                .iter()
-                .filter(|e| scope.matches(e))
-                .cloned()
-                .collect();
-            &scoped
-        }
+    let entries = if settings.scope.is_all() {
+        entries
+    } else {
+        scoped = entries
+            .iter()
+            .filter(|e| settings.scope.matches(e))
+            .cloned()
+            .collect();
+        &scoped
     };
     let totals = daily_totals(entries, settings.metric, now.clone(), days);
     let max = totals.iter().copied().fold(0.0, f64::max);
@@ -217,10 +246,7 @@ pub fn build_heatmap<Tz: TimeZone>(
         // A scope replaces the view's name; the grid's shape shows the view.
         caption: format!(
             "{} \u{b7} {total_text}",
-            settings
-                .scope
-                .family()
-                .map_or_else(|| settings.view.caption().to_string(), str::to_uppercase)
+            scope_caption.unwrap_or_else(|| settings.view.caption())
         ),
         cells,
         weekday_letters,
@@ -241,6 +267,7 @@ fn caption_cost(total: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metric::ModelScope;
     use chrono::{FixedOffset, Utc};
     use serde_json::json;
 
@@ -253,6 +280,7 @@ mod tests {
             cache_creation_input_tokens: 0,
             cache_creation_1h_input_tokens: 0,
             cache_read_input_tokens: 0,
+            project: Default::default(),
         }
     }
 
@@ -367,8 +395,8 @@ mod tests {
         let mut opus = entry("2026-09-30T08:00:00Z", 100);
         opus.model = "claude-opus-5".into();
         let entries = [opus, entry("2026-09-30T08:00:00Z", 7)];
-        let scoped = |scope| HeatmapSettings {
-            scope,
+        let scoped = |scope: ModelScope| HeatmapSettings {
+            scope: scope.into(),
             ..HeatmapSettings::default()
         };
         let d = build_heatmap(&entries, &scoped(ModelScope::Opus), now());
@@ -378,6 +406,27 @@ mod tests {
         assert!(d.cells.iter().all(Option::is_none));
         let d = build_heatmap(&entries, &scoped(ModelScope::All), now());
         assert_eq!(d.caption, "7 DAYS \u{b7} 107");
+    }
+
+    #[test]
+    fn a_project_scoped_heatmap_names_the_project() {
+        let mut mine = entry("2026-09-30T08:00:00Z", 100);
+        mine.project = "-home-u-git-repo".into();
+        let entries = [mine, entry("2026-09-30T08:00:00Z", 7)];
+        let settings = HeatmapSettings {
+            scope: Scope::Project("-home-u-git-repo".into()),
+            ..HeatmapSettings::default()
+        };
+        let caption = scope_caption(&settings.scope, |_| Some("opendeck-claude-usage".into()));
+        assert_eq!(caption.as_deref(), Some("opendeck-\u{2026}"));
+        let d = build_scoped_heatmap(&entries, &settings, caption.as_deref(), now());
+        assert_eq!(d.caption, "opendeck-\u{2026} \u{b7} 100");
+        let other = HeatmapSettings {
+            scope: Scope::Project("-home-u-git-other".into()),
+            ..HeatmapSettings::default()
+        };
+        let d = build_scoped_heatmap(&entries, &other, Some("other"), now());
+        assert_eq!(d.caption, "other \u{b7} 0");
     }
 
     /// The spring change: the 23-hour Sunday is still one cell.
@@ -537,7 +586,7 @@ mod tests {
             metric: MetricKind::Cost,
             view: HeatmapView::FourWeeks,
             color: "#123abc".to_string(),
-            scope: ModelScope::Sonnet,
+            scope: ModelScope::Sonnet.into(),
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(

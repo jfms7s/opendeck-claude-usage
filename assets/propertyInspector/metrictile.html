@@ -26,9 +26,9 @@
 					</select>
 				</div>
 				<div class="field">
-					<label for="scope">Models</label>
+					<label for="scope">Scope</label>
 					<select id="scope">
-						<option value="all">All models</option>
+						<option value="all">All usage</option>
 						<option value="opus">Opus</option>
 						<option value="sonnet">Sonnet</option>
 						<option value="haiku">Haiku</option>
@@ -40,11 +40,20 @@
 	<script src="pi-common.js"></script>
 
 	<script>
+		// The plugin's project list, once it arrives.
+		let projects = [];
+
 		const pi = connectPI({
+			onPluginMessage(payload) {
+				if (!Array.isArray(payload.projects)) return;
+				projects = payload.projects;
+				const scope = document.getElementById("scope");
+				setProjectOptions(scope, projects, scope.value);
+			},
 			apply(settings) {
 				selectKnown(document.getElementById("metric"), settings.metric, "tokens");
 				selectKnown(document.getElementById("range"), settings.range, "today");
-				selectKnown(document.getElementById("scope"), settings.scope, "all");
+				setProjectOptions(document.getElementById("scope"), projects, settings.scope);
 			},
 			read: () => ({
 				metric: document.getElementById("metric").value,

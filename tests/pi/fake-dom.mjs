@@ -56,6 +56,15 @@ class Element {
 		return this._value;
 	}
 
+	// HTMLSelectElement's add/remove, for options a page builds at run time.
+	add(option) {
+		this.options.push(option);
+	}
+
+	remove(index) {
+		this.options.splice(index, 1);
+	}
+
 	addEventListener(event, listener) {
 		(this.listeners[event] ||= []).push(listener);
 	}
@@ -119,6 +128,7 @@ export function loadPage(file) {
 
 	const document = {
 		getElementById: (id) => page.byId.get(id) ?? null,
+		createElement: (tagName) => ({ tagName, value: "", textContent: "" }),
 		querySelectorAll(selector) {
 			const group = selector.match(/^#(\S+) input$/);
 			return group ? (page.groups.get(group[1]) ?? []) : [];
@@ -170,6 +180,10 @@ export function loadPage(file) {
 		);
 		await new Promise((resolve) => setImmediate(resolve));
 		page.socket.onopen();
+	};
+	// The plugin's sendToPropertyInspector.
+	page.pluginMessage = (payload) => {
+		page.socket.onmessage({ data: JSON.stringify({ event: "sendToPropertyInspector", payload }) });
 	};
 	// OpenDeck sending didReceiveSettings.
 	page.receive = (settings) => {

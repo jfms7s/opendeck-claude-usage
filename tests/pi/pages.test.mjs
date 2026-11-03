@@ -99,7 +99,7 @@ test("scope: a saved family is shown and kept; an unknown one falls back to All"
 		assert.equal(kept.saves()[0].scope, "opus", file);
 
 		const unknown = loadPage(file);
-		await unknown.open({ scope: "project:foo" });
+		await unknown.open({ scope: "gpt" });
 		assert.equal(unknown.el("scope").value, "all", file);
 		unknown.change("scope", "haiku");
 		unknown.runTimers();
@@ -114,3 +114,52 @@ test("peak clock: an empty day list stays empty; bad times fall back", async () 
 	page.change("peak_end", "19:30");
 	assert.deepEqual(page.saves(), [{ peak_start: "13:00", peak_end: "19:30", peak_days: [] }]);
 });
+
+for (const file of ["metrictile.html", "heatmap.html"]) {
+	test(`${file}: asks for the project list and fills the scope from it`, async () => {
+		const page = loadPage(file);
+		await page.open({ scope: "opus" });
+		assert.deepEqual(
+			page.sent.filter((m) => m.event === "sendToPlugin").map((m) => m.payload),
+			[{ request: "projects" }],
+		);
+		page.pluginMessage({
+			projects: [
+				{ id: "-home-u-git-repo", name: "repo" },
+				{ id: "-home-u-git-other", name: "<b>other</b>" },
+			],
+		});
+		const scope = page.el("scope");
+		assert.deepEqual(
+			scope.options.map((o) => o.value),
+			["all", "opus", "sonnet", "haiku", "project:-home-u-git-repo", "project:-home-u-git-other"],
+		);
+		assert.equal(scope.options[5].textContent, "Project: <b>other</b>", "names are text");
+		assert.equal(scope.value, "opus", "the shown scope is kept");
+		page.change("scope", "project:-home-u-git-repo");
+		page.runTimers();
+		assert.equal(page.saves().at(-1).scope, "project:-home-u-git-repo");
+		// A second list replaces the first.
+		page.pluginMessage({ projects: [{ id: "-home-u-git-other", name: "other" }] });
+		assert.deepEqual(
+			scope.options.map((o) => o.value).filter((v) => v.startsWith("project:")),
+			["project:-home-u-git-other", "project:-home-u-git-repo"],
+			"the selected project stays even when the list drops it",
+		);
+		assert.equal(scope.value, "project:-home-u-git-repo");
+	});
+
+	test(`${file}: a saved project is kept before (and without) the list`, async () => {
+		const page = loadPage(file);
+		await page.open({ scope: "project:-home-u-git-gone" });
+		const scope = page.el("scope");
+		assert.equal(scope.value, "project:-home-u-git-gone");
+		assert.equal(scope.options.at(-1).textContent, "Project: -home-u-git-gone");
+		page.pluginMessage({ projects: [{ id: "-home-u-git-repo", name: "repo" }] });
+		assert.equal(scope.value, "project:-home-u-git-gone");
+		page.pluginMessage({ nonsense: true });
+		page.change("metric", "cost");
+		page.runTimers();
+		assert.equal(page.saves().at(-1).scope, "project:-home-u-git-gone");
+	});
+}

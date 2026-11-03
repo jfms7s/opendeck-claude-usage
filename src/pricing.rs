@@ -138,6 +138,7 @@ mod tests {
             cache_creation_input_tokens: cache_write,
             cache_creation_1h_input_tokens: 0,
             cache_read_input_tokens: cache_read,
+            project: Default::default(),
         }
     }
 

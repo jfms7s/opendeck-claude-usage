@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import { PI_DIR } from "./fake-dom.mjs";
 
 const require = createRequire(import.meta.url);
-const { selectKnown, createSettingsChannel, isHexColor } = require(`${PI_DIR}pi-common.js`);
+const { selectKnown, setProjectOptions, createSettingsChannel, isHexColor } = require(`${PI_DIR}pi-common.js`);
 
 function select(values) {
 	const options = values.map((value) => ({ value }));
@@ -78,4 +78,34 @@ test("a pass-through value never stored isn't invented", () => {
 	ch.changed();
 	fire();
 	assert.deepEqual(sent[1], { event: "setSettings", payload: { a: 1 } });
+});
+
+test("setProjectOptions ignores malformed entries and an empty project id", () => {
+	const options = [{ value: "all" }, { value: "opus" }];
+	const select = {
+		options,
+		_value: "all",
+		get value() {
+			return this._value;
+		},
+		set value(v) {
+			this._value = options.some((o) => o.value === v) ? v : "";
+		},
+		add: (o) => options.push(o),
+		remove: (i) => options.splice(i, 1),
+	};
+	const doc = { createElement: () => ({ value: "", textContent: "" }) };
+	const shown = setProjectOptions(
+		select,
+		[{ id: "a", name: "A" }, { id: "", name: "x" }, { id: 3, name: "y" }, null, { id: "b" }],
+		"project:",
+		doc,
+	);
+	assert.deepEqual(
+		options.map((o) => o.value),
+		["all", "opus", "project:a"],
+	);
+	assert.equal(shown, "all");
+	assert.equal(setProjectOptions(select, "nope", "opus", doc), "opus");
+	assert.deepEqual(options.map((o) => o.value), ["all", "opus"]);
 });

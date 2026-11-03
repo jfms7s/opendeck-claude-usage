@@ -156,10 +156,14 @@ green/yellow/red at 50/80% to copper with Watch 50, Risk 75 and Critical
 2. Pick the metric (Tokens or Cost) and the range. **Today** is since local midnight (the same day as
    the Heatmap's and the Sparkline's "today"); **7 days** is the last 7×24
    hours; **Session** is the current 5-hour usage window.
-   **Models** limits the count to one family (**Opus**, **Sonnet** or
-   **Haiku**, matched in the model id) or keeps **All models**; a scoped
-   tile names the family under the number (`today · opus`) and shows `0`,
-   not "no data", when that family has no usage in range.
+   **Scope** limits the count to one model family (**Opus**, **Sonnet** or
+   **Haiku**, matched in the model id) or to one **Project**, or keeps
+   **All usage**. The projects are listed by the plugin, most recently
+   used first, named after the repository folder; a Claude Code worktree
+   (`<repo>/.claude/worktrees/<branch>`, `<repo>/.worktrees/<branch>`)
+   counts as its repository. A scoped tile names the family or project
+   under the number (`today · opus`, `today · my-repo`) and shows `0`, not
+   "no data", when it has no usage in range.
 3. It redraws every minute; tap the tile for an immediate refresh. A
    Session tile's tap uses the last fetched session reset time; when none
    has been fetched yet, it shows a rolling 5-hour window and redraws
@@ -231,9 +235,9 @@ touch-strip bar.
 
 1. Add a **Usage Heatmap** key on a dial or a keypad tile.
 2. Pick what to measure — **Tokens** or estimated **Cost**, from the same
-   local Claude Code logs as Metric Tile — and a color. **Models** limits
-   it to one family (Opus, Sonnet or Haiku) as on Metric Tile; the caption
-   then names the family (`OPUS · 1.2M`) instead of the view.
+   local Claude Code logs as Metric Tile — and a color. **Scope** limits
+   it to one model family or one project as on Metric Tile; the caption
+   then names it (`OPUS · 1.2M`, `my-repo · 1.2M`) instead of the view.
 3. Each cell is one local calendar day, shaded relative to the busiest day
    shown; days with no usage stay grey. The caption shows the total.
 4. A short press (key or dial) flips between **7 days** (today on the
@@ -288,6 +292,7 @@ release and record the version you checked them on:
 | With every Claude Code client closed past the access token's expiry, usage keys recover within about 10 minutes (plugin log: "Claude Code renewed the expired OAuth access token"). | not recorded |
 | Usage keeps updating with only the Claude desktop app open (no CLI session, no editor extension). | not recorded |
 | Metric Tile and Usage Heatmap totals match `ccusage` (or another transcript tool) for the same day. | not recorded |
+| The Metric Tile and Usage Heatmap settings pages list your projects under **Scope** (worktrees folded into their repository), and a project-scoped key counts only that project. | not recorded |
 | Peak Clock's usage ring is darkest at the hours you actually work, and appears within a minute of OpenDeck starting. | not recorded |
 | `~/.local/state/opendeck-claude-usage/history.jsonl` is created owner-only, only grows when usage changes, and survives a restart. | not recorded |
 

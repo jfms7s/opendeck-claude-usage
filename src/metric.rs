@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -57,10 +59,97 @@ impl ModelScope {
     }
 }
 
+/// What a Metric Tile or Heatmap counts: every model or one family, or
+/// one project (its id from `logs::project_id`, every model). Stored as
+/// one `scope` string: `all`, `opus`, `sonnet`, `haiku` or
+/// `project:<id>`. Anything else fails to parse, which `lenient` turns
+/// into `All`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    Models(ModelScope),
+    Project(Arc<str>),
+}
+
+const PROJECT_PREFIX: &str = "project:";
+
+impl Default for Scope {
+    fn default() -> Self {
+        Scope::Models(ModelScope::All)
+    }
+}
+
+impl From<ModelScope> for Scope {
+    fn from(models: ModelScope) -> Self {
+        Scope::Models(models)
+    }
+}
+
+impl Serialize for Scope {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Scope::Models(models) => models.serialize(serializer),
+            Scope::Project(id) => serializer.serialize_str(&format!("{PROJECT_PREFIX}{id}")),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Scope {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        if let Some(id) = text.strip_prefix(PROJECT_PREFIX) {
+            if id.is_empty() {
+                return Err(serde::de::Error::custom("empty project id"));
+            }
+            return Ok(Scope::Project(id.into()));
+        }
+        ModelScope::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(&text))
+            .map(Scope::Models)
+    }
+}
+
+impl Scope {
+    pub fn matches(&self, entry: &LogEntry) -> bool {
+        match self {
+            Scope::Models(models) => models.matches(entry),
+            Scope::Project(id) => *entry.project == **id,
+        }
+    }
+
+    pub fn is_all(&self) -> bool {
+        *self == Scope::Models(ModelScope::All)
+    }
+
+    /// What a key names the scope with: the family, or the project's name
+    /// (looked up by `name_of`, falling back to its id) cut to `max`
+    /// characters. `None` when unscoped.
+    pub fn caption(
+        &self,
+        max: usize,
+        name_of: impl FnOnce(&str) -> Option<String>,
+    ) -> Option<String> {
+        match self {
+            Scope::Models(models) => models.family().map(str::to_string),
+            Scope::Project(id) => {
+                Some(shorten(&name_of(id).unwrap_or_else(|| id.to_string()), max))
+            }
+        }
+    }
+}
+
+/// `text` cut to `max` characters, the last one an ellipsis when cut.
+pub fn shorten(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('\u{2026}');
+    out
+}
+
 pub struct MetricDisplay {
     pub label: &'static str,
     pub value_text: String,
-    pub subtitle: &'static str,
+    pub subtitle: String,
     pub accent_color: &'static str,
 }
 
@@ -155,20 +244,22 @@ pub fn build_metric_display<Tz: TimeZone>(
         entries,
         metric,
         range,
-        ModelScope::All,
+        &Scope::default(),
+        None,
         now,
         session_resets_at,
     )
 }
 
-/// `build_metric_display` counting only `scope`'s models; the subtitle
-/// names a family scope (`today · opus`). A scope with no usage in range
-/// is a real zero, not "no data".
+/// `build_metric_display` counting only what `scope` matches; the subtitle
+/// adds `scope_caption` (`today · opus`, `today · my-repo`). A scope with
+/// no usage in range is a real zero, not "no data".
 pub fn build_scoped_metric_display<Tz: TimeZone>(
     entries: &[LogEntry],
     metric: MetricKind,
     range: RangeKind,
-    scope: ModelScope,
+    scope: &Scope,
+    scope_caption: Option<&str>,
     now: DateTime<Tz>,
     session_resets_at: Option<DateTime<Utc>>,
 ) -> MetricDisplay {
@@ -178,7 +269,10 @@ pub fn build_scoped_metric_display<Tz: TimeZone>(
         .filter(|e| e.timestamp >= start && e.timestamp <= end && scope.matches(e))
         .collect();
 
-    let subtitle = subtitle(range, scope);
+    let subtitle = match scope_caption {
+        Some(caption) => format!("{} \u{b7} {caption}", range_caption(range)),
+        None => range_caption(range).to_string(),
+    };
 
     match metric {
         MetricKind::Tokens => {
@@ -199,24 +293,11 @@ pub fn build_scoped_metric_display<Tz: TimeZone>(
     }
 }
 
-/// The range, plus the family when scoped - static, so `MetricDisplay`
-/// stays cheap.
-fn subtitle(range: RangeKind, scope: ModelScope) -> &'static str {
-    use ModelScope::*;
-    use RangeKind::*;
-    match (range, scope) {
-        (Today, All) => "today",
-        (Today, Opus) => "today \u{b7} opus",
-        (Today, Sonnet) => "today \u{b7} sonnet",
-        (Today, Haiku) => "today \u{b7} haiku",
-        (SevenDay, All) => "7 days",
-        (SevenDay, Opus) => "7 days \u{b7} opus",
-        (SevenDay, Sonnet) => "7 days \u{b7} sonnet",
-        (SevenDay, Haiku) => "7 days \u{b7} haiku",
-        (Session, All) => "session",
-        (Session, Opus) => "session \u{b7} opus",
-        (Session, Sonnet) => "session \u{b7} sonnet",
-        (Session, Haiku) => "session \u{b7} haiku",
+fn range_caption(range: RangeKind) -> &'static str {
+    match range {
+        RangeKind::Today => "today",
+        RangeKind::SevenDay => "7 days",
+        RangeKind::Session => "session",
     }
 }
 
@@ -227,7 +308,7 @@ pub fn error_display() -> MetricDisplay {
     MetricDisplay {
         label: "\u{2014}",
         value_text: "\u{2014}".to_string(),
-        subtitle: "no data",
+        subtitle: "no data".to_string(),
         accent_color: DISABLED_COLOR,
     }
 }
@@ -335,6 +416,7 @@ mod tests {
             cache_creation_input_tokens: 0,
             cache_creation_1h_input_tokens: 0,
             cache_read_input_tokens: 0,
+            project: Default::default(),
         }
     }
 
@@ -426,7 +508,8 @@ mod tests {
             &entries,
             MetricKind::Tokens,
             RangeKind::Today,
-            ModelScope::Opus,
+            &ModelScope::Opus.into(),
+            Some("opus"),
             now,
             None,
         );
@@ -437,7 +520,8 @@ mod tests {
             &entries,
             MetricKind::Tokens,
             RangeKind::SevenDay,
-            ModelScope::Haiku,
+            &ModelScope::Haiku.into(),
+            Some("haiku"),
             now,
             None,
         );
@@ -461,5 +545,88 @@ mod tests {
         }
         let w: W = serde_json::from_str(r#"{"scope":"opus"}"#).unwrap();
         assert_eq!(w.scope, ModelScope::Opus);
+    }
+    #[test]
+    fn a_scope_round_trips_through_its_string() {
+        for (text, scope) in [
+            ("all", Scope::default()),
+            ("opus", ModelScope::Opus.into()),
+            (
+                "project:-home-u-git-repo",
+                Scope::Project("-home-u-git-repo".into()),
+            ),
+        ] {
+            let json = serde_json::Value::String(text.into());
+            assert_eq!(
+                serde_json::from_value::<Scope>(json.clone()).unwrap(),
+                scope
+            );
+            assert_eq!(serde_json::to_value(&scope).unwrap(), json);
+        }
+        #[derive(serde::Deserialize)]
+        struct W {
+            #[serde(default, deserialize_with = "crate::settings::lenient")]
+            scope: Scope,
+        }
+        for json in [
+            r#"{"scope":"project:"}"#,
+            r#"{"scope":"projects"}"#,
+            r#"{"scope":[1]}"#,
+        ] {
+            assert_eq!(
+                serde_json::from_str::<W>(json).unwrap().scope,
+                Scope::default(),
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_project_scope_matches_its_project_only() {
+        let mut mine = model_entry("claude-opus-5", 1);
+        mine.project = "-home-u-git-repo".into();
+        let theirs = model_entry("claude-opus-5", 1);
+        let scope = Scope::Project("-home-u-git-repo".into());
+        assert!(scope.matches(&mine));
+        assert!(!scope.matches(&theirs));
+        assert!(!scope.is_all());
+    }
+
+    #[test]
+    fn a_project_caption_is_its_name_cut_to_fit() {
+        let scope = Scope::Project("-home-u-git-repo".into());
+        assert_eq!(
+            scope.caption(12, |_| Some("repo".into())).as_deref(),
+            Some("repo")
+        );
+        assert_eq!(
+            scope
+                .caption(12, |_| Some("opendeck-claude-usage".into()))
+                .as_deref(),
+            Some("opendeck-cl\u{2026}")
+        );
+        assert_eq!(
+            scope.caption(30, |_| None).as_deref(),
+            Some("-home-u-git-repo")
+        );
+        assert_eq!(Scope::default().caption(12, |_| None), None);
+        assert_eq!(shorten("abc", 3), "abc");
+        assert_eq!(shorten("abcd", 3), "ab\u{2026}");
+    }
+
+    #[test]
+    fn a_project_scoped_display_with_no_usage_is_zero_and_named() {
+        let entries = [model_entry("claude-opus-5", 100)];
+        let d = build_scoped_metric_display(
+            &entries,
+            MetricKind::Tokens,
+            RangeKind::Today,
+            &Scope::Project("-home-u-git-repo".into()),
+            Some("repo"),
+            dt(12, 0),
+            None,
+        );
+        assert_eq!(d.value_text, "0");
+        assert_eq!(d.subtitle, "today \u{b7} repo");
     }
 }
