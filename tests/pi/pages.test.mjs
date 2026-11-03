@@ -44,13 +44,19 @@ test("combo: saving keeps the press-picked layout (KI-14)", async () => {
 	assert.deepEqual(page.saves(), [{ risk: 70, layout: "vertical" }]);
 });
 
-test("sparkline: a stored Monthly is kept and the series passes through", async () => {
+test("sparkline: a stored Monthly (cut) shows Session and the series passes through", async () => {
 	const page = loadPage("sparkline.html");
 	await page.open({ window: "monthly", series: "today" });
-	assert.equal(page.el("window").value, "monthly");
+	assert.equal(page.el("window").value, "session");
 	page.change("watch", "40");
 	page.runTimers();
-	assert.deepEqual(page.saves(), [{ window: "monthly", watch: 40, series: "today" }]);
+	assert.deepEqual(page.saves(), [{ window: "session", watch: 40, series: "today" }]);
+});
+
+test("gauge: a stored Monthly (cut) shows Session", async () => {
+	const page = loadPage("index.html");
+	await page.open({ window: "monthly" });
+	assert.equal(page.el("window").value, "session");
 });
 
 test("heatmap: a bad stored color shows the default, the view passes through", async () => {

@@ -13,6 +13,9 @@ pub struct WindowUsage {
     pub resets_at: Option<DateTime<Utc>>,
 }
 
+/// `extra_usage` (pay-as-you-go spend against a monthly cap). Parsed and
+/// recorded in the history file, but no key shows it: the Monthly window
+/// option was cut (its dollar scaling could never be verified).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonthlyUsage {
     pub enabled: bool,
@@ -76,7 +79,6 @@ pub enum WindowKind {
     #[default]
     Session,
     Weekly,
-    Monthly,
 }
 
 /// Errors carry only their message (not the underlying `io::Error` /

@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use openaction::{Action, Instance, OpenActionResult};
 use serde::{Deserialize, Serialize};
 
-use crate::burn::{BurnMetric, build_burn_display, burn_error_display, burn_feedback, burn_window};
+use crate::burn::{BurnMetric, build_burn_display, burn_error_display, burn_feedback};
 use crate::burn_icon::build_burn_icon;
 use crate::history::Reading;
 use crate::hub::{HubView, UsageHub, View};
@@ -60,7 +60,7 @@ impl HubView for BurnView {
 impl HubSettings for BurnRateSettings {
     fn view(&self) -> View {
         Arc::new(BurnView {
-            window: burn_window(self.window),
+            window: self.window,
             metric: self.metric,
             colors: self.colors.clone(),
         })
@@ -259,6 +259,7 @@ mod tests {
     }
 
     #[test]
+    /// The Monthly window was cut: a stored one loads as Session.
     fn monthly_setting_views_as_session() {
         let s: BurnRateSettings = serde_json::from_str(r#"{"window":"monthly"}"#).unwrap();
         assert!(format!("{:?}", s.view()).contains("window: Session"));

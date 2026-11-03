@@ -29,17 +29,15 @@ pub struct Pace {
     pub runway: Runway,
 }
 
-/// Monthly (`extra_usage`) has no rolling window, so it has no length.
-pub fn window_length(kind: WindowKind) -> Option<Duration> {
+pub fn window_length(kind: WindowKind) -> Duration {
     match kind {
-        WindowKind::Session => Some(Duration::hours(5)),
-        WindowKind::Weekly => Some(Duration::days(7)),
-        WindowKind::Monthly => None,
+        WindowKind::Session => Duration::hours(5),
+        WindowKind::Weekly => Duration::days(7),
     }
 }
 
 pub fn pace(window: &WindowUsage, kind: WindowKind, now: DateTime<Utc>) -> Option<Pace> {
-    let length_secs = window_length(kind)?.num_seconds() as f64;
+    let length_secs = window_length(kind).num_seconds() as f64;
     let remaining = window.resets_at? - now;
     // (length - remaining) / length rather than 1 - remaining/length: the
     // latter lands a hair under 0.10 at exactly 10% elapsed in f64.
@@ -92,9 +90,8 @@ mod tests {
 
     #[test]
     fn window_lengths() {
-        assert_eq!(window_length(WindowKind::Session), Some(Duration::hours(5)));
-        assert_eq!(window_length(WindowKind::Weekly), Some(Duration::days(7)));
-        assert_eq!(window_length(WindowKind::Monthly), None);
+        assert_eq!(window_length(WindowKind::Session), Duration::hours(5));
+        assert_eq!(window_length(WindowKind::Weekly), Duration::days(7));
     }
 
     #[test]
@@ -141,11 +138,6 @@ mod tests {
     fn full_usage_is_empty() {
         let p = pace(&session(100.0), WindowKind::Session, at(20, 10)).unwrap();
         assert_eq!(p.runway, Runway::Empty);
-    }
-
-    #[test]
-    fn monthly_has_no_pace() {
-        assert_eq!(pace(&session(30.0), WindowKind::Monthly, at(20, 10)), None);
     }
 
     #[test]

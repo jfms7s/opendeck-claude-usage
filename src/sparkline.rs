@@ -65,26 +65,21 @@ impl SparkSeries {
 type Usage = (f64, Option<DateTime<Utc>>);
 type Series = Vec<(DateTime<Utc>, f64)>;
 
-/// Monthly readings without a value are filtered out before this is used
-/// (see `build_sparkline`).
 fn usage(reading: &Reading, kind: WindowKind) -> Usage {
     match kind {
         WindowKind::Session => (reading.session, reading.session_resets_at),
         WindowKind::Weekly => (reading.weekly, reading.weekly_resets_at),
-        WindowKind::Monthly => (reading.monthly.unwrap_or(0.0), None),
     }
 }
 
 /// Usage added between two consecutive readings: the new % minus the old,
 /// or the new % itself when the window reset in between. Never negative.
-/// Extra usage has no reset time, so for Monthly a drop is the reset.
-fn step(prev: Usage, cur: Usage, kind: WindowKind) -> f64 {
-    let reset = if kind == WindowKind::Monthly {
-        cur.0 < prev.0
+fn step(prev: Usage, cur: Usage) -> f64 {
+    let added = if same_reset(prev.1, cur.1) {
+        cur.0 - prev.0
     } else {
-        !same_reset(prev.1, cur.1)
+        cur.0
     };
-    let added = if !reset { cur.0 - prev.0 } else { cur.0 };
     added.max(0.0)
 }
 
@@ -96,14 +91,7 @@ fn current_window(readings: &[Reading], kind: WindowKind, now: DateTime<Utc>) ->
     let Some(last) = readings.last() else {
         return Vec::new();
     };
-    let Some(length) = window_length(kind) else {
-        // Monthly: from the latest drop (a new month) on.
-        let start = readings
-            .windows(2)
-            .rposition(|pair| usage(&pair[1], kind).0 < usage(&pair[0], kind).0)
-            .map_or(0, |i| i + 1);
-        return readings[start..].iter().collect();
-    };
+    let length = window_length(kind);
     let start = match usage(last, kind).1 {
         Some(resets_at) if resets_at <= now => resets_at,
         Some(resets_at) => resets_at - length,
@@ -155,7 +143,7 @@ fn today<Tz: TimeZone>(readings: &[Reading], kind: WindowKind, now: &DateTime<Tz
     let mut total = 0.0;
     for reading in &readings[start..] {
         let cur = usage(reading, kind);
-        total += step(prev, cur, kind);
+        total += step(prev, cur);
         prev = cur;
         out.push((reading.at, total));
     }
@@ -172,33 +160,9 @@ pub fn build_sparkline<Tz: TimeZone>(
     let span = match kind {
         WindowKind::Session => "5H",
         WindowKind::Weekly => "7D",
-        WindowKind::Monthly => "MO",
     };
     let caption = format!("{} \u{b7} {span}", settings.series.label());
     let now_utc = now.with_timezone(&Utc);
-    let monthly = kind == WindowKind::Monthly;
-    if monthly && readings.last().is_some_and(|r| r.monthly.is_none()) {
-        return SparkDisplay {
-            caption,
-            headline: "off".to_string(),
-            points: Vec::new(),
-            color: DISABLED_COLOR.to_string(),
-            note: "not enabled".to_string(),
-        };
-    }
-    // Monthly: readings from before it was recorded, or while it was off,
-    // have no value to plot.
-    let kept: Vec<Reading>;
-    let readings = if monthly {
-        kept = readings
-            .iter()
-            .filter(|r| r.monthly.is_some())
-            .cloned()
-            .collect();
-        kept.as_slice()
-    } else {
-        readings
-    };
     // Readings are only recorded when something changes, so hold the
     // latest values up to now: idle time then shows as a flat end instead
     // of stale numbers.
@@ -328,20 +292,11 @@ mod tests {
     #[test]
     fn step_across_reset_is_the_new_percent() {
         assert_eq!(
-            step(
-                (90.0, Some(t("2026-09-30T07:00:00Z"))),
-                (10.0, Some(t(R))),
-                WindowKind::Session
-            ),
+            step((90.0, Some(t("2026-09-30T07:00:00Z"))), (10.0, Some(t(R))),),
             10.0
         );
-        let s = WindowKind::Session;
-        assert_eq!(step((20.0, Some(t(R))), (15.0, Some(t(R))), s), 0.0);
-        assert_eq!(step((20.0, Some(t(R))), (25.5, Some(t(R))), s), 5.5);
-        // Monthly has no reset time: a drop is a new month.
-        let m = WindowKind::Monthly;
-        assert_eq!(step((80.0, None), (3.0, None), m), 3.0);
-        assert_eq!(step((3.0, None), (4.5, None), m), 1.5);
+        assert_eq!(step((20.0, Some(t(R))), (15.0, Some(t(R)))), 0.0);
+        assert_eq!(step((20.0, Some(t(R))), (25.5, Some(t(R)))), 5.5);
     }
 
     const W: &str = "2026-10-03T00:00:00Z";
@@ -443,8 +398,8 @@ mod tests {
     #[test]
     fn settings_wire_falls_back_per_field() {
         let s: SparkSettings =
-            serde_json::from_str(r#"{"window":"monthly","series":"today"}"#).unwrap();
-        assert_eq!(s.window, WindowKind::Monthly);
+            serde_json::from_str(r#"{"window":"hourly","series":"today"}"#).unwrap();
+        assert_eq!(s.window, WindowKind::Session);
         assert_eq!(s.series, SparkSeries::Today);
         let s: SparkSettings = serde_json::from_str(r#"{"window":"weekly","series":9}"#).unwrap();
         assert_eq!(s.window, WindowKind::Weekly);
@@ -472,12 +427,10 @@ mod tests {
 
     #[test]
     fn request_jitter_on_resets_at_is_not_a_reset() {
-        let s = WindowKind::Session;
         assert_eq!(
             step(
                 (10.0, Some(t(&jitter(R, 186)))),
                 (12.0, Some(t(&jitter(R, -447)))),
-                s
             ),
             2.0
         );
@@ -485,10 +438,19 @@ mod tests {
             step(
                 (12.0, Some(t(&jitter(R, -447)))),
                 (13.5, Some(t(&jitter(R, 552)))),
-                s
             ),
             1.5
         );
+    }
+
+    /// The Monthly (extra usage) window was cut: a stored one loads as
+    /// Session and keeps its series.
+    #[test]
+    fn a_stored_monthly_window_loads_as_session() {
+        let s: SparkSettings =
+            serde_json::from_str(r#"{"window":"monthly","series":"today"}"#).unwrap();
+        assert_eq!(s.window, WindowKind::Session);
+        assert_eq!(s.series, SparkSeries::Today);
     }
 
     /// Keys saved on a series removed in 0.19 load as Trend and keep
@@ -586,84 +548,5 @@ mod tests {
             weekly("2026-09-29T21:00:00Z", 30.0, W),
         ]);
         assert_eq!(d.headline, "\u{2014}");
-    }
-
-    fn monthly(at: &str, pct: Option<f64>) -> Reading {
-        Reading {
-            at: t(at),
-            session: 0.0,
-            session_resets_at: None,
-            weekly: 0.0,
-            weekly_resets_at: None,
-            monthly: pct,
-        }
-    }
-
-    #[test]
-    fn monthly_trend_plots_extra_usage() {
-        let readings = [
-            monthly("2026-09-28T09:00:00Z", Some(10.0)),
-            monthly("2026-09-29T09:00:00Z", Some(20.0)),
-        ];
-        let d = build(
-            &readings,
-            WindowKind::Monthly,
-            SparkSeries::Trend,
-            "2026-09-29T09:00:00Z",
-        );
-        assert_eq!(d.points, vec![(0.0, 10.0), (1.0, 20.0)]);
-        assert_eq!(d.headline, "20%");
-        assert_eq!(d.caption, "TREND \u{b7} MO");
-    }
-
-    /// Extra usage has no reset time; a drop means a new month started, so
-    /// the trend starts there and the drop counts as that month's usage.
-    #[test]
-    fn a_monthly_drop_starts_a_new_month() {
-        let readings = [
-            monthly("2026-09-28T09:00:00Z", Some(80.0)),
-            monthly("2026-10-01T09:00:00Z", Some(3.0)),
-            monthly("2026-10-01T10:00:00Z", Some(5.0)),
-            monthly("2026-10-01T11:00:00Z", Some(6.0)),
-        ];
-        let now = "2026-10-01T11:00:00Z";
-        let trend = build(&readings, WindowKind::Monthly, SparkSeries::Trend, now);
-        assert_eq!(trend.points, vec![(0.0, 3.0), (0.5, 5.0), (1.0, 6.0)]);
-    }
-
-    /// Lines saved before extra usage was recorded, or while it was off,
-    /// have no monthly value and are left out.
-    #[test]
-    fn readings_without_monthly_are_skipped() {
-        let readings = [
-            monthly("2026-09-28T09:00:00Z", None),
-            monthly("2026-09-29T09:00:00Z", Some(10.0)),
-            monthly("2026-09-29T10:00:00Z", Some(12.0)),
-        ];
-        let d = build(
-            &readings,
-            WindowKind::Monthly,
-            SparkSeries::Trend,
-            "2026-09-29T10:00:00Z",
-        );
-        assert_eq!(d.points, vec![(0.0, 10.0), (1.0, 12.0)]);
-    }
-
-    #[test]
-    fn monthly_not_enabled_says_off() {
-        let readings = [
-            monthly("2026-09-29T09:00:00Z", Some(10.0)),
-            monthly("2026-09-29T10:00:00Z", None),
-        ];
-        let d = build(
-            &readings,
-            WindowKind::Monthly,
-            SparkSeries::Trend,
-            "2026-09-29T11:00:00Z",
-        );
-        assert_eq!(d.headline, "off");
-        assert_eq!(d.note, "not enabled");
-        assert!(d.points.is_empty());
-        assert_eq!(d.color, DISABLED_COLOR);
     }
 }

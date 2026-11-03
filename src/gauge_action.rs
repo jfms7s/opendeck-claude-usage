@@ -1,4 +1,4 @@
-//! Usage Gauge: one usage window (Session, Weekly or Monthly) as a dial's
+//! Usage Gauge: one usage window (Session or Weekly) as a dial's
 //! touch-strip bar or a keypad tile in one of six styles; a short keypad
 //! press cycles the ticked styles.
 
@@ -275,10 +275,20 @@ mod tests {
     #[test]
     fn bad_color_field_does_not_reset_window() {
         let s: UsageGaugeSettings =
-            serde_json::from_str(r#"{"window":"monthly","colorWatch":42,"watch":"abc"}"#).unwrap();
-        assert_eq!(s.window, WindowKind::Monthly);
+            serde_json::from_str(r#"{"window":"weekly","colorWatch":42,"watch":"abc"}"#).unwrap();
+        assert_eq!(s.window, WindowKind::Weekly);
         assert_eq!(s.colors.palette.watch, DEFAULT_WATCH);
         assert_eq!(s.colors.marks, Marks::default());
+    }
+
+    /// The Monthly (extra usage) window was cut: a stored one loads as
+    /// Session, and the rest of the settings survive.
+    #[test]
+    fn a_stored_monthly_window_loads_as_session() {
+        let s: UsageGaugeSettings =
+            serde_json::from_str(r#"{"window":"monthly","critical":95}"#).unwrap();
+        assert_eq!(s.window, WindowKind::Session);
+        assert_eq!(s.colors.marks.critical, 95.0);
     }
 
     /// KI-10 for the gauge's own `window`: an unknown window (a future
@@ -351,10 +361,10 @@ mod tests {
     #[test]
     fn full_settings_round_trip() {
         let s: UsageGaugeSettings =
-            serde_json::from_str(r#"{"window":"monthly","critical":95,"style":"softPill"}"#)
+            serde_json::from_str(r#"{"window":"weekly","critical":95,"style":"softPill"}"#)
                 .unwrap();
         let v = serde_json::to_value(&s).unwrap();
-        assert_eq!(v["window"], "monthly");
+        assert_eq!(v["window"], "weekly");
         assert_eq!(v["style"], "softPill");
         assert_eq!(v["critical"], 95.0);
         let back: UsageGaugeSettings = serde_json::from_value(v).unwrap();

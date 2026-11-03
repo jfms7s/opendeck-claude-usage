@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
 use crate::level::{ColorSettings, Marks, Palette};
-use crate::source::{MonthlyUsage, UsageSnapshot, WindowKind, WindowUsage};
+use crate::source::{UsageSnapshot, WindowKind, WindowUsage};
 
 pub const DISABLED_COLOR: &str = "#6b7280";
 
@@ -89,7 +89,6 @@ fn window_label(window: WindowKind) -> &'static str {
     match window {
         WindowKind::Session => "SESSION",
         WindowKind::Weekly => "WEEKLY",
-        WindowKind::Monthly => "MONTHLY",
     }
 }
 
@@ -106,7 +105,6 @@ pub fn build_display(
     match window {
         WindowKind::Session => window_display(&snapshot.session, window, colors, now),
         WindowKind::Weekly => window_display(&snapshot.weekly, window, colors, now),
-        WindowKind::Monthly => monthly_display(&snapshot.monthly, colors),
     }
 }
 
@@ -127,40 +125,6 @@ fn window_display(
     make_display(
         window_label(kind),
         window.percent,
-        colors.palette.color(level).to_string(),
-        detail,
-        tile_detail,
-        colors,
-    )
-}
-
-fn monthly_display(monthly: &MonthlyUsage, colors: &ColorSettings) -> UsageDisplay {
-    if !monthly.enabled {
-        return UsageDisplay {
-            has_data: true,
-            percent_text: "\u{2014}".to_string(),
-            color: DISABLED_COLOR.to_string(),
-            detail_text: "not enabled".to_string(),
-            tile_detail: "not enabled".to_string(),
-            label: "MONTHLY",
-            number_text: "\u{2014}".to_string(),
-            bar_value: 0.0,
-            marks: colors.marks,
-            palette: colors.palette.clone(),
-        };
-    }
-    let percent = monthly.percent.unwrap_or(0.0);
-    let (detail, tile_detail) = match (monthly.used_dollars, monthly.limit_dollars) {
-        (Some(used), Some(limit)) => (
-            format!("${used:.2} / ${limit:.2}"),
-            format!("${used:.2}/${limit:.0}"),
-        ),
-        _ => ("spend unavailable".to_string(), "no spend".to_string()),
-    };
-    let level = colors.level(percent);
-    make_display(
-        "MONTHLY",
-        percent,
         colors.palette.color(level).to_string(),
         detail,
         tile_detail,
@@ -237,6 +201,7 @@ pub fn error_display() -> UsageDisplay {
 mod tests {
     use super::*;
     use crate::level::{ColorSettings, DEFAULT_NORMAL, DEFAULT_WATCH};
+    use crate::source::MonthlyUsage;
     use chrono::TimeZone;
 
     fn dt(hour: u32, minute: u32, second: u32) -> DateTime<Utc> {
@@ -378,28 +343,6 @@ mod tests {
     }
 
     #[test]
-    fn builds_enabled_monthly_feedback() {
-        let feedback = build_feedback(&snapshot(), WindowKind::Monthly, dt(20, 30, 0));
-        assert_eq!(feedback["percent"], "25%");
-        assert_eq!(feedback["detail"], "$12.50 / $50.00");
-    }
-
-    #[test]
-    fn builds_disabled_monthly_feedback() {
-        let mut s = snapshot();
-        s.monthly = MonthlyUsage {
-            enabled: false,
-            percent: None,
-            used_dollars: None,
-            limit_dollars: None,
-        };
-        let feedback = build_feedback(&s, WindowKind::Monthly, dt(20, 30, 0));
-        assert_eq!(feedback["percent"], "\u{2014}");
-        assert_eq!(feedback["detail"], "not enabled");
-        assert_eq!(feedback["bar"]["bar_fill_c"], DISABLED_COLOR);
-    }
-
-    #[test]
     fn bar_value_is_clamped_but_percent_text_is_not() {
         let mut s = snapshot();
         s.session.percent = 142.0;
@@ -428,37 +371,6 @@ mod tests {
         assert_eq!(d.detail_text, "resets in 2h 10m");
         assert_eq!(d.tile_detail, "2h 10m");
         assert_eq!(d.bar_value, 33.0);
-    }
-
-    #[test]
-    fn display_enabled_monthly_tile_detail_is_compact() {
-        let d = build_display(
-            &snapshot(),
-            WindowKind::Monthly,
-            &ColorSettings::default(),
-            dt(20, 30, 0),
-        );
-        assert_eq!(d.tile_detail, "$12.50/$50");
-    }
-
-    #[test]
-    fn display_disabled_monthly() {
-        let mut s = snapshot();
-        s.monthly = MonthlyUsage {
-            enabled: false,
-            percent: None,
-            used_dollars: None,
-            limit_dollars: None,
-        };
-        let d = build_display(
-            &s,
-            WindowKind::Monthly,
-            &ColorSettings::default(),
-            dt(20, 30, 0),
-        );
-        assert_eq!(d.percent_text, "\u{2014}");
-        assert_eq!(d.color, DISABLED_COLOR);
-        assert_eq!(d.detail_text, "not enabled");
     }
 
     #[test]
@@ -532,10 +444,6 @@ mod tests {
             build_display(&s, WindowKind::Weekly, &c, dt(20, 30, 0)).label,
             "WEEKLY"
         );
-        assert_eq!(
-            build_display(&s, WindowKind::Monthly, &c, dt(20, 30, 0)).label,
-            "MONTHLY"
-        );
         assert_eq!(error_display().label, "USAGE");
     }
 
@@ -545,12 +453,6 @@ mod tests {
         assert_eq!(
             build_display(&snapshot(), WindowKind::Session, &c, dt(20, 30, 0)).number_text,
             "33"
-        );
-        let mut s = snapshot();
-        s.monthly.enabled = false;
-        assert_eq!(
-            build_display(&s, WindowKind::Monthly, &c, dt(20, 30, 0)).number_text,
-            "\u{2014}"
         );
         assert_eq!(error_display().number_text, "\u{2014}");
     }
