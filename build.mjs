@@ -5,12 +5,13 @@
 // Usage:
 //   node build.mjs                  every CodePaths target that has been built
 //                                   (target/<triple>/release, or target/release
-//                                   for the host triple)
+//                                   for the host triple; when both exist for the
+//                                   host, the newer file wins)
 //   node build.mjs <triple>...      exactly these targets; each must be built
 //   node build.mjs --all            every CodePaths target; each must be built
 //                                   (what the Release workflow runs)
 // Requires: cargo build --release [--target <triple>] already run.
-import { cpSync, copyFileSync, mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { cpSync, copyFileSync, mkdirSync, rmSync, existsSync, readFileSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
@@ -61,11 +62,26 @@ function hostTriple() {
 }
 
 // Where `cargo build --release` left this target's binary, if anywhere.
+// For the host triple both `--target <host>` (target/<host>/release) and a
+// plain build (target/release) may exist; the newer one is the one the
+// developer just built, so an old cross build never wins silently.
+const announced = new Set();
 function binaryFor(target, host) {
 	const cross = join("target", target, "release", BIN_NAME);
-	if (existsSync(cross)) return cross;
 	const native = join("target", "release", BIN_NAME);
-	if (target === host && existsSync(native)) return native;
+	const hasCross = existsSync(cross);
+	const hasNative = target === host && existsSync(native);
+	if (hasCross && hasNative) {
+		const [newer, older] =
+			statSync(native).mtimeMs > statSync(cross).mtimeMs ? [native, cross] : [cross, native];
+		if (!announced.has(newer)) {
+			announced.add(newer);
+			console.log(`using ${newer} (newer than ${older})`);
+		}
+		return newer;
+	}
+	if (hasCross) return cross;
+	if (hasNative) return native;
 	return undefined;
 }
 
@@ -127,7 +143,9 @@ if (missing.length > 0) {
 	}
 	console.warn(`note: not bundled (not built): ${list}`);
 }
-if (manifest.CodePathLin && !existsSync(join(outDir, manifest.CodePathLin))) {
-	console.warn(`note: CodePathLin (${manifest.CodePathLin}) is not in this bundle`);
+for (const key of ["CodePathLin", "CodePathMac"]) {
+	if (manifest[key] && !existsSync(join(outDir, manifest[key]))) {
+		console.warn(`note: ${key} (${manifest[key]}) is not in this bundle`);
+	}
 }
 console.log(`built ${outDir} for ${targets.join(", ")}`);
