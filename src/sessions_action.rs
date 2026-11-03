@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use openaction::{Action, Instance, OpenActionResult};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -30,8 +31,8 @@ const REFRESH: Duration = Duration::from_secs(15);
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionsSettings {}
 
-fn output(focus: &Focus, sessions: &[Session]) -> Output {
-    Output::Image(build_sessions_icon(focus, sessions, chrono::Utc::now()))
+fn output(focus: &Focus, sessions: &[Session], now: DateTime<Utc>) -> Output {
+    Output::Image(build_sessions_icon(focus, sessions, now))
 }
 
 #[derive(Clone)]
@@ -45,6 +46,8 @@ pub struct SessionsAction {
     latest: Arc<Mutex<Vec<Session>>>,
     /// Set once a folder error other than "missing" has been logged.
     warned: Arc<AtomicBool>,
+    /// The time frames are drawn at (`Utc::now`; fixed in tests).
+    clock: fn() -> DateTime<Utc>,
 }
 
 impl SessionsAction {
@@ -56,6 +59,7 @@ impl SessionsAction {
             wake: Arc::new(Notify::new()),
             latest: Arc::new(Mutex::new(Vec::new())),
             warned: Arc::new(AtomicBool::new(false)),
+            clock: Utc::now,
         }
     }
 
@@ -98,7 +102,8 @@ impl SessionsAction {
         focus: &Focus,
         sessions: &[Session],
     ) -> OpenActionResult<()> {
-        self.frames.push(surface, output(focus, sessions)).await
+        let frame = output(focus, sessions, (self.clock)());
+        self.frames.push(surface, frame).await
     }
 
     /// Runs forever: every `REFRESH`, re-reads the registry once and
@@ -138,6 +143,12 @@ impl SessionsAction {
     /// A short press moves the focus on through the last read; a long one
     /// re-reads and redraws.
     async fn released<S: Surface + ?Sized>(&self, surface: &S) -> OpenActionResult<()> {
+        if self.presses.get(surface.id()).is_none() {
+            // Already gone (`will_disappear` came first): a switch would
+            // track it again and keep the tick loop from parking.
+            self.presses.forget(surface.id());
+            return Ok(());
+        }
         let sessions = self.latest();
         match self.presses.up(surface.id(), &Focus::Summary, |f| {
             Some(next_focus(f, &sessions))
@@ -283,6 +294,8 @@ mod tests {
             crate::sessions::scan(std::path::Path::new(FIXTURES), read_session_file, &AllAlive)
                 .unwrap();
         let focused = Focus::Session(sessions[1].id.clone());
+        let mut action = action;
+        action.clock = || DateTime::from_timestamp_millis(1_793_700_000_000).unwrap();
         action.presses.set("a", &Focus::Summary);
         let key = FakeSurface::new("a", true);
         action
@@ -291,7 +304,23 @@ mod tests {
                 std::future::ready(Some(key.clone()))
             })
             .await;
-        assert_eq!(key.frames(), vec![output(&focused, &sessions)]);
+        assert_eq!(
+            key.frames(),
+            vec![output(&focused, &sessions, (action.clock)())]
+        );
+    }
+
+    /// A release after `will_disappear` doesn't track the key again.
+    #[tokio::test]
+    async fn a_press_released_after_the_key_is_gone_does_nothing() {
+        let action = SessionsAction::new(FIXTURES.into());
+        action.presses.set("a", &Focus::Summary);
+        action.presses.down("a");
+        action.presses.forget("a");
+        let key = FakeSurface::new("a", true);
+        action.released(&key).await.unwrap();
+        assert!(action.presses.is_empty());
+        assert!(key.frames().is_empty());
     }
 
     struct AllAlive;

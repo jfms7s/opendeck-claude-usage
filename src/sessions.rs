@@ -196,9 +196,9 @@ pub trait Liveness {
     fn is_alive(&self, session: &Session) -> bool;
 }
 
-/// The real check. Linux: `/proc/<pid>/stat` exists and, when the file
-/// has `procStart`, the process started then (a reused pid is a different
-/// process). macOS: `kill(pid, 0)`. A file from another pid namespace
+/// The real check: `kill(pid, 0)` finds the pid and, where
+/// `/proc/<pid>/stat` exists (Linux) and the file has `procStart`, the
+/// process started then (a reused pid is a different process). A file from another pid namespace
 /// (e.g. OpenDeck in a Flatpak) can't be checked here and is trusted.
 pub struct SystemLiveness;
 
@@ -238,11 +238,6 @@ impl Liveness for SystemLiveness {
         let Some(pid) = session.pid.and_then(plausible_pid) else {
             return false;
         };
-        if cfg!(target_os = "macos") {
-            // SAFETY: signal 0 only checks that the pid exists.
-            let rc = unsafe { libc::kill(pid, 0) };
-            return rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-        }
         if let (Some(theirs), Some(ours)) = (
             session.pid_domain.as_deref().and_then(namespace_of),
             own_namespace(),
@@ -250,14 +245,22 @@ impl Liveness for SystemLiveness {
         {
             return true;
         }
-        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            Ok(stat) => match (&session.proc_start, stat_start_time(&stat)) {
-                (Some(expected), Some(actual)) => expected == actual,
-                _ => true,
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            // Can't tell; don't call it dead.
-            Err(_) => true,
+        // The same POSIX check on every platform. SAFETY: signal 0 only
+        // asks whether the pid exists, and `plausible_pid` rules out the
+        // group/broadcast pids (0, -1, ...).
+        let rc = unsafe { libc::kill(pid, 0) };
+        if rc != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM) {
+            return false;
+        }
+        // Where /proc exists (Linux), a reused pid is told apart by its
+        // start time. Elsewhere (macOS) it can't be, so an existing pid
+        // counts as the session's.
+        match (
+            &session.proc_start,
+            std::fs::read_to_string(format!("/proc/{pid}/stat")),
+        ) {
+            (Some(expected), Ok(stat)) => stat_start_time(&stat).is_none_or(|a| a == expected),
+            _ => true,
         }
     }
 }
@@ -291,7 +294,7 @@ pub fn read_session_file(path: &Path) -> std::io::Result<Vec<u8>> {
 fn skip_error(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::NotFound
         || e.kind() == std::io::ErrorKind::InvalidInput
-        || e.raw_os_error() == Some(libc::ELOOP)
+        || matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENXIO))
 }
 
 /// The live sessions in `dir`, oldest first (then by pid). Opens only
@@ -456,9 +459,16 @@ mod tests {
     /// The reader never opens the `.key` file next to the session files.
     #[test]
     fn only_json_files_are_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["1001.json", "1002.json", "1003.json"] {
+            std::fs::copy(Path::new(FIXTURES).join(f), dir.path().join(f)).unwrap();
+        }
+        // A decoy next to them, as Claude Code keeps a `<pid>.<hex>.key`.
+        std::fs::write(dir.path().join("1001.0123abcd.key"), b"decoy").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"decoy").unwrap();
         let opened = RefCell::new(BTreeSet::new());
         scan(
-            Path::new(FIXTURES),
+            dir.path(),
             |p| {
                 opened
                     .borrow_mut()
@@ -468,7 +478,6 @@ mod tests {
             &all_alive(),
         )
         .unwrap();
-        assert!(Path::new(FIXTURES).join("1001.0123abcd.key").exists());
         let opened: Vec<_> = opened.into_inner().into_iter().collect();
         assert_eq!(opened, ["1001.json", "1002.json", "1003.json"]);
     }
@@ -650,6 +659,9 @@ mod tests {
         assert!(SystemLiveness.is_alive(&s));
         s.proc_start = Some("1".into());
         assert!(!SystemLiveness.is_alive(&s), "reused pid");
+        let mut gone = parse("x", b"{}");
+        gone.pid = Some(2_000_000_000);
+        assert!(!SystemLiveness.is_alive(&gone), "no such pid");
         // From another pid namespace: can't be checked, trusted.
         s.pid_domain = Some("linux:x:pid:[1]".into());
         assert!(own.is_none() || SystemLiveness.is_alive(&s));

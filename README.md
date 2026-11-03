@@ -209,7 +209,7 @@ when that last changed. The key shows those states as Claude Code writes
 them. The format is undocumented and changes between Claude Code releases,
 so the key reads it leniently: a file it can't make sense of counts as an
 unknown session (`?`) instead of blanking the key. A file whose process has
-exited (or whose pid now belongs to another process) is ignored. Only the
+exited (or, on Linux, whose pid now belongs to another process) is ignored. Only the
 `*.json` files are read, never the `*.key` files next to them. If OpenDeck
 runs in a sandbox with its own process ids (e.g. a Flatpak), the plugin
 can't check which processes are alive and trusts the files.
