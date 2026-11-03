@@ -20,6 +20,10 @@
 				</select>
 			</div>
 			<p class="hint">Short press moves to the next of the six styles. Hold to refresh.</p>
+			<div class="field">
+				<label class="check"><input type="checkbox" id="alerts" /> Flash when the window resets or reaches Critical</label>
+				<p class="hint">A check mark when a new window starts, a warning sign when usage crosses this key's Critical mark. Up to about 3 minutes late (usage is polled every 3 minutes).</p>
+			</div>
 		</section>
 
 		<div id="colors"></div>
@@ -32,10 +36,12 @@
 			apply(settings) {
 				selectKnown(document.getElementById("window"), settings.window, "session");
 				applyColorSettings(settings);
+				document.getElementById("alerts").checked = settings.alerts === true;
 			},
 			read: () => ({
 				window: document.getElementById("window").value,
 				...readColorSettings(),
+				alerts: document.getElementById("alerts").checked,
 			}),
 			// The current style changes only by pressing the key.
 			passThrough: ["style"],
@@ -43,6 +49,7 @@
 
 		mountColorSection(document.getElementById("colors"), { onChange: pi.changed });
 		document.getElementById("window").addEventListener("change", pi.changed);
+		document.getElementById("alerts").addEventListener("change", pi.changed);
 	</script>
 </body>
 </html>

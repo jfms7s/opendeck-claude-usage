@@ -22,7 +22,7 @@ use tokio::sync::Notify;
 use crate::history::{HistoryStore, Reading};
 use crate::source::cached::SharedUsage;
 use crate::source::{UsageSnapshot, UsageSourceError};
-use crate::surface::{Frames, Output, Surface, for_each_tracked};
+use crate::surface::{Alert, Frames, Output, Surface, for_each_tracked};
 use crate::tasks::{park_while_empty, sleep_to_next_minute};
 
 /// What one instance shows, built from its action's settings: turns the
@@ -41,6 +41,13 @@ pub trait HubView: Debug + Send + Sync {
     /// Whether `output` reads `history` - only then is it copied out.
     fn needs_history(&self) -> bool {
         false
+    }
+
+    /// What to flash after a poll whose snapshot `cur` differs from the
+    /// previous poll's `prev` (see `alert::window_alert`). `None` unless
+    /// the key opted in.
+    fn alert(&self, _prev: &UsageSnapshot, _cur: &UsageSnapshot) -> Option<Alert> {
+        None
     }
 }
 
@@ -70,6 +77,10 @@ pub struct UsageHub {
     /// so the cached snapshot served between fetches costs no trip to the
     /// blocking pool.
     last_recorded: Mutex<Option<(UsageSnapshot, NaiveDate)>>,
+    /// The snapshot the poll loop last read, which the next poll compares
+    /// against to raise alerts. Only `refresh_all` touches it, so a press's
+    /// read never consumes a transition, and a failed read keeps it.
+    last_polled: Mutex<Option<UsageSnapshot>>,
 }
 
 impl UsageHub {
@@ -84,6 +95,7 @@ impl UsageHub {
             poll_last_read_ok: AtomicBool::new(true),
             history,
             last_recorded: Mutex::new(None),
+            last_polled: Mutex::new(None),
         })
     }
 
@@ -162,7 +174,7 @@ impl UsageHub {
                 let hub = Arc::clone(self);
                 tokio::spawn(async move {
                     let snapshot = hub.read_outcome(read.await);
-                    hub.render_tracked(snapshot.as_ref(), lookup).await;
+                    hub.render_tracked(snapshot.as_ref(), None, lookup).await;
                 });
                 self.source.peek().and_then(Result::ok)
             }
@@ -276,18 +288,51 @@ impl UsageHub {
     }
 
     async fn refresh_all(&self) {
+        self.refresh_all_with(openaction::get_instance).await;
+    }
+
+    /// `refresh_all`, with the instance lookup passed in (tests pass a
+    /// fake).
+    async fn refresh_all_with<S, L, LF>(&self, lookup: L)
+    where
+        S: Surface,
+        L: FnMut(String) -> LF,
+        LF: Future<Output = Option<S>>,
+    {
         let read_result = self.read_and_record().await;
         self.log_poll_read_transition(read_result.is_ok(), read_result.as_ref().err());
 
-        self.render_tracked(read_result.as_ref().ok(), openaction::get_instance)
+        let previous = read_result
+            .as_ref()
+            .ok()
+            .and_then(|snapshot| self.previous_poll(snapshot));
+        self.render_tracked(read_result.as_ref().ok(), previous.as_ref(), lookup)
             .await;
+    }
+
+    /// The previous poll's snapshot when `snapshot` differs from it (so
+    /// something may have happened), remembering `snapshot` for the next
+    /// poll. `None` on the first poll and when the cache served the same
+    /// snapshot again.
+    fn previous_poll(&self, snapshot: &UsageSnapshot) -> Option<UsageSnapshot> {
+        let mut last = self
+            .last_polled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let previous = last.replace(snapshot.clone());
+        previous.filter(|prev| prev != snapshot)
     }
 
     /// Re-renders every tracked instance from `snapshot`, reading each
     /// one's view only once its instance has been looked up (see
-    /// `for_each_tracked`).
-    async fn render_tracked<S, L, LF>(&self, snapshot: Option<&UsageSnapshot>, lookup: L)
-    where
+    /// `for_each_tracked`). With `previous` (a poll that changed the
+    /// snapshot), each view that asks for it then flashes once.
+    async fn render_tracked<S, L, LF>(
+        &self,
+        snapshot: Option<&UsageSnapshot>,
+        previous: Option<&UsageSnapshot>,
+        lookup: L,
+    ) where
         S: Surface,
         L: FnMut(String) -> LF,
         LF: Future<Output = Option<S>>,
@@ -300,6 +345,12 @@ impl UsageHub {
             |surface, view| async move {
                 if let Err(e) = self.push(&surface, &view, snapshot).await {
                     log::warn!("render failed: {e}");
+                }
+                if let (Some(prev), Some(cur)) = (previous, snapshot)
+                    && let Some(alert) = view.alert(prev, cur)
+                    && let Err(e) = surface.flash(alert).await
+                {
+                    log::warn!("alert failed: {e}");
                 }
             },
         )
@@ -396,6 +447,7 @@ mod tests {
             window: WindowKind::Session,
             colors: ColorSettings::default(),
             style: GaugeStyle::Speedometer,
+            alerts: false,
         })
     }
 
@@ -411,6 +463,7 @@ mod tests {
         Arc::new(SparkView {
             settings: SparkSettings::default(),
             colors: ColorSettings::default(),
+            alerts: false,
         })
     }
 
@@ -450,7 +503,7 @@ mod tests {
 
         let (g, b) = (FakeSurface::dial("gauge"), FakeSurface::dial("burn"));
         let surfaces = [g.clone(), b.clone()];
-        hub.render_tracked(Some(&snapshot), |id| {
+        hub.render_tracked(Some(&snapshot), None, |id| {
             std::future::ready(surfaces.iter().find(|s| s.id == id).cloned())
         })
         .await;
@@ -475,8 +528,10 @@ mod tests {
         let dial = FakeSurface::dial("gauge");
         for _ in 0..3 {
             let snapshot = hub.read_and_record().await.unwrap();
-            hub.render_tracked(Some(&snapshot), |_| std::future::ready(Some(dial.clone())))
-                .await;
+            hub.render_tracked(Some(&snapshot), None, |_| {
+                std::future::ready(Some(dial.clone()))
+            })
+            .await;
         }
         assert_eq!(dial.frames().len(), 1);
     }
@@ -697,7 +752,7 @@ mod tests {
         let hub = idle_hub();
         hub.track("ctx1", gauge());
         let surface = FakeSurface::dial("ctx1");
-        hub.render_tracked(Some(&snapshot()), |id| {
+        hub.render_tracked(Some(&snapshot()), None, |id| {
             hub.track(&id, sparkline_view()); // the press lands here
             std::future::ready(Some(surface.clone()))
         })
@@ -714,11 +769,169 @@ mod tests {
         let hub = idle_hub();
         hub.track("ctx1", gauge());
         let surface = FakeSurface::dial("ctx1");
-        hub.render_tracked(Some(&snapshot()), |id| {
+        hub.render_tracked(Some(&snapshot()), None, |id| {
             hub.untrack(&id);
             std::future::ready(Some(surface.clone()))
         })
         .await;
         assert!(surface.frames().is_empty());
+    }
+    /// Serves `script` one snapshot per (unthrottled) read, then repeats
+    /// the last one.
+    #[derive(Clone)]
+    struct Scripted(Arc<Mutex<std::collections::VecDeque<UsageSnapshot>>>);
+
+    #[async_trait]
+    impl UsageSource for Scripted {
+        async fn read(&self) -> Result<UsageSnapshot, UsageSourceError> {
+            let mut script = self.0.lock().unwrap();
+            let next = if script.len() > 1 {
+                script.pop_front().unwrap()
+            } else {
+                script.front().cloned().unwrap()
+            };
+            Ok(next)
+        }
+    }
+
+    fn alerting_gauge(alerts: bool, critical: f64) -> View {
+        let mut colors = ColorSettings::default();
+        colors.marks.critical = critical;
+        Arc::new(GaugeView {
+            window: WindowKind::Session,
+            colors,
+            style: GaugeStyle::Speedometer,
+            alerts,
+        })
+    }
+
+    /// Polls `script` once per throttle interval (plus `extra` polls served
+    /// from the cache in between) with an opted-in gauge, an opted-out one
+    /// and an opted-in sparkline, and returns what each flashed.
+    async fn alerts_over(
+        script: Vec<UsageSnapshot>,
+        extra_cached_polls: bool,
+    ) -> (Vec<Alert>, Vec<Alert>, Vec<Alert>) {
+        let polls = script.len();
+        let source = Scripted(Arc::new(Mutex::new(script.into())));
+        let hub = UsageHub::new(shared(source), HistoryStore::in_memory());
+        hub.track("on", alerting_gauge(true, 90.0));
+        hub.track("off", alerting_gauge(false, 90.0));
+        hub.track(
+            "spark",
+            Arc::new(SparkView {
+                settings: SparkSettings::default(),
+                colors: ColorSettings::default(),
+                alerts: true,
+            }),
+        );
+        let surfaces: Vec<FakeSurface> = ["on", "off", "spark"]
+            .into_iter()
+            .map(|id| FakeSurface::new(id, true))
+            .collect();
+        let lookup = |id: String| std::future::ready(surfaces.iter().find(|s| s.id == id).cloned());
+        for _ in 0..polls {
+            hub.refresh_all_with(lookup).await;
+            if extra_cached_polls {
+                hub.refresh_all_with(lookup).await;
+            }
+            tokio::time::advance(Duration::from_secs(61)).await;
+        }
+        let flashed = |i: usize| surfaces[i].alerts.lock().unwrap().clone();
+        (flashed(0), flashed(1), flashed(2))
+    }
+
+    fn session(percent: f64, resets_at: chrono::DateTime<Utc>) -> UsageSnapshot {
+        let mut s = snapshot();
+        s.session = WindowUsage {
+            percent,
+            resets_at: Some(resets_at),
+        };
+        s
+    }
+
+    fn reset_time() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 9, 13, 22, 40, 0).unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_first_poll_never_alerts() {
+        let (on, _, _) = alerts_over(vec![session(95.0, reset_time())], false).await;
+        assert!(on.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_same_snapshot_served_twice_does_not_alert() {
+        let s = session(95.0, reset_time());
+        let (on, _, _) = alerts_over(vec![s.clone(), s], true).await;
+        assert!(on.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reset_jitter_within_tolerance_does_not_alert() {
+        let r = reset_time();
+        let (on, _, spark) = alerts_over(
+            vec![
+                session(40.0, r),
+                session(41.0, r + chrono::Duration::minutes(4)),
+            ],
+            false,
+        )
+        .await;
+        assert!(on.is_empty());
+        assert!(spark.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reset_flashes_fresh_once() {
+        let r = reset_time();
+        let after = session(3.0, r + chrono::Duration::hours(5));
+        let (on, off, spark) =
+            alerts_over(vec![session(70.0, r), after.clone(), after], true).await;
+        assert_eq!(on, vec![Alert::Fresh]);
+        assert_eq!(spark, vec![Alert::Fresh]);
+        assert!(off.is_empty(), "a key that didn't opt in");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn crossing_the_keys_critical_mark_flashes_critical_once() {
+        let r = reset_time();
+        let (on, off, spark) = alerts_over(
+            vec![session(85.0, r), session(92.0, r), session(93.0, r)],
+            false,
+        )
+        .await;
+        assert_eq!(on, vec![Alert::Critical], "Critical at 90 on this key");
+        assert_eq!(spark, vec![Alert::Critical], "the default mark is 90 too");
+        assert!(off.is_empty());
+    }
+
+    /// A press reads too, but never alerts and never uses up the
+    /// transition the next poll reports.
+    #[tokio::test(start_paused = true)]
+    async fn a_press_neither_alerts_nor_consumes_the_transition() {
+        let r = reset_time();
+        let source = Scripted(Arc::new(Mutex::new(
+            vec![
+                session(70.0, r),
+                session(3.0, r + chrono::Duration::hours(5)),
+            ]
+            .into(),
+        )));
+        let hub = UsageHub::new(shared(source), HistoryStore::in_memory());
+        let view = alerting_gauge(true, 90.0);
+        hub.track("on", Arc::clone(&view));
+        let key = FakeSurface::new("on", true);
+        let lookup = |_: String| std::future::ready(Some(key.clone()));
+        hub.refresh_all_with(lookup).await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+        hub.refresh_one_with(&key, &view, move |_: String| {
+            std::future::ready(None::<FakeSurface>)
+        })
+        .await
+        .unwrap();
+        assert!(key.alerts.lock().unwrap().is_empty());
+        hub.refresh_all_with(lookup).await;
+        assert_eq!(*key.alerts.lock().unwrap(), vec![Alert::Fresh]);
     }
 }

@@ -273,6 +273,17 @@ restarts. A file with lines this version can't read (say, written by a newer
 version before a downgrade) is left untouched rather than overwritten;
 the lines it can read still load.
 
+## Alerts (Usage Gauge, Usage Sparkline)
+
+Tick **Flash when the window resets or reaches Critical** on a Usage Gauge
+or Usage Sparkline key and it flashes once, with OpenDeck's own signs:
+a check mark when its window (Session or Weekly) resets and a new one
+starts, and a warning sign when usage crosses that key's own **Critical**
+mark. It never flashes for the first reading after OpenDeck starts, never
+twice for the same change, and never for a press's refresh. Alerts come
+from the regular poll, so they can lag the real reset or crossing by up to
+about 3 minutes. Off by default.
+
 ## Manual smoke-test checklist
 
 The unit tests (Rust) and the settings-page tests (`node --test tests/pi/*.test.mjs`)
@@ -287,6 +298,7 @@ release and record the version you checked them on:
 | Keys redraw every minute without interaction, and a key that appears shows numbers straight away. | not recorded |
 | A short press on Usage Gauge, Session + Weekly, Usage Heatmap or Usage Sparkline switches what it shows, and the choice survives an OpenDeck restart; two fast presses advance twice. | not recorded |
 | Holding a key for half a second refreshes without switching. | not recorded |
+| A Usage Gauge with **Flash when…** ticked shows OpenDeck's check mark once after its session resets, and its warning sign once when usage crosses its Critical mark; an unticked key shows neither. | not recorded |
 | Editing a settings page while a key's style/layout/view/series was changed by a press doesn't undo the press. | not recorded |
 | Removing a key causes no error in the plugin log on the next minute's redraw. | not recorded |
 | With every Claude Code client closed past the access token's expiry, usage keys recover within about 10 minutes (plugin log: "Claude Code renewed the expired OAuth access token"). | not recorded |

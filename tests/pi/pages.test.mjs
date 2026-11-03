@@ -50,7 +50,7 @@ test("sparkline: a stored Monthly (cut) shows Session and the series passes thro
 	assert.equal(page.el("window").value, "session");
 	page.change("watch", "40");
 	page.runTimers();
-	assert.deepEqual(page.saves(), [{ window: "session", watch: 40, series: "today" }]);
+	assert.deepEqual(page.saves(), [{ window: "session", watch: 40, alerts: false, series: "today" }]);
 });
 
 test("gauge: a stored Monthly (cut) shows Session", async () => {
@@ -161,5 +161,18 @@ for (const file of ["metrictile.html", "heatmap.html"]) {
 		page.change("metric", "cost");
 		page.runTimers();
 		assert.equal(page.saves().at(-1).scope, "project:-home-u-git-gone");
+for (const file of ["index.html", "sparkline.html"]) {
+	test(`${file}: the alerts box shows and saves the stored choice`, async () => {
+		const page = loadPage(file);
+		await page.open({ window: "weekly", alerts: true });
+		assert.equal(page.el("alerts").checked, true);
+		page.el("alerts").checked = false;
+		page.el("alerts").dispatch("change");
+		page.receive({ window: "weekly", alerts: true }); // reply to getSettings
+		assert.equal(page.saves().at(-1).alerts, false);
+
+		const garbage = loadPage(file);
+		await garbage.open({ alerts: "yes" });
+		assert.equal(garbage.el("alerts").checked, false, "only a stored true ticks it");
 	});
 }

@@ -21,6 +21,10 @@
 				<p class="hint">History builds up as the plugin runs and is kept for 8 days.</p>
 			</div>
 			<p class="hint">Short press (key or dial) switches between Trend and Today. Hold to refresh.</p>
+			<div class="field">
+				<label class="check"><input type="checkbox" id="alerts" /> Flash when the window resets or reaches Critical</label>
+				<p class="hint">A check mark when a new window starts, a warning sign when usage crosses this key's Critical mark. Up to about 3 minutes late (usage is polled every 3 minutes).</p>
+			</div>
 		</section>
 
 		<div id="colors"></div>
@@ -33,10 +37,12 @@
 			apply(settings) {
 				selectKnown(document.getElementById("window"), settings.window, "session");
 				applyColorSettings(settings);
+				document.getElementById("alerts").checked = settings.alerts === true;
 			},
 			read: () => ({
 				window: document.getElementById("window").value,
 				...readColorSettings(),
+				alerts: document.getElementById("alerts").checked,
 			}),
 			// The series changes only by pressing.
 			passThrough: ["series"],
@@ -44,6 +50,7 @@
 
 		mountColorSection(document.getElementById("colors"), { onChange: pi.changed });
 		document.getElementById("window").addEventListener("change", pi.changed);
+		document.getElementById("alerts").addEventListener("change", pi.changed);
 	</script>
 </body>
 </html>

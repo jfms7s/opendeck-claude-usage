@@ -8,14 +8,16 @@ use chrono::{DateTime, Local, Utc};
 use openaction::{Action, Instance, OpenActionResult};
 use serde::{Deserialize, Serialize};
 
+use crate::alert::window_alert;
 use crate::history::Reading;
 use crate::hub::{HubView, UsageHub, View};
 use crate::hub_action::{HubActionCore, HubSettings};
 use crate::level::ColorSettings;
+use crate::settings::lenient;
 use crate::source::UsageSnapshot;
 use crate::sparkline::{SparkSettings, build_sparkline};
 use crate::styles::sparkline::{render_key, sparkline_feedback};
-use crate::surface::Output;
+use crate::surface::{Alert, Output};
 use crate::tile;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -26,6 +28,10 @@ pub struct SparklineSettings {
     /// Marks/palette/mode for the line's level color.
     #[serde(flatten)]
     pub colors: ColorSettings,
+    /// Flash the key when its window resets or crosses Critical (off
+    /// unless ticked on the settings page).
+    #[serde(default, deserialize_with = "lenient")]
+    pub alerts: bool,
 }
 
 /// What a sparkline instance shows. Drawn from the recorded history, not
@@ -34,6 +40,7 @@ pub struct SparklineSettings {
 pub struct SparkView {
     pub settings: SparkSettings,
     pub colors: ColorSettings,
+    pub alerts: bool,
 }
 
 impl HubView for SparkView {
@@ -60,6 +67,12 @@ impl HubView for SparkView {
     fn needs_history(&self) -> bool {
         true
     }
+
+    fn alert(&self, prev: &UsageSnapshot, cur: &UsageSnapshot) -> Option<Alert> {
+        self.alerts
+            .then(|| window_alert(prev, cur, self.settings.window, &self.colors))
+            .flatten()
+    }
 }
 
 impl HubSettings for SparklineSettings {
@@ -67,6 +80,7 @@ impl HubSettings for SparklineSettings {
         Arc::new(SparkView {
             settings: self.spark.clone(),
             colors: self.colors.clone(),
+            alerts: self.alerts,
         })
     }
 
@@ -168,6 +182,7 @@ mod tests {
         SparkView {
             settings: SparkSettings::default(),
             colors: ColorSettings::default(),
+            alerts: false,
         }
     }
 
