@@ -467,14 +467,15 @@ impl LogUsageSource {
 
     /// Copies the store's project names to `names` when one was added.
     fn publish_names(store: &Mutex<Store>, names: &Mutex<HashMap<Arc<str>, Arc<str>>>) {
+        // The store stays locked while `names` is written, so two scans
+        // can't publish out of order (lock order: store, then names;
+        // `project_name` only takes names).
         let mut store = Self::lock(store);
         if store.names_changed {
             store.names_changed = false;
-            let copy = store.project_names.clone();
-            drop(store);
             *names
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = copy;
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = store.project_names.clone();
         }
     }
 
