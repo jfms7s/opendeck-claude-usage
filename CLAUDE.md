@@ -41,6 +41,7 @@ Shared plumbing:
 - `surface.rs` - `Output`, `Surface` (abstracts an `Instance` so render loops are testable; `FakeSurface` in its `test_support`), `Frames` (skips frames identical to the last one sent), `for_each_tracked` (the KI-06/KI-07 race-safe re-render loop).
 - `press.rs` - short press = switch view/style and persist via settings, ≥500 ms long press = refresh. `PressCycler` decides every release from the instance's own last settings (KI-08); every press-switching action goes through it (hub actions via `HubActionCore`, which also tracks the new view before awaiting the save - KI-06).
 - `settings.rs` - `lenient`: every settings field falls back alone, because openaction resets the *whole* struct on any deserialize error (KI-10). Fields with their own fallback rules use a `*Wire` struct (`level::ColorSettingsWire`, `gauge_style::StyleSettingsWire`). `settings.rs`'s table test feeds garbage to every action's settings - add new settings structs to it.
+- `project_list.rs` - the plugin → PI project list for Metric Tile/Heatmap's Scope (`project:<id>`, `metric::Scope`): sent on `propertyInspectorDidAppear` and on the page's `sendToPlugin {"request":"projects"}`, built off the event loop. Project ids are folded transcript folders (`logs::project_id`), names come from the transcripts' `cwd`.
 - `tasks.rs` - `spawn_supervised` (background loops are restarted, with a log line, if they panic), `sleep_to_next_minute`, `park_while_empty`.
 - `level.rs` (Watch/Risk/Critical marks + colors).
 

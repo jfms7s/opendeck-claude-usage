@@ -53,6 +53,10 @@ pub struct LogEntry {
     /// lifetime, which is billed at a higher rate than the 5-minute one.
     pub cache_creation_1h_input_tokens: u64,
     pub cache_read_input_tokens: u64,
+    /// Which project the transcript belongs to: its folder under
+    /// `projects_dir`, with worktree folders folded into their parent (see
+    /// `project_id`). Interned like `model`.
+    pub project: Arc<str>,
 }
 
 impl LogEntry {
@@ -78,6 +82,8 @@ struct RawLine {
     timestamp: Option<String>,
     #[serde(rename = "requestId")]
     request_id: Option<String>,
+    /// The session's working directory - only used to name its project.
+    cwd: Option<String>,
     message: Option<RawMessage>,
 }
 
@@ -115,6 +121,7 @@ struct RawCacheCreation {
 struct Parsed {
     key: Option<u64>,
     entry: LogEntry,
+    cwd: Option<String>,
 }
 
 fn message_key(message_id: &str, request_id: Option<&str>) -> u64 {
@@ -173,8 +180,66 @@ fn parse_line(line: &str, models: &mut HashSet<Arc<str>>) -> Option<Parsed> {
                 .map_or(0, |c| c.ephemeral_1h_input_tokens)
                 .min(usage.cache_creation_input_tokens),
             cache_read_input_tokens: usage.cache_read_input_tokens,
+            project: Arc::default(),
         },
+        cwd: raw.cwd,
     })
+}
+
+/// Where a worktree's path continues below its repository: Claude Code's
+/// own worktrees and the `.worktrees/` convention. In an encoded folder
+/// name (every non-alphanumeric character a `-`) `/.` becomes `--`, so the
+/// markers can't occur inside an ordinary repository name.
+const WORKTREE_PATH_MARKERS: [&str; 2] = ["/.claude/worktrees/", "/.worktrees/"];
+const WORKTREE_FOLDER_MARKERS: [&str; 2] = ["--claude-worktrees-", "--worktrees-"];
+
+/// Cuts `text` at the earliest of `markers`, so a (nested) worktree folds
+/// into its outermost repository.
+fn fold_at<'a>(text: &'a str, markers: &[&str]) -> &'a str {
+    markers
+        .iter()
+        .filter_map(|marker| text.find(marker))
+        .min()
+        .map_or(text, |at| &text[..at])
+}
+
+/// A project's id from its folder name under `projects_dir` (Claude Code's
+/// encoded working directory), with worktree folders folded into the
+/// repository they belong to.
+pub fn project_id(folder: &str) -> &str {
+    fold_at(folder, &WORKTREE_FOLDER_MARKERS)
+}
+
+/// A project's name from a session's working directory: the repository's
+/// folder name, worktrees folded. `None` for a path with no name.
+fn project_name_from_cwd(cwd: &str) -> Option<&str> {
+    let repo = fold_at(cwd, &WORKTREE_PATH_MARKERS).trim_end_matches(['/', '\\']);
+    repo.rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+}
+
+/// A name for a project whose transcripts carry no `cwd`: its id, without
+/// the encoded home directory in front.
+fn project_name_from_id(id: &str) -> String {
+    let home = crate::paths::home();
+    let encoded_home: String = home
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    id.strip_prefix(&encoded_home)
+        .map(|rest| rest.trim_start_matches('-'))
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(id)
+        .to_string()
+}
+
+/// A project as the Property Inspector lists it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ProjectInfo {
+    pub id: String,
+    pub name: String,
 }
 
 /// A transcript as last seen: its size and mtime, and how far into it
@@ -196,6 +261,11 @@ struct Store {
     by_key: HashMap<u64, usize>,
     files: HashMap<PathBuf, FileState>,
     models: HashSet<Arc<str>>,
+    /// Interned project ids, and each one's name from the first `cwd` seen.
+    projects: HashSet<Arc<str>>,
+    project_names: HashMap<Arc<str>, Arc<str>>,
+    /// A name was added since `LogUsageSource::names` was last updated.
+    names_changed: bool,
     /// When the last successful listing of the projects folder happened.
     last_walk: Option<Instant>,
     /// The last listing failed, so the next failure doesn't warn again.
@@ -203,6 +273,55 @@ struct Store {
 }
 
 impl Store {
+    /// The interned project id for a transcript at `path`.
+    fn project_of(&mut self, projects_dir: &Path, path: &Path) -> Arc<str> {
+        let folder = path
+            .strip_prefix(projects_dir)
+            .ok()
+            .and_then(|rel| rel.components().next())
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let id = project_id(&folder);
+        match self.projects.get(id) {
+            Some(interned) => Arc::clone(interned),
+            None => {
+                let interned: Arc<str> = id.into();
+                self.projects.insert(Arc::clone(&interned));
+                interned
+            }
+        }
+    }
+
+    /// Every project with usage, most recently used first.
+    fn project_list(&self) -> Vec<ProjectInfo> {
+        let mut latest: HashMap<&Arc<str>, DateTime<Utc>> = HashMap::new();
+        for entry in self.entries.iter() {
+            latest
+                .entry(&entry.project)
+                .and_modify(|at| *at = (*at).max(entry.timestamp))
+                .or_insert(entry.timestamp);
+        }
+        let mut list: Vec<(DateTime<Utc>, ProjectInfo)> = latest
+            .into_iter()
+            .filter(|(id, _)| !id.is_empty())
+            .map(|(id, at)| {
+                let name = self
+                    .project_names
+                    .get(id)
+                    .map_or_else(|| project_name_from_id(id), |name| name.to_string());
+                (
+                    at,
+                    ProjectInfo {
+                        id: id.to_string(),
+                        name,
+                    },
+                )
+            })
+            .collect();
+        list.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+        list.into_iter().map(|(_, info)| info).collect()
+    }
+
     fn add(&mut self, parsed: Parsed) {
         let entries = Arc::make_mut(&mut self.entries);
         match parsed.key {
@@ -226,7 +345,7 @@ impl Store {
     /// the caller keeps its old state and tries again next scan). A last
     /// line without its newline is taken only if it already parses -
     /// otherwise it is still being written.
-    fn read_from(&mut self, path: &Path, from: u64, len: u64) -> Option<u64> {
+    fn read_from(&mut self, path: &Path, project: &Arc<str>, from: u64, len: u64) -> Option<u64> {
         let mut file = File::open(path).ok()?;
         file.seek(SeekFrom::Start(from)).ok()?;
         let mut reader = BufReader::new(file);
@@ -249,7 +368,15 @@ impl Store {
                 break;
             }
             offset += read as u64;
-            if let Some(parsed) = parsed {
+            if let Some(mut parsed) = parsed {
+                if !self.project_names.contains_key(project)
+                    && let Some(name) = parsed.cwd.as_deref().and_then(project_name_from_cwd)
+                {
+                    self.project_names
+                        .insert(Arc::clone(project), Arc::from(name));
+                    self.names_changed = true;
+                }
+                parsed.entry.project = Arc::clone(project);
                 self.add(parsed);
             }
         }
@@ -267,6 +394,9 @@ pub struct LogUsageSource {
     /// entries) instead of listing the tree again.
     min_walk_interval: Duration,
     store: Arc<Mutex<Store>>,
+    /// A copy of the store's project names, so a render can name its
+    /// project without waiting for a scan that holds the store.
+    names: Arc<Mutex<HashMap<Arc<str>, Arc<str>>>>,
     /// Set once a scan has completed.
     scanned: Arc<AtomicBool>,
 }
@@ -306,6 +436,7 @@ impl LogUsageSource {
             projects_dir,
             min_walk_interval: Duration::ZERO,
             store: Arc::new(Mutex::new(Store::default())),
+            names: Arc::default(),
             scanned: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -334,6 +465,42 @@ impl LogUsageSource {
         }
     }
 
+    /// Copies the store's project names to `names` when one was added.
+    fn publish_names(store: &Mutex<Store>, names: &Mutex<HashMap<Arc<str>, Arc<str>>>) {
+        let mut store = Self::lock(store);
+        if store.names_changed {
+            store.names_changed = false;
+            let copy = store.project_names.clone();
+            drop(store);
+            *names
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = copy;
+        }
+    }
+
+    /// A project's name for a key's caption: the repository folder from
+    /// its transcripts' `cwd`, or (none seen yet) its id without the
+    /// encoded home directory.
+    pub fn project_name(&self, id: &str) -> String {
+        let names = self
+            .names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        names
+            .get(id)
+            .map_or_else(|| project_name_from_id(id), |name| name.to_string())
+    }
+
+    /// Every project with usage, most recently used first, for the
+    /// Property Inspector's scope list. Waits for a running scan (on the
+    /// blocking pool), so call it off the event loop.
+    pub async fn projects(&self) -> Vec<ProjectInfo> {
+        let store = Arc::clone(&self.store);
+        tokio::task::spawn_blocking(move || Self::lock(&store).project_list())
+            .await
+            .unwrap_or_default()
+    }
+
     /// `~/.claude/projects` - where Claude Code writes its transcripts, one
     /// directory per project.
     pub fn default_path() -> PathBuf {
@@ -348,9 +515,11 @@ impl LogUsageSource {
         let projects_dir = self.projects_dir.clone();
         let interval = self.min_walk_interval;
         let store = Arc::clone(&self.store);
+        let names = Arc::clone(&self.names);
         let scanned = Arc::clone(&self.scanned);
         let scan = move || {
             let entries = Self::scan(&projects_dir, &store, interval);
+            Self::publish_names(&store, &names);
             scanned.store(true, Ordering::Release);
             entries
         };
@@ -474,8 +643,12 @@ impl LogUsageSource {
             // file held, so start over (rare: Claude Code only deletes old
             // transcripts).
             let models = std::mem::take(&mut store.models);
+            let projects = std::mem::take(&mut store.projects);
+            let project_names = std::mem::take(&mut store.project_names);
             *store = Store {
                 models,
+                projects,
+                project_names,
                 ..Store::default()
             };
         }
@@ -486,7 +659,8 @@ impl LogUsageSource {
             }
             let from = seen.map_or(0, |s| s.offset);
             let offset = if len > from {
-                match store.read_from(&path, from, len) {
+                let project = store.project_of(projects_dir, &path);
+                match store.read_from(&path, &project, from, len) {
                     Some(offset) => offset,
                     // Couldn't open it: keep the old state, retry next scan.
                     None => continue,
@@ -575,6 +749,7 @@ mod tests {
             cache_creation_input_tokens: 19929,
             cache_creation_1h_input_tokens: 0,
             cache_read_input_tokens: 29011,
+            project: Default::default(),
         };
         assert_eq!(entry.total_tokens(), 49288);
     }
@@ -1022,6 +1197,131 @@ mod tests {
             LogUsageSource::new(PathBuf::new()).min_walk_interval,
             Duration::ZERO
         );
+    }
+
+    #[test]
+    fn worktree_folders_fold_into_their_project() {
+        for (folder, id) in [
+            ("-home-u-git-repo", "-home-u-git-repo"),
+            (
+                "-home-u-git-repo--claude-worktrees-fix-x",
+                "-home-u-git-repo",
+            ),
+            ("-home-u-git-repo--worktrees-feat-a-b", "-home-u-git-repo"),
+            // Nested: the outermost repository wins.
+            (
+                "-home-u-git-repo--worktrees-a--claude-worktrees-b",
+                "-home-u-git-repo",
+            ),
+            (
+                "-home-u-git-my-worktrees-tool",
+                "-home-u-git-my-worktrees-tool",
+            ),
+        ] {
+            assert_eq!(project_id(folder), id, "{folder}");
+        }
+    }
+
+    #[test]
+    fn a_project_is_named_after_its_repository_folder() {
+        for (cwd, name) in [
+            ("/home/u/git/repo", Some("repo")),
+            ("/home/u/git/repo/", Some("repo")),
+            ("/home/u/git/repo/.claude/worktrees/fix-x", Some("repo")),
+            (
+                "/home/u/git/repo/.worktrees/a/.claude/worktrees/b",
+                Some("repo"),
+            ),
+            ("/", None),
+            ("", None),
+        ] {
+            assert_eq!(project_name_from_cwd(cwd), name, "{cwd:?}");
+        }
+    }
+
+    /// A line for message `id` with a `cwd`.
+    fn line_in(id: &str, cwd: &str, timestamp: &str) -> String {
+        message_line(id, 1)
+            .replacen(
+                "\"requestId\"",
+                &format!("\"cwd\":\"{cwd}\",\"requestId\""),
+                1,
+            )
+            .replace("2026-09-13T12:59:01.971Z", timestamp)
+    }
+
+    #[tokio::test]
+    async fn entries_carry_their_folded_project_and_projects_are_listed() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("-home-u-git-repo");
+        let worktree = root.path().join("-home-u-git-repo--claude-worktrees-fix");
+        let other = root.path().join("-home-u-git-other");
+        let subagents = repo.join("session").join("subagents");
+        for dir in [&subagents, &worktree, &other] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(
+            repo.join("s.jsonl"),
+            format!(
+                "{}\n",
+                line_in("a", "/home/u/git/repo", "2026-09-13T10:00:00Z")
+            ),
+        )
+        .unwrap();
+        fs::write(
+            subagents.join("agent.jsonl"),
+            format!("{}\n", message_line("b", 1)),
+        )
+        .unwrap();
+        fs::write(
+            worktree.join("s.jsonl"),
+            format!(
+                "{}\n",
+                line_in(
+                    "c",
+                    "/home/u/git/repo/.claude/worktrees/fix",
+                    "2026-09-13T11:00:00Z"
+                )
+            ),
+        )
+        .unwrap();
+        fs::write(
+            other.join("s.jsonl"),
+            format!(
+                "{}\n",
+                line_in("d", "/home/u/git/other", "2026-09-14T09:00:00Z")
+            ),
+        )
+        .unwrap();
+        let source = LogUsageSource::new(root.path().to_path_buf());
+        let entries = source.entries().await;
+        let mut projects: Vec<&str> = entries.iter().map(|e| &*e.project).collect();
+        projects.sort_unstable();
+        assert_eq!(
+            projects,
+            [
+                "-home-u-git-other",
+                "-home-u-git-repo",
+                "-home-u-git-repo",
+                "-home-u-git-repo"
+            ]
+        );
+        assert_eq!(
+            source.projects().await,
+            [
+                ProjectInfo {
+                    id: "-home-u-git-other".into(),
+                    name: "other".into()
+                },
+                ProjectInfo {
+                    id: "-home-u-git-repo".into(),
+                    name: "repo".into()
+                },
+            ],
+            "most recently used first, named from cwd"
+        );
+        assert_eq!(source.project_name("-home-u-git-repo"), "repo");
+        assert_eq!(source.project_name("-nowhere"), "-nowhere");
     }
 
     /// Scans this machine's real transcripts and prints what it found - run

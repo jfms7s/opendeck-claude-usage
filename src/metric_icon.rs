@@ -39,7 +39,7 @@ fn render_svg(display: &MetricDisplay) -> String {
         SUBTITLE_SIZE,
         false,
         MUTED_TEXT_COLOR,
-        display.subtitle,
+        &display.subtitle,
     );
     tile::svg(&format!(r#"{label}{underline}{value}{subtitle}"#))
 }
@@ -58,7 +58,7 @@ mod tests {
         MetricDisplay {
             label: "Tokens",
             value_text: "318.5K".to_string(),
-            subtitle: "today",
+            subtitle: "today".to_string(),
             accent_color: TOKENS_ACCENT,
         }
     }
@@ -88,7 +88,7 @@ mod tests {
         let cost = MetricDisplay {
             label: "Cost",
             value_text: "$8.40".to_string(),
-            subtitle: "7 days",
+            subtitle: "7 days".to_string(),
             accent_color: COST_ACCENT,
         };
         assert!(render_svg(&cost).contains(COST_ACCENT));

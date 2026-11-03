@@ -22,6 +22,7 @@ mod paths;
 mod peak;
 mod press;
 mod pricing;
+mod project_list;
 mod settings;
 mod source;
 mod sparkline;

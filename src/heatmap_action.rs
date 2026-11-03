@@ -10,8 +10,9 @@ use openaction::{Action, Instance, OpenActionResult};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
-use crate::heatmap::{HeatmapDisplay, HeatmapSettings, build_heatmap};
+use crate::heatmap::{HeatmapDisplay, HeatmapSettings, build_scoped_heatmap, scope_caption};
 use crate::press::{PressCycler, Release};
+use crate::project_list::{is_projects_request, send_projects};
 use crate::source::logs::{LogEntry, LogUsageSource};
 use crate::styles::heatmap::{render_key, render_strip};
 use crate::surface::{Frames, Output, Surface, for_each_tracked};
@@ -23,9 +24,16 @@ pub fn heatmap_feedback(display: &HeatmapDisplay) -> Value {
     json!({ "chart": tile::data_uri(&render_strip(display)) })
 }
 
-/// The frame for `settings` on a key or a dial strip.
-fn output_from(entries: &[LogEntry], settings: &HeatmapSettings, keypad: bool) -> Output {
-    let display = build_heatmap(entries, settings, chrono::Local::now());
+/// The frame for `settings` on a key or a dial strip (`logs` names a
+/// project scope).
+fn output_from(
+    logs: &LogUsageSource,
+    entries: &[LogEntry],
+    settings: &HeatmapSettings,
+    keypad: bool,
+) -> Output {
+    let caption = scope_caption(&settings.scope, |id| Some(logs.project_name(id)));
+    let display = build_scoped_heatmap(entries, settings, caption.as_deref(), chrono::Local::now());
     if keypad {
         // Text is drawn inside the image (see tile.rs).
         Output::Image(tile::data_uri(&render_key(&display)))
@@ -71,7 +79,7 @@ impl HeatmapAction {
 
     /// The frame for `settings`, reading the logs.
     async fn output(&self, settings: &HeatmapSettings, keypad: bool) -> Output {
-        output_from(&self.logs.entries().await, settings, keypad)
+        output_from(&self.logs, &self.logs.entries().await, settings, keypad)
     }
 
     /// Draws one instance for an event (appear, new settings, press).
@@ -107,7 +115,7 @@ impl HeatmapAction {
             let output = self.output(settings, surface.is_keypad()).await;
             return self.frames.push(surface, output).await;
         }
-        let output = output_from(&self.logs.peek(), settings, surface.is_keypad());
+        let output = output_from(&self.logs, &self.logs.peek(), settings, surface.is_keypad());
         let pushed = self.frames.push(surface, output).await;
         if !self.first_scan_spawned.swap(true, Ordering::SeqCst) {
             let this = self.clone();
@@ -157,7 +165,7 @@ impl HeatmapAction {
             |id| self.presses.get(id),
             lookup,
             |surface, settings| async move {
-                let output = output_from(entries, &settings, surface.is_keypad());
+                let output = output_from(&self.logs, entries, &settings, surface.is_keypad());
                 if let Err(e) = self.frames.push(&surface, output).await {
                     log::warn!("heatmap render failed: {e}");
                 }
@@ -257,12 +265,33 @@ impl Action for HeatmapAction {
     async fn key_up(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
         self.released(instance, settings).await
     }
+
+    async fn property_inspector_did_appear(
+        &self,
+        instance: &Instance,
+        _settings: &Self::Settings,
+    ) -> OpenActionResult<()> {
+        send_projects(Arc::clone(&self.logs), instance.instance_id.clone());
+        Ok(())
+    }
+
+    async fn send_to_plugin(
+        &self,
+        instance: &Instance,
+        _settings: &Self::Settings,
+        payload: &Value,
+    ) -> OpenActionResult<()> {
+        if is_projects_request(payload) {
+            send_projects(Arc::clone(&self.logs), instance.instance_id.clone());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::heatmap::HeatmapView;
+    use crate::heatmap::{HeatmapView, build_heatmap};
     use crate::surface::test_support::FakeSurface;
     use crate::test_support::{assert_feedback_matches_layout, manifest_entry};
     use std::time::Duration;
@@ -303,7 +332,7 @@ mod tests {
             .render_with(&key, &settings, lookup.clone())
             .await
             .unwrap();
-        let empty = output_from(&[], &settings, true);
+        let empty = output_from(&logs, &[], &settings, true);
         assert_eq!(key.frames(), vec![empty.clone()]);
         assert!(action.first_scan_spawned.load(Ordering::SeqCst));
 
@@ -316,7 +345,7 @@ mod tests {
         .expect("the first scan never redrew the heatmap");
         assert!(logs.scanned());
         let frames = key.frames();
-        assert_eq!(frames[1], output_from(&logs.peek(), &settings, true));
+        assert_eq!(frames[1], output_from(&logs, &logs.peek(), &settings, true));
         assert_ne!(frames[1], empty);
     }
 
@@ -345,8 +374,14 @@ mod tests {
             .unwrap();
         let after = logs.peek();
         assert_eq!(after.len(), before.len() + 1);
-        assert_eq!(key.frames(), vec![output_from(&after, &settings, true)]);
-        assert_ne!(key.frames()[0], output_from(&before, &settings, true));
+        assert_eq!(
+            key.frames(),
+            vec![output_from(&logs, &after, &settings, true)]
+        );
+        assert_ne!(
+            key.frames()[0],
+            output_from(&logs, &before, &settings, true)
+        );
         assert!(!action.first_scan_spawned.load(Ordering::SeqCst));
     }
 
