@@ -24,6 +24,14 @@ pub enum Output {
     Feedback(serde_json::Value),
 }
 
+/// A one-off signal OpenDeck draws over a key for a moment: a check mark
+/// (`Fresh`, a usage window reset) or a warning triangle (`Critical`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Alert {
+    Fresh,
+    Critical,
+}
+
 #[async_trait]
 pub trait Surface: Send + Sync {
     /// The OpenDeck instance id this surface draws.
@@ -36,6 +44,8 @@ pub trait Surface: Send + Sync {
     async fn send(&self, output: &Output, clear_title: bool) -> OpenActionResult<()>;
     /// Saves the instance's settings, which OpenDeck keeps across restarts.
     async fn persist(&self, settings: serde_json::Value) -> OpenActionResult<()>;
+    /// Flashes OpenDeck's own alert or OK sign over the instance.
+    async fn flash(&self, alert: Alert) -> OpenActionResult<()>;
 }
 
 #[async_trait]
@@ -63,6 +73,13 @@ impl Surface for Instance {
     async fn persist(&self, settings: serde_json::Value) -> OpenActionResult<()> {
         self.set_settings(&settings).await
     }
+
+    async fn flash(&self, alert: Alert) -> OpenActionResult<()> {
+        match alert {
+            Alert::Fresh => self.show_ok().await,
+            Alert::Critical => self.show_alert().await,
+        }
+    }
 }
 
 #[async_trait]
@@ -81,6 +98,10 @@ impl<S: Surface + ?Sized> Surface for Arc<S> {
 
     async fn persist(&self, settings: serde_json::Value) -> OpenActionResult<()> {
         (**self).persist(settings).await
+    }
+
+    async fn flash(&self, alert: Alert) -> OpenActionResult<()> {
+        (**self).flash(alert).await
     }
 }
 
@@ -172,6 +193,7 @@ pub(crate) mod test_support {
         pub keypad: bool,
         pub sent: Arc<Mutex<Vec<(Output, bool)>>>,
         pub persisted: Arc<Mutex<Vec<serde_json::Value>>>,
+        pub alerts: Arc<Mutex<Vec<Alert>>>,
         #[allow(clippy::type_complexity)]
         pub on_persist: Arc<Mutex<Option<Box<dyn FnMut() + Send>>>>,
     }
@@ -183,6 +205,7 @@ pub(crate) mod test_support {
                 keypad,
                 sent: Arc::default(),
                 persisted: Arc::default(),
+                alerts: Arc::default(),
                 on_persist: Arc::new(Mutex::new(None)),
             }
         }
@@ -224,6 +247,11 @@ pub(crate) mod test_support {
                 hook();
             }
             self.persisted.lock().unwrap().push(settings);
+            Ok(())
+        }
+
+        async fn flash(&self, alert: Alert) -> OpenActionResult<()> {
+            self.alerts.lock().unwrap().push(alert);
             Ok(())
         }
     }

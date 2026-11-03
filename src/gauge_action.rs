@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use openaction::{Action, Instance, OpenActionResult};
 use serde::{Deserialize, Serialize};
 
+use crate::alert::window_alert;
 use crate::format::{build_display, error_display, feedback_for_display};
 use crate::gauge_style::{GaugeStyle, StyleSettings, next_style};
 use crate::history::Reading;
@@ -18,7 +19,7 @@ use crate::level::ColorSettings;
 use crate::settings::lenient;
 use crate::source::{UsageSnapshot, WindowKind};
 use crate::styles::build_styled_icon;
-use crate::surface::Output;
+use crate::surface::{Alert, Output};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UsageGaugeSettings {
@@ -35,6 +36,10 @@ pub struct UsageGaugeSettings {
     /// `style`, lenient in the same way.
     #[serde(flatten)]
     pub styles: StyleSettings,
+    /// Flash the key when its window resets or crosses Critical (off
+    /// unless ticked on the settings page).
+    #[serde(default, deserialize_with = "lenient")]
+    pub alerts: bool,
 }
 
 /// What a gauge instance shows.
@@ -43,6 +48,7 @@ pub struct GaugeView {
     pub window: WindowKind,
     pub colors: ColorSettings,
     pub style: GaugeStyle,
+    pub alerts: bool,
 }
 
 impl HubView for GaugeView {
@@ -63,6 +69,12 @@ impl HubView for GaugeView {
             Output::Feedback(feedback_for_display(&display))
         }
     }
+
+    fn alert(&self, prev: &UsageSnapshot, cur: &UsageSnapshot) -> Option<Alert> {
+        self.alerts
+            .then(|| window_alert(prev, cur, self.window, &self.colors))
+            .flatten()
+    }
 }
 
 impl HubSettings for UsageGaugeSettings {
@@ -71,6 +83,7 @@ impl HubSettings for UsageGaugeSettings {
             window: self.window,
             colors: self.colors.clone(),
             style: self.styles.style,
+            alerts: self.alerts,
         })
     }
 
@@ -191,6 +204,7 @@ mod tests {
             window: WindowKind::Session,
             colors: ColorSettings::default(),
             style,
+            alerts: false,
         }
     }
 

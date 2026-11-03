@@ -1,3 +1,4 @@
+mod alert;
 mod burn;
 mod burn_action;
 mod burn_icon;

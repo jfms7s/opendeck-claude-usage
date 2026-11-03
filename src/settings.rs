@@ -103,7 +103,7 @@ mod tests {
 
         let probe_color = ("colorNormal", json!("#123456"));
         assert_lenient::<UsageGaugeSettings>(
-            &with_colors(&["window", "style"]),
+            &with_colors(&["window", "style", "alerts"]),
             probe_color.clone(),
             |s| s.colors.palette.normal == "#123456",
         );
@@ -116,7 +116,7 @@ mod tests {
             s.colors.palette.normal == "#123456"
         });
         assert_lenient::<SparklineSettings>(
-            &with_colors(&["window", "series"]),
+            &with_colors(&["window", "series", "alerts"]),
             probe_color,
             |s| s.colors.palette.normal == "#123456",
         );
