@@ -17,7 +17,13 @@
 //! Transcripts are append-only, so each file is read incrementally: only
 //! the bytes after the last complete line already read, a line at a time.
 //! A file that shrank or disappeared means something rewrote history, and
-//! the whole store is rebuilt.
+//! the whole store is rebuilt. A projects folder that can't be listed at
+//! all (anything but "not found") is not taken as "every file was
+//! deleted": the store is kept until a listing works again.
+//!
+//! Several tiles ask within moments of each other (start-up, a minute
+//! boundary); the default source shares one directory walk between calls
+//! less than `DEFAULT_MIN_WALK_INTERVAL` apart.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -27,7 +33,7 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -188,6 +194,10 @@ struct Store {
     by_key: HashMap<u64, usize>,
     files: HashMap<PathBuf, FileState>,
     models: HashSet<Arc<str>>,
+    /// When the last successful listing of the projects folder happened.
+    last_walk: Option<Instant>,
+    /// The last listing failed, so the next failure doesn't warn again.
+    listing_failed: bool,
 }
 
 impl Store {
@@ -253,6 +263,9 @@ impl Store {
 /// directory walk and nothing else while no transcript grows.
 pub struct LogUsageSource {
     projects_dir: PathBuf,
+    /// Calls closer together than this share the previous walk (and its
+    /// entries) instead of listing the tree again.
+    min_walk_interval: Duration,
     store: Arc<Mutex<Store>>,
     /// Set once a scan has completed.
     scanned: Arc<AtomicBool>,
@@ -262,13 +275,29 @@ pub struct LogUsageSource {
 /// known layout; the limit only guards against a symlink loop.
 const MAX_DEPTH: usize = 4;
 
+/// The default source's `min_walk_interval`: long enough to fold a burst of
+/// handler calls into one walk, short enough that a tap never shows data
+/// more than a couple of seconds old.
+pub const DEFAULT_MIN_WALK_INTERVAL: Duration = Duration::from_secs(2);
+
+/// What listing the projects folder found.
+type Listing = Vec<(PathBuf, u64, SystemTime)>;
+
 impl LogUsageSource {
     pub fn new(projects_dir: PathBuf) -> Self {
         Self {
             projects_dir,
+            min_walk_interval: Duration::ZERO,
             store: Arc::new(Mutex::new(Store::default())),
             scanned: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Calls less than `interval` after the last walk return its entries
+    /// without listing the tree again. `new` uses zero (every call walks).
+    pub fn with_min_walk_interval(mut self, interval: Duration) -> Self {
+        self.min_walk_interval = interval;
+        self
     }
 
     /// Whether a scan has completed, so `entries()` normally only tails
@@ -300,10 +329,11 @@ impl LogUsageSource {
     /// since it may read files.
     pub async fn entries(&self) -> Arc<Vec<LogEntry>> {
         let projects_dir = self.projects_dir.clone();
+        let interval = self.min_walk_interval;
         let store = Arc::clone(&self.store);
         let scanned = Arc::clone(&self.scanned);
         let scan = move || {
-            let entries = Self::scan(&projects_dir, &store);
+            let entries = Self::scan(&projects_dir, &store, interval);
             scanned.store(true, Ordering::Release);
             entries
         };
@@ -316,12 +346,12 @@ impl LogUsageSource {
         }
     }
 
-    /// Every transcript under `projects_dir` with its size and mtime.
-    fn list_files(projects_dir: &Path) -> Vec<(PathBuf, u64, SystemTime)> {
-        fn walk(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, u64, SystemTime)>) {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
-            };
+    /// Every transcript under `projects_dir` with its size and mtime, or
+    /// `None` if `projects_dir` itself exists but can't be read (a missing
+    /// one is an empty list: no projects yet, or really removed).
+    /// Unreadable sub-directories are skipped.
+    fn list_files(projects_dir: &Path) -> std::io::Result<Listing> {
+        fn walk_entries(entries: std::fs::ReadDir, depth: usize, out: &mut Listing) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 // Follows symlinks, like the directories it came from.
@@ -329,8 +359,10 @@ impl LogUsageSource {
                     continue;
                 };
                 if meta.is_dir() {
-                    if depth < MAX_DEPTH {
-                        walk(&path, depth + 1, out);
+                    if depth < MAX_DEPTH
+                        && let Ok(entries) = std::fs::read_dir(&path)
+                    {
+                        walk_entries(entries, depth + 1, out);
                     }
                 } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl")
                     && let Ok(mtime) = meta.modified()
@@ -340,8 +372,12 @@ impl LogUsageSource {
             }
         }
         let mut files = Vec::new();
-        walk(projects_dir, 1, &mut files);
-        files
+        match std::fs::read_dir(projects_dir) {
+            Ok(entries) => walk_entries(entries, 1, &mut files),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        Ok(files)
     }
 
     /// The store, recovering from a panic in an earlier scan: everything in
@@ -360,9 +396,37 @@ impl LogUsageSource {
         }
     }
 
-    fn scan(projects_dir: &Path, store: &Mutex<Store>) -> Arc<Vec<LogEntry>> {
-        let files = Self::list_files(projects_dir);
+    fn scan(
+        projects_dir: &Path,
+        store: &Mutex<Store>,
+        min_walk_interval: Duration,
+    ) -> Arc<Vec<LogEntry>> {
+        {
+            let store = Self::lock(store);
+            if store
+                .last_walk
+                .is_some_and(|at| at.elapsed() < min_walk_interval)
+            {
+                return Arc::clone(&store.entries);
+            }
+        }
+        let listing = Self::list_files(projects_dir);
         let mut store = Self::lock(store);
+        let files = match listing {
+            Ok(files) => files,
+            Err(e) => {
+                // Not "every transcript was deleted": keep what we have
+                // and try again next call.
+                if !store.listing_failed {
+                    log::warn!(
+                        "can't list Claude Code transcripts in {}: {e}; keeping the last results",
+                        projects_dir.display()
+                    );
+                }
+                store.listing_failed = true;
+                return Arc::clone(&store.entries);
+            }
+        };
         let present: HashSet<&Path> = files.iter().map(|(p, _, _)| p.as_path()).collect();
         let rewritten = store.files.keys().any(|p| !present.contains(p.as_path()))
             || files
@@ -391,13 +455,15 @@ impl LogUsageSource {
             };
             store.files.insert(path, FileState { len, mtime, offset });
         }
+        store.listing_failed = false;
+        store.last_walk = Some(Instant::now());
         Arc::clone(&store.entries)
     }
 }
 
 impl Default for LogUsageSource {
     fn default() -> Self {
-        Self::new(Self::default_path())
+        Self::new(Self::default_path()).with_min_walk_interval(DEFAULT_MIN_WALK_INTERVAL)
     }
 }
 
@@ -745,6 +811,96 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &second));
         assert_eq!(first.len(), 1, "a reader's list never changes under it");
         assert_eq!(second.len(), 2);
+    }
+
+    /// A projects folder that can't be listed (here: mode 000) is not
+    /// "every transcript was deleted": the entries stay, and once it can be
+    /// listed again only the appended bytes are read.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_projects_folder_keeps_the_index() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // mode 000 doesn't stop root
+        }
+        let root = tempdir().unwrap();
+        let file_path = project(root.path()).join("session1.jsonl");
+        let first = format!("{}\n", message_line("a", 111));
+        fs::write(&file_path, &first).unwrap();
+        let source = LogUsageSource::new(root.path().to_path_buf());
+        assert_eq!(source.entries().await.len(), 1);
+
+        let mode = |m| fs::set_permissions(root.path(), fs::Permissions::from_mode(m)).unwrap();
+        mode(0o000);
+        let during = source.entries().await;
+        mode(0o755);
+        assert_eq!(during.len(), 1, "a failed listing keeps the index");
+
+        // Rewrite the read part in place (same length) and append: a full
+        // re-read would see "z" instead of "a".
+        let same_length = format!("{}\n", message_line("z", 999));
+        assert_eq!(same_length.len(), first.len());
+        fs::write(
+            &file_path,
+            format!("{same_length}{}\n", message_line("b", 222)),
+        )
+        .unwrap();
+        let outputs: Vec<u64> = source
+            .entries()
+            .await
+            .iter()
+            .map(|e| e.output_tokens)
+            .collect();
+        assert_eq!(outputs, vec![111, 222], "only the tail is read");
+    }
+
+    #[tokio::test]
+    async fn a_missing_projects_folder_still_empties_the_index() {
+        let root = tempdir().unwrap();
+        let projects = root.path().join("projects");
+        fs::create_dir(&projects).unwrap();
+        fs::write(
+            project(&projects).join("session1.jsonl"),
+            format!("{}\n", message_line("a", 1)),
+        )
+        .unwrap();
+        let source = LogUsageSource::new(projects.clone());
+        assert_eq!(source.entries().await.len(), 1);
+
+        fs::remove_dir_all(&projects).unwrap();
+        assert!(source.entries().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn calls_within_the_walk_interval_share_one_walk() {
+        let root = tempdir().unwrap();
+        let project = project(root.path());
+        fs::write(project.join("session1.jsonl"), ASSISTANT_LINE).unwrap();
+        let shared = LogUsageSource::new(root.path().to_path_buf())
+            .with_min_walk_interval(Duration::from_secs(3600));
+        let first = shared.entries().await;
+        assert_eq!(first.len(), 1);
+
+        fs::write(project.join("session2.jsonl"), ASSISTANT_LINE).unwrap();
+        let second = shared.entries().await;
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(second.len(), 1);
+
+        let every_call = LogUsageSource::new(root.path().to_path_buf());
+        assert_eq!(every_call.entries().await.len(), 2);
+    }
+
+    #[test]
+    fn the_default_source_shares_walks_and_new_does_not() {
+        assert_eq!(
+            LogUsageSource::default().min_walk_interval,
+            DEFAULT_MIN_WALK_INTERVAL
+        );
+        assert_eq!(
+            LogUsageSource::new(PathBuf::new()).min_walk_interval,
+            Duration::ZERO
+        );
     }
 
     /// Scans this machine's real transcripts and prints what it found - run
