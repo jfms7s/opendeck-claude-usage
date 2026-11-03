@@ -281,6 +281,11 @@ impl UsageHub {
     /// Spawned once from `main.rs`, supervised.
     pub async fn poll_loop(self: Arc<Self>) {
         loop {
+            if self.registry.is_empty() {
+                // No key watched what happens while parked: the first poll
+                // after it must not flash for it.
+                self.forget_last_poll();
+            }
             park_while_empty(|| self.registry.is_empty(), &self.wake).await;
             self.refresh_all().await;
             sleep_to_next_minute().await;
@@ -308,6 +313,14 @@ impl UsageHub {
             .and_then(|snapshot| self.previous_poll(snapshot));
         self.render_tracked(read_result.as_ref().ok(), previous.as_ref(), lookup)
             .await;
+    }
+
+    /// Drops the previous poll's snapshot, so the next poll can't alert.
+    fn forget_last_poll(&self) {
+        *self
+            .last_polled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     /// The previous poll's snapshot when `snapshot` differs from it (so
@@ -933,5 +946,27 @@ mod tests {
         assert!(key.alerts.lock().unwrap().is_empty());
         hub.refresh_all_with(lookup).await;
         assert_eq!(*key.alerts.lock().unwrap(), vec![Alert::Fresh]);
+    }
+    /// While parked (no key visible) nothing watched the window: the first
+    /// poll after it doesn't flash for a reset that happened meanwhile.
+    #[tokio::test(start_paused = true)]
+    async fn a_poll_after_parking_does_not_alert() {
+        let r = reset_time();
+        let source = Scripted(Arc::new(Mutex::new(
+            vec![
+                session(70.0, r),
+                session(3.0, r + chrono::Duration::hours(5)),
+            ]
+            .into(),
+        )));
+        let hub = UsageHub::new(shared(source), HistoryStore::in_memory());
+        hub.track("on", alerting_gauge(true, 90.0));
+        let key = FakeSurface::new("on", true);
+        let lookup = |_: String| std::future::ready(Some(key.clone()));
+        hub.refresh_all_with(lookup).await;
+        hub.forget_last_poll(); // what poll_loop does before parking
+        tokio::time::advance(Duration::from_secs(61)).await;
+        hub.refresh_all_with(lookup).await;
+        assert!(key.alerts.lock().unwrap().is_empty());
     }
 }
