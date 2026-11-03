@@ -161,6 +161,9 @@ for (const file of ["metrictile.html", "heatmap.html"]) {
 		page.change("metric", "cost");
 		page.runTimers();
 		assert.equal(page.saves().at(-1).scope, "project:-home-u-git-gone");
+	});
+}
+
 for (const file of ["index.html", "sparkline.html"]) {
 	test(`${file}: the alerts box shows and saves the stored choice`, async () => {
 		const page = loadPage(file);
