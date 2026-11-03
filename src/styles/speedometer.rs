@@ -272,7 +272,7 @@ mod tests {
             color: "#6b7280".to_string(),
             detail_text: "not enabled".to_string(),
             tile_detail: "not enabled".to_string(),
-            label: "MONTHLY",
+            label: "USAGE",
             number_text: "\u{2014}".to_string(),
             bar_value: 0.0,
             marks: Marks::default(),

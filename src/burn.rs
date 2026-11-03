@@ -43,27 +43,16 @@ impl BurnMetric {
     }
 }
 
-/// Burn Rate has no Monthly (`extra_usage` has no window length) - a
-/// stored "monthly" from a hand-edited or future settings blob falls back
-/// to Session instead of showing nothing.
-pub fn burn_window(window: WindowKind) -> WindowKind {
-    match window {
-        WindowKind::Monthly => WindowKind::Session,
-        other => other,
-    }
-}
-
 pub fn build_burn_display(
     snapshot: &UsageSnapshot,
-    window: WindowKind,
+    kind: WindowKind,
     metric: BurnMetric,
     colors: &ColorSettings,
     now: DateTime<Utc>,
 ) -> BurnDisplay {
-    let kind = burn_window(window);
     let usage = match kind {
         WindowKind::Weekly => &snapshot.weekly,
-        _ => &snapshot.session,
+        WindowKind::Session => &snapshot.session,
     };
     let reading = pace(usage, kind, now);
     let level = colors.pace_level(usage.percent, reading.map(|p| p.projected));
@@ -269,13 +258,6 @@ mod tests {
         );
         assert_eq!(d.value_text, "\u{2014}");
         assert_eq!(d.subtitle, "no reset info");
-    }
-
-    #[test]
-    fn monthly_falls_back_to_session() {
-        assert_eq!(burn_window(WindowKind::Monthly), WindowKind::Session);
-        let d = build(WindowKind::Monthly, BurnMetric::Pace, at(13, 18, 55));
-        assert_eq!(d.detail_text, "per hour \u{b7} session");
     }
 
     #[test]

@@ -4,9 +4,8 @@ An [OpenDeck](https://github.com/nekename/OpenDeck) plugin that shows your
 Claude usage on Stream Deck keys, with seven actions - **Usage Gauge**,
 **Session + Weekly**, **Burn Rate**, **Usage Heatmap**, **Usage Sparkline**,
 **Peak Clock**, and **Metric Tile**. Usage Gauge shows percent used and time
-until reset for one of Claude's usage windows - **Session** (5 hour),
-**Weekly** (7 day), or **Monthly** (pay-as-you-go extra usage spend, if
-enabled on your account).
+until reset for one of Claude's usage windows - **Session** (5 hour) or
+**Weekly** (7 day).
 
 On a key, the data renders as a generated icon on a dark card: a
 speedometer-style gauge - a four-zone semicircle drawn from the key's own
@@ -61,18 +60,8 @@ expired token), it retries after 6 minutes, then every 10 (or later, if the
 those are more than 15 minutes old does each dial switch to a "no data"
 state - never a crash or a blank display.
 
-There is no native monthly rate-limit window in Claude's usage data - only
-session and weekly exist. The "Monthly" setting shows `extra_usage`
-(pay-as-you-go overage spend against a monthly cap) instead, since it's the
-closest real metric to what "monthly" usually means. It renders "not
-enabled" if you haven't turned on pay-as-you-go overage credits.
-
-The dollar amounts shown for Monthly (`used_credits`/`monthly_limit` in the
-source file) are assumed to already be decimal dollars (e.g. `12.5` means
-$12.50), not minor units needing further scaling - this is unverified,
-since the account used to build this plugin has never had `extra_usage`
-enabled. The `currency` field in `extra_usage` is currently ignored
-entirely; the `$` sign is hardcoded regardless of account currency.
+Extra usage (pay-as-you-go spend against a monthly cap) is not shown on any
+key. Keys saved with the old **Monthly** window (before 0.21) show Session.
 
 ## Where the Tokens/Cost data comes from
 
@@ -153,7 +142,7 @@ green/yellow/red at 50/80% to copper with Watch 50, Risk 75 and Critical
 ## Using a dial or tile
 
 1. Add a **Usage Gauge** key on a dial or a keypad tile.
-2. Pick which window to show: Session, Weekly, or Monthly (extra usage).
+2. Pick which window to show: Session or Weekly.
 3. It redraws every minute (the numbers behind it are fetched about every
    three minutes - see above). On a dial, press for an immediate refresh.
    On a keypad tile, a short press switches to the next style (see below)
@@ -255,7 +244,7 @@ touch-strip bar.
 ## Using Usage Sparkline
 
 1. Add a **Usage Sparkline** key on a dial or a keypad tile and pick the
-   window: **Session**, **Weekly**, or **Monthly** (extra usage).
+   window: **Session** or **Weekly**.
 2. A short press (key or dial) switches between two series; hold to refresh:
    - **Trend** — % of limit over the current window.
    - **Today** — running increase since local midnight (e.g. `8.4pp`). If
@@ -266,10 +255,6 @@ touch-strip bar.
    Burn Rate's **Even burn** shows pace against an even burn.
 3. The line takes the key's level color (**Colors & thresholds**). A new key
    says "collecting…" until at least two readings exist.
-4. **Monthly** plots extra usage as a % of your monthly cap, but only as far
-   back as the recorded history (8 days); a drop in the percentage is taken
-   as the start of a new month. If extra usage isn't enabled, the key says
-   "off · not enabled".
 
 Anthropic's usage endpoint only reports the current percentages, so the
 plugin records them itself: each successful poll whose numbers changed (plus the

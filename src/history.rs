@@ -26,7 +26,8 @@ pub struct Reading {
     pub weekly: f64,
     pub weekly_resets_at: Option<DateTime<Utc>>,
     /// Extra usage (% of the monthly cap); `None` when it isn't enabled,
-    /// or in lines saved before it was recorded.
+    /// or in lines saved before it was recorded. Still recorded (so the file
+    /// format doesn't change) though no key shows it since Monthly was cut.
     #[serde(default)]
     pub monthly: Option<f64>,
 }

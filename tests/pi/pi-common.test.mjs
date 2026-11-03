@@ -22,7 +22,7 @@ function select(values) {
 }
 
 test("selectKnown shows a known value and falls back for an unknown one (KI-10)", () => {
-	const window = select(["session", "weekly", "monthly"]);
+	const window = select(["session", "weekly"]);
 	assert.equal(selectKnown(window, "weekly", "session"), "weekly");
 	assert.equal(selectKnown(window, "hourly", "session"), "session");
 	assert.equal(selectKnown(window, undefined, "session"), "session");
