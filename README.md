@@ -1,9 +1,9 @@
 # OpenDeck Claude Usage
 
 An [OpenDeck](https://github.com/nekename/OpenDeck) plugin that shows your
-Claude usage on Stream Deck keys, with seven actions - **Usage Gauge**,
+Claude usage on Stream Deck keys, with eight actions - **Usage Gauge**,
 **Session + Weekly**, **Burn Rate**, **Usage Heatmap**, **Usage Sparkline**,
-**Peak Clock**, and **Metric Tile**. Usage Gauge shows percent used and time
+**Peak Clock**, **Metric Tile**, and **Sessions**. Usage Gauge shows percent used and time
 until reset for one of Claude's usage windows - **Session** (5 hour) or
 **Weekly** (7 day).
 
@@ -18,7 +18,7 @@ the key is set to, and needs no custom background color to stay readable.
 Built for Stream Deck keys: put one key per window (or a Session + Weekly key)
 anywhere on the deck for an always-visible usage readout. Most actions also
 work on a dial (Stream Deck + / + XL), where the touch strip shows a live bar,
-percent, and detail text; Metric Tile and Peak Clock are key-only.
+percent, and detail text; Metric Tile, Peak Clock and Sessions are key-only.
 
 ## Where the data comes from
 
@@ -188,6 +188,32 @@ green/yellow/red at 50/80% to copper with Watch 50, Risk 75 and Critical
    appears up to a minute after OpenDeck starts. With no transcripts there
    is no ring, and the clock never says "no data".
 
+## Using Sessions
+
+1. Add a **Sessions** key on a keypad tile. It has no settings.
+2. The key shows how many Claude Code sessions are running (`3 sessions`),
+   how long the longest-waiting one has waited for you (`12m`), and a
+   breakdown (`1 wait · 1 idle · 1 busy`). A session waits for you when it
+   is **idle** (done, your turn) or **waiting** (a permission prompt or
+   another question is open). The time is copper under 2 minutes, yellow
+   from 2 minutes and red from 10 (fixed marks). While every session is
+   busy the key says `busy` in copper; with none open it says `0 sessions`.
+3. A short press cycles through the sessions one at a time - name, time
+   in its current state, the state and `2/3` - and then back to the
+   summary. The choice isn't saved. Hold the key to re-read now; otherwise
+   it re-reads every 15 seconds.
+
+Where the data comes from: Claude Code keeps one `~/.claude/sessions/<pid>.json`
+file per running process, with its state (`busy`, `idle` or `waiting`) and
+when that last changed. The key shows those states as Claude Code writes
+them. The format is undocumented and changes between Claude Code releases,
+so the key reads it leniently: a file it can't make sense of counts as an
+unknown session (`?`) instead of blanking the key. A file whose process has
+exited (or, on Linux, whose pid now belongs to another process) is ignored. Only the
+`*.json` files are read, never the `*.key` files next to them. If OpenDeck
+runs in a sandbox with its own process ids (e.g. a Flatpak), the plugin
+can't check which processes are alive and trusts the files.
+
 ## Colors & thresholds
 
 Usage Gauge, Burn Rate, Session + Weekly and Usage Sparkline keys stay a
@@ -305,6 +331,7 @@ release and record the version you checked them on:
 | Usage keeps updating with only the Claude desktop app open (no CLI session, no editor extension). | not recorded |
 | Metric Tile and Usage Heatmap totals match `ccusage` (or another transcript tool) for the same day. | not recorded |
 | The Metric Tile and Usage Heatmap settings pages list your projects under **Scope** (worktrees folded into their repository), and a project-scoped key counts only that project. | not recorded |
+| A Sessions key counts the open Claude Code sessions, turns yellow 2 minutes after one finishes or asks for permission (red after 10), and a short press steps through each session. | not recorded |
 | Peak Clock's usage ring is darkest at the hours you actually work, and appears within a minute of OpenDeck starting. | not recorded |
 | `~/.local/state/opendeck-claude-usage/history.jsonl` is created owner-only, only grows when usage changes, and survives a restart. | not recorded |
 

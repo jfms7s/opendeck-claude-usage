@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Rust [OpenDeck](https://github.com/nekename/OpenDeck) plugin (Linux x86_64 + aarch64 and Apple Silicon macOS, built on the `openaction` crate) that shows Claude usage on Stream Deck dials and keypad tiles. Seven actions: Usage Gauge, Session + Weekly (combo), Burn Rate, Usage Heatmap, Usage Sparkline, Peak Clock, Metric Tile. The README is the user-facing spec for every action's behavior.
+A Rust [OpenDeck](https://github.com/nekename/OpenDeck) plugin (Linux x86_64 + aarch64 and Apple Silicon macOS, built on the `openaction` crate) that shows Claude usage on Stream Deck dials and keypad tiles. Eight actions: Usage Gauge, Session + Weekly (combo), Burn Rate, Usage Heatmap, Usage Sparkline, Peak Clock, Metric Tile, Sessions. The README is the user-facing spec for every action's behavior.
 
 ## Commands
 
@@ -31,6 +31,8 @@ Install locally by copying `dist/com.jfms7s.claudeusage.sdPlugin` into OpenDeck'
 - `source/logs.rs`: `LogUsageSource` reads Claude Code transcripts (`~/.claude/projects/**/*.jsonl`, including `<session>/subagents/`), deduplicating on `message.id` + `requestId` (a message is written once per content block), reading each append-only file incrementally and keeping one shared copy of the entries. Used by Metric Tile and Heatmap. Cost is estimated via the exact model-ID price table in `pricing.rs` (unknown models are flagged, not guessed); `<synthetic>` entries are excluded.
 
 **`hub.rs` - `UsageHub`**: every API-driven action (Gauge, Burn Rate, Combo, Sparkline) registers instances with `track(id, View)`, where a `View` is an `Arc<dyn HubView>` that turns a snapshot (and, if `needs_history`, the recorded readings) into an `Output`. One `poll_loop` - just after each minute boundary, parked while nothing is tracked - reads the shared cache once and re-renders every tracked instance; `render_cached` draws on appear/press from `SharedUsage::peek` (same staleness rule). The hub also records new readings to `HistoryStore` (`history.rs`, `opendeck-claude-usage/history.jsonl` under the state dir - `paths::state_base`: an absolute `$XDG_STATE_HOME`, else `~/.local/state` on Linux and `~/Library/Application Support` on macOS - trimmed to 8 days) which the Sparkline draws from. Metric Tile, Heatmap and Peak Clock have their own tick loops (deadline- or minute-based, parked while empty).
+
+**Sessions** (`sessions.rs`, `sessions_action.rs`, `sessions_icon.rs`) is a third, local source of its own: Claude Code's undocumented process registry `~/.claude/sessions/<pid>.json`, re-read every 15 s while a key is visible. Parse leniently (every field optional; a garbled file is an unknown session), open only `*.json` files (`O_NOFOLLOW`, 64 KiB cap) - never the sibling `*.key` files, which hold secret material - and drop a session whose process is gone (`kill(pid, 0)` on every platform - no macOS-only branch, see Scope - plus `/proc/<pid>/stat`'s start time vs `procStart` where `/proc` exists). Never log a file's contents.
 
 **Per-action module split**:
 - `<feature>.rs` - pure logic/data shaping (`burn.rs`, `combo.rs`, `heatmap.rs`, `sparkline.rs`, `metric.rs`, `peak.rs`, `pace.rs`, `level.rs`, `gauge_style.rs`), unit-tested without OpenDeck. `format.rs` is the shared display layer (`UsageDisplay`, `build_display`, `usage_feedback`, `DISABLED_COLOR`) used across actions. `paths.rs` resolves `$HOME` and the state dir once.

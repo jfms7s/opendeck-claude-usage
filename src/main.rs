@@ -24,6 +24,9 @@ mod peak;
 mod press;
 mod pricing;
 mod project_list;
+mod sessions;
+mod sessions_action;
+mod sessions_icon;
 mod settings;
 mod source;
 mod sparkline;
@@ -47,6 +50,7 @@ use history::HistoryStore;
 use hub::UsageHub;
 use metric_action::MetricTileAction;
 use openaction::{OpenActionResult, register_action, run};
+use sessions_action::SessionsAction;
 use source::UsageSource;
 use source::api::ApiUsageSource;
 use source::cached::{CachePolicy, CachedUsageSource, SharedUsage};
@@ -77,6 +81,7 @@ struct Actions {
     clock: PeakClockAction,
     metric_tile: MetricTileAction,
     heatmap: HeatmapAction,
+    sessions: SessionsAction,
 }
 
 impl Actions {
@@ -97,6 +102,7 @@ impl Actions {
             clock,
             metric_tile,
             heatmap,
+            sessions,
         } = self;
         vec![
             uuid(gauge),
@@ -106,6 +112,7 @@ impl Actions {
             uuid(clock),
             uuid(metric_tile),
             uuid(heatmap),
+            uuid(sessions),
         ]
     }
 }
@@ -130,6 +137,7 @@ fn wire(
         clock: PeakClockAction::new(Arc::clone(&logs)),
         metric_tile: MetricTileAction::new(Arc::clone(&logs), usage),
         heatmap: HeatmapAction::new(logs),
+        sessions: SessionsAction::new(sessions::default_dir()),
         hub,
     }
 }
@@ -173,6 +181,8 @@ async fn main() -> OpenActionResult<()> {
     });
     let heatmap = actions.heatmap.clone();
     spawn_supervised("heatmap tick loop", move || heatmap.clone().tick_loop());
+    let sessions = actions.sessions.clone();
+    spawn_supervised("sessions tick loop", move || sessions.clone().tick_loop());
 
     register_action(actions.gauge).await;
     register_action(actions.clock).await;
@@ -181,6 +191,7 @@ async fn main() -> OpenActionResult<()> {
     register_action(actions.combo).await;
     register_action(actions.heatmap).await;
     register_action(actions.sparkline).await;
+    register_action(actions.sessions).await;
     run(std::env::args().collect()).await
 }
 

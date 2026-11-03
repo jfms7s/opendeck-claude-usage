@@ -91,6 +91,14 @@
 			"Encoder": {
 				"layout": "layouts/chart.json"
 			}
+		},
+		{
+			"UUID": "com.jfms7s.claudeusage.sessions",
+			"Name": "Sessions",
+			"Icon": "icons/sessions",
+			"Tooltip": "Shows how many Claude Code sessions are running and how long the longest-waiting one has waited for you",
+			"Controllers": ["Keypad"],
+			"States": [{ "Image": "icons/sessions" }]
 		}
 	]
 }
