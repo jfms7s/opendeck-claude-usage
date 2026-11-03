@@ -19,7 +19,9 @@
 //! A file that shrank or disappeared means something rewrote history, and
 //! the whole store is rebuilt. A projects folder that can't be listed at
 //! all (anything but "not found") is not taken as "every file was
-//! deleted": the store is kept until a listing works again.
+//! deleted": the store is kept until a listing works again. The same goes
+//! for a sub-folder or transcript that exists but can't be read: its known
+//! entries stay until it can be read again.
 //!
 //! Several tiles ask within moments of each other (start-up, a minute
 //! boundary); the default source shares one directory walk between calls
@@ -220,15 +222,13 @@ impl Store {
     }
 
     /// Reads `path`'s complete lines from `from` on, returning where the
-    /// next read should start. A last line without its newline is taken
-    /// only if it already parses - otherwise it is still being written.
-    fn read_from(&mut self, path: &Path, from: u64, len: u64) -> u64 {
-        let Ok(mut file) = File::open(path) else {
-            return from;
-        };
-        if file.seek(SeekFrom::Start(from)).is_err() {
-            return from;
-        }
+    /// next read should start, or `None` if the file couldn't be opened (so
+    /// the caller keeps its old state and tries again next scan). A last
+    /// line without its newline is taken only if it already parses -
+    /// otherwise it is still being written.
+    fn read_from(&mut self, path: &Path, from: u64, len: u64) -> Option<u64> {
+        let mut file = File::open(path).ok()?;
+        file.seek(SeekFrom::Start(from)).ok()?;
         let mut reader = BufReader::new(file);
         let mut offset = from;
         let mut line = Vec::new();
@@ -253,7 +253,7 @@ impl Store {
                 self.add(parsed);
             }
         }
-        offset
+        Some(offset)
     }
 }
 
@@ -280,8 +280,25 @@ const MAX_DEPTH: usize = 4;
 /// more than a couple of seconds old.
 pub const DEFAULT_MIN_WALK_INTERVAL: Duration = Duration::from_secs(2);
 
-/// What listing the projects folder found.
-type Listing = Vec<(PathBuf, u64, SystemTime)>;
+/// What listing the projects folder found: every transcript with its size
+/// and mtime, and the paths (directories or files) that exist but couldn't
+/// be read, whose already-known transcripts are kept as they are.
+#[derive(Default)]
+struct Listing {
+    files: Vec<(PathBuf, u64, SystemTime)>,
+    unreadable: Vec<PathBuf>,
+}
+
+impl Listing {
+    fn is_unreadable(&self, path: &Path) -> bool {
+        self.unreadable.iter().any(|dir| path.starts_with(dir))
+    }
+}
+
+/// An I/O error that means "exists but can't be read now" rather than "gone".
+fn is_transient(e: &std::io::Error) -> bool {
+    e.kind() != std::io::ErrorKind::NotFound
+}
 
 impl LogUsageSource {
     pub fn new(projects_dir: PathBuf) -> Self {
@@ -346,38 +363,46 @@ impl LogUsageSource {
         }
     }
 
-    /// Every transcript under `projects_dir` with its size and mtime, or
-    /// `None` if `projects_dir` itself exists but can't be read (a missing
-    /// one is an empty list: no projects yet, or really removed).
-    /// Unreadable sub-directories are skipped.
+    /// Every transcript under `projects_dir`, or an error if `projects_dir`
+    /// itself exists but can't be read (a missing one is an empty listing:
+    /// no projects yet, or really removed). A sub-directory or file that
+    /// exists but can't be read is recorded in `unreadable`, not dropped.
     fn list_files(projects_dir: &Path) -> std::io::Result<Listing> {
         fn walk_entries(entries: std::fs::ReadDir, depth: usize, out: &mut Listing) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 // Follows symlinks, like the directories it came from.
-                let Ok(meta) = std::fs::metadata(&path) else {
-                    continue;
+                let meta = match std::fs::metadata(&path) {
+                    Ok(meta) => meta,
+                    Err(e) => {
+                        if is_transient(&e) {
+                            out.unreadable.push(path);
+                        }
+                        continue;
+                    }
                 };
                 if meta.is_dir() {
-                    if depth < MAX_DEPTH
-                        && let Ok(entries) = std::fs::read_dir(&path)
-                    {
-                        walk_entries(entries, depth + 1, out);
+                    if depth < MAX_DEPTH {
+                        match std::fs::read_dir(&path) {
+                            Ok(entries) => walk_entries(entries, depth + 1, out),
+                            Err(e) if is_transient(&e) => out.unreadable.push(path),
+                            Err(_) => {}
+                        }
                     }
                 } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl")
                     && let Ok(mtime) = meta.modified()
                 {
-                    out.push((path, meta.len(), mtime));
+                    out.files.push((path, meta.len(), mtime));
                 }
             }
         }
-        let mut files = Vec::new();
+        let mut listing = Listing::default();
         match std::fs::read_dir(projects_dir) {
-            Ok(entries) => walk_entries(entries, 1, &mut files),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(entries) => walk_entries(entries, 1, &mut listing),
+            Err(e) if !is_transient(&e) => {}
             Err(e) => return Err(e),
         }
-        Ok(files)
+        Ok(listing)
     }
 
     /// The store, recovering from a panic in an earlier scan: everything in
@@ -410,10 +435,16 @@ impl LogUsageSource {
                 return Arc::clone(&store.entries);
             }
         }
+        let walk_started = Instant::now();
         let listing = Self::list_files(projects_dir);
         let mut store = Self::lock(store);
-        let files = match listing {
-            Ok(files) => files,
+        if store.last_walk.is_some_and(|at| at > walk_started) {
+            // A concurrent call started walking after this one and has
+            // already applied its (newer) listing: this one is stale.
+            return Arc::clone(&store.entries);
+        }
+        let listing = match listing {
+            Ok(listing) => listing,
             Err(e) => {
                 // Not "every transcript was deleted": keep what we have
                 // and try again next call.
@@ -427,9 +458,15 @@ impl LogUsageSource {
                 return Arc::clone(&store.entries);
             }
         };
-        let present: HashSet<&Path> = files.iter().map(|(p, _, _)| p.as_path()).collect();
-        let rewritten = store.files.keys().any(|p| !present.contains(p.as_path()))
-            || files
+        let present: HashSet<&Path> = listing.files.iter().map(|(p, _, _)| p.as_path()).collect();
+        // A known transcript under a path that couldn't be read is kept as
+        // it is, not taken for deleted.
+        let rewritten = store
+            .files
+            .keys()
+            .any(|p| !present.contains(p.as_path()) && !listing.is_unreadable(p))
+            || listing
+                .files
                 .iter()
                 .any(|(path, len, _)| store.files.get(path).is_some_and(|seen| *len < seen.offset));
         if rewritten {
@@ -442,21 +479,25 @@ impl LogUsageSource {
                 ..Store::default()
             };
         }
-        for (path, len, mtime) in files {
+        for (path, len, mtime) in listing.files {
             let seen = store.files.get(&path).copied();
             if seen.is_some_and(|s| s.len == len && s.mtime == mtime) {
                 continue;
             }
             let from = seen.map_or(0, |s| s.offset);
             let offset = if len > from {
-                store.read_from(&path, from, len)
+                match store.read_from(&path, from, len) {
+                    Some(offset) => offset,
+                    // Couldn't open it: keep the old state, retry next scan.
+                    None => continue,
+                }
             } else {
                 from
             };
             store.files.insert(path, FileState { len, mtime, offset });
         }
         store.listing_failed = false;
-        store.last_walk = Some(Instant::now());
+        store.last_walk = Some(walk_started);
         Arc::clone(&store.entries)
     }
 }
@@ -819,10 +860,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn an_unreadable_projects_folder_keeps_the_index() {
-        use std::os::unix::fs::PermissionsExt;
-        // SAFETY: geteuid has no preconditions and cannot fail.
-        if unsafe { libc::geteuid() } == 0 {
-            return; // mode 000 doesn't stop root
+        if running_as_root() {
+            eprintln!("skipped: running as root");
+            return;
         }
         let root = tempdir().unwrap();
         let file_path = project(root.path()).join("session1.jsonl");
@@ -831,10 +871,9 @@ mod tests {
         let source = LogUsageSource::new(root.path().to_path_buf());
         assert_eq!(source.entries().await.len(), 1);
 
-        let mode = |m| fs::set_permissions(root.path(), fs::Permissions::from_mode(m)).unwrap();
-        mode(0o000);
+        set_mode(root.path(), 0o000);
         let during = source.entries().await;
-        mode(0o755);
+        set_mode(root.path(), 0o755);
         assert_eq!(during.len(), 1, "a failed listing keeps the index");
 
         // Rewrite the read part in place (same length) and append: a full
@@ -853,6 +892,88 @@ mod tests {
             .map(|e| e.output_tokens)
             .collect();
         assert_eq!(outputs, vec![111, 222], "only the tail is read");
+    }
+
+    /// Whether the test runs as root, where mode 000 stops nothing.
+    #[cfg(unix)]
+    fn running_as_root() -> bool {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        unsafe { libc::geteuid() == 0 }
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// One project folder that can't be read keeps its entries; the others
+    /// are unaffected.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_project_folder_keeps_its_entries() {
+        if running_as_root() {
+            eprintln!("skipped: running as root");
+            return;
+        }
+        let root = tempdir().unwrap();
+        let left = root.path().join("left");
+        let right = root.path().join("right");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        fs::write(
+            left.join("s.jsonl"),
+            format!("{}\n", message_line("l", 100)),
+        )
+        .unwrap();
+        fs::write(
+            right.join("s.jsonl"),
+            format!("{}\n", message_line("r", 200)),
+        )
+        .unwrap();
+        let source = LogUsageSource::new(root.path().to_path_buf());
+        assert_eq!(source.entries().await.len(), 2);
+
+        set_mode(&right, 0o000);
+        let during = source.entries().await;
+        set_mode(&right, 0o755);
+        assert_eq!(during.len(), 2, "the unreadable project still counts");
+    }
+
+    /// A transcript that can be listed but not opened is retried on the
+    /// next scan rather than marked as read.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unopenable_transcript_is_read_once_it_opens() {
+        if running_as_root() {
+            eprintln!("skipped: running as root");
+            return;
+        }
+        let root = tempdir().unwrap();
+        let file_path = project(root.path()).join("session1.jsonl");
+        fs::write(&file_path, format!("{}\n", message_line("a", 1))).unwrap();
+        set_mode(&file_path, 0o000);
+        let source = LogUsageSource::new(root.path().to_path_buf());
+        let during = source.entries().await;
+        set_mode(&file_path, 0o644);
+        assert!(during.is_empty());
+        assert_eq!(source.entries().await.len(), 1);
+    }
+
+    /// A listing taken before another call's newer walk was applied is
+    /// dropped, not applied over it.
+    #[tokio::test]
+    async fn a_listing_older_than_the_applied_walk_is_dropped() {
+        let root = tempdir().unwrap();
+        let project = project(root.path());
+        fs::write(project.join("session1.jsonl"), ASSISTANT_LINE).unwrap();
+        let source = LogUsageSource::new(root.path().to_path_buf());
+        let first = source.entries().await;
+        // As if a concurrent call started walking after this one will.
+        LogUsageSource::lock(&source.store).last_walk =
+            Some(Instant::now() + Duration::from_secs(3600));
+        fs::write(project.join("session2.jsonl"), ASSISTANT_LINE).unwrap();
+        assert!(Arc::ptr_eq(&source.entries().await, &first));
     }
 
     #[tokio::test]
