@@ -135,5 +135,11 @@ mod tests {
             ("peak_start", json!("09:30")),
             |s| s.peak_start == "09:30",
         );
+        // Sessions has no settings yet: any stored field must still load.
+        for bad in garbage() {
+            let json = json!({ "focus": bad, "watch": bad });
+            serde_json::from_value::<crate::sessions_action::SessionsSettings>(json.clone())
+                .unwrap_or_else(|e| panic!("SessionsSettings rejected {json}: {e}"));
+        }
     }
 }
