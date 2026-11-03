@@ -32,19 +32,7 @@ jobs:
       - run: cargo test --locked
       - run: cargo build --release --locked --target aarch64-apple-darwin
       - name: Check it is a signed arm64 binary that starts
-        run: |
-          bin=target/aarch64-apple-darwin/release/opendeck-claude-usage
-          file "$bin"
-          # macOS's file says "executable arm64", Linux's "arm64 executable".
-          file -b "$bin" | grep -Eq '^Mach-O 64-bit (arm64 executable|executable arm64)'
-          # Apple Silicon kills unsigned binaries; the linker's ad-hoc
-          # signature must survive `strip = true`.
-          codesign --verify --verbose "$bin"
-          # Without OpenDeck's arguments it stops at the first missing flag,
-          # which proves it got as far as main().
-          out=$("$bin" 2>&1 || true)
-          echo "$out"
-          echo "$out" | grep -q "missing CLI flag: -port"
+        run: scripts/check-macos-bin.sh target/aarch64-apple-darwin/release/opendeck-claude-usage
       - name: Pack the binary (a tar keeps the executable bit; artifacts don't)
         run: tar -cf macos-bin.tar -C target/aarch64-apple-darwin/release opendeck-claude-usage
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -102,6 +90,8 @@ jobs:
         run: |
           file target/x86_64-unknown-linux-gnu/release/opendeck-claude-usage | grep -q 'x86-64'
           file target/aarch64-unknown-linux-gnu/release/opendeck-claude-usage | grep -q 'ARM aarch64'
+          # The same regex as scripts/check-macos-bin.sh (which can't run
+          # here: it needs a Mac to verify the signature and start the binary).
           # macOS's file says "executable arm64", Linux's "arm64 executable".
           file -b target/aarch64-apple-darwin/release/opendeck-claude-usage | grep -Eq '^Mach-O 64-bit (arm64 executable|executable arm64)'
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
