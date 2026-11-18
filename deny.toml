@@ -1,5 +1,12 @@
-# cargo-deny (see .github/workflows/advisories.yml). Only crates.io; no git
-# or other registries.
-[sources]
-unknown-registry = "deny"
-unknown-git = "deny"
+# cargo-deny configuration. CI runs `cargo deny check advisories` only.
+# Any exception goes in `[advisories] ignore`, each with an id and a reason.
+[advisories]
+ignore = [
+    # RustSec marked chrono and chrono-tz unmaintained (informational notices, not
+    # vulnerabilities; all versions are flagged, so no upgrade clears them). chrono is the
+    # plugin's date/time type in ~27 source files, so swapping it for jiff or time is a rewrite
+    # with no security gain. chrono-tz is a dev-dependency only (heatmap tests) and never ships.
+    # Review by 2027-02-18: drop these entries if the crates are maintained again, or migrate then.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained notice, no patched version; migrating to jiff/time is deferred" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz unmaintained notice, dev-dependency only (heatmap tests)" },
+]
