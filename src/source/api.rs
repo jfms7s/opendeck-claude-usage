@@ -481,8 +481,13 @@ fn read_token(json: &str, now: DateTime<Utc>) -> Result<Token, UsageSourceError>
 
 #[derive(Deserialize)]
 struct RawUsage {
-    five_hour: RawWindow,
-    seven_day: RawWindow,
+    /// `null` (or missing) when no window is running - seen for
+    /// `five_hour` from 2026-11-14 on. It reads as an idle window rather
+    /// than failing the whole snapshot.
+    #[serde(default)]
+    five_hour: Option<RawWindow>,
+    #[serde(default)]
+    seven_day: Option<RawWindow>,
     /// Missing on some accounts (or in a future response shape): that
     /// only means extra usage isn't enabled, not that nothing parsed.
     #[serde(default)]
@@ -554,8 +559,8 @@ fn parse_details(raw: &RawUsage) -> UsageDetails {
     UsageDetails {
         weekly_shares,
         limits,
-        session_locked: text(&raw.five_hour.locked_reason),
-        weekly_locked: text(&raw.seven_day.locked_reason),
+        session_locked: raw.five_hour.as_ref().and_then(|w| text(&w.locked_reason)),
+        weekly_locked: raw.seven_day.as_ref().and_then(|w| text(&w.locked_reason)),
     }
 }
 
@@ -570,7 +575,14 @@ struct RawExtraUsage {
     utilization: Option<f64>,
 }
 
-fn parse_window(raw: &RawWindow) -> WindowUsage {
+/// A window, or an idle one (0%, no reset time) when the response has none.
+fn parse_window(raw: Option<&RawWindow>) -> WindowUsage {
+    let Some(raw) = raw else {
+        return WindowUsage {
+            percent: 0.0,
+            resets_at: None,
+        };
+    };
     WindowUsage {
         percent: raw.utilization,
         // A malformed timestamp is treated as "no reset info" rather than a
@@ -586,10 +598,17 @@ fn parse_window(raw: &RawWindow) -> WindowUsage {
 fn parse_snapshot(json: &str) -> Result<UsageSnapshot, UsageSourceError> {
     let raw: RawUsage =
         serde_json::from_str(json).map_err(|e| UsageSourceError::Parse(e.to_string()))?;
+    // One missing window is an idle one; neither is not a usage answer at
+    // all (an error body, a new shape) and must not overwrite good numbers.
+    if raw.five_hour.is_none() && raw.seven_day.is_none() {
+        return Err(UsageSourceError::Parse(
+            "usage response has neither a five_hour nor a seven_day window".to_string(),
+        ));
+    }
     let details = parse_details(&raw);
     Ok(UsageSnapshot {
-        session: parse_window(&raw.five_hour),
-        weekly: parse_window(&raw.seven_day),
+        session: parse_window(raw.five_hour.as_ref()),
+        weekly: parse_window(raw.seven_day.as_ref()),
         // `used_credits`/`monthly_limit` are taken as-is and treated as
         // decimal dollar amounts (e.g. 12.5 == $12.50), not minor units
         // that would need scaling by some `decimal_places` field. This is
@@ -923,6 +942,50 @@ mod tests {
         assert_eq!(snapshot.session.percent, 1.0);
         assert!(!snapshot.monthly.enabled);
         assert_eq!(snapshot.monthly.percent, None);
+    }
+
+    /// Since 2026-11-14 the API answers `"five_hour": null` (no
+    /// session window running), which used to fail the whole snapshot -
+    /// every key went blank although the weekly window was there. A null
+    /// or missing window reads as an idle one: 0% with no reset time.
+    #[test]
+    fn a_null_window_reads_as_idle_and_the_rest_still_parses() {
+        let json = r#"{
+            "five_hour": null,
+            "seven_day": {"utilization": 78.0, "resets_at": "2026-11-19T06:00:00.463996+00:00",
+                "limit_dollars": null, "used_dollars": null, "remaining_dollars": null,
+                "locked_reason": null},
+            "seven_day_opus": null,
+            "extra_usage": {"is_enabled": false, "monthly_limit": null, "used_credits": null,
+                "utilization": null, "currency": null},
+            "limits": [{"kind": "weekly_all", "group": "weekly", "percent": 78,
+                "severity": "warning", "resets_at": "2026-11-19T06:00:00.463996+00:00",
+                "scope": null, "is_active": true}]
+        }"#;
+        let snapshot = parse_snapshot(json).unwrap();
+        assert_eq!(snapshot.session.percent, 0.0);
+        assert_eq!(snapshot.session.resets_at, None);
+        assert_eq!(snapshot.details.session_locked, None);
+        assert_eq!(snapshot.weekly.percent, 78.0);
+        assert!(snapshot.weekly.resets_at.is_some());
+        assert_eq!(snapshot.details.limits.len(), 1);
+
+        for json in [
+            r#"{"seven_day": {"utilization": 5.0, "resets_at": null}}"#,
+            r#"{"five_hour": {"utilization": 5.0, "resets_at": null}, "seven_day": null}"#,
+        ] {
+            assert!(parse_snapshot(json).is_ok(), "{json}");
+        }
+        for json in [
+            "{}",
+            r#"{"five_hour": null, "seven_day": null}"#,
+            r#"{"error": {"type": "x"}}"#,
+        ] {
+            assert!(
+                matches!(parse_snapshot(json), Err(UsageSourceError::Parse(_))),
+                "{json}"
+            );
+        }
     }
 
     /// The credentials file holds a refresh token that never expires;

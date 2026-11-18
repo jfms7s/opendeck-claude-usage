@@ -60,6 +60,10 @@ expired token), it retries after 6 minutes, then every 10 (or later, if the
 those are more than 15 minutes old does each dial switch to a "no data"
 state - never a crash or a blank display.
 
+When the answer has no 5-hour window (the API sends `"five_hour": null`,
+as it has for some accounts since November 2026), Session reads as an idle
+window - 0% with no reset time - and the weekly numbers still show.
+
 Extra usage (pay-as-you-go spend against a monthly cap) is not shown on any
 key. Keys saved with the old **Monthly** window (before 0.21) show Session.
 
