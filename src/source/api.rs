@@ -598,6 +598,13 @@ fn parse_window(raw: Option<&RawWindow>) -> WindowUsage {
 fn parse_snapshot(json: &str) -> Result<UsageSnapshot, UsageSourceError> {
     let raw: RawUsage =
         serde_json::from_str(json).map_err(|e| UsageSourceError::Parse(e.to_string()))?;
+    // One missing window is an idle one; neither is not a usage answer at
+    // all (an error body, a new shape) and must not overwrite good numbers.
+    if raw.five_hour.is_none() && raw.seven_day.is_none() {
+        return Err(UsageSourceError::Parse(
+            "usage response has neither a five_hour nor a seven_day window".to_string(),
+        ));
+    }
     let details = parse_details(&raw);
     Ok(UsageSnapshot {
         session: parse_window(raw.five_hour.as_ref()),
@@ -968,6 +975,16 @@ mod tests {
             r#"{"five_hour": {"utilization": 5.0, "resets_at": null}, "seven_day": null}"#,
         ] {
             assert!(parse_snapshot(json).is_ok(), "{json}");
+        }
+        for json in [
+            "{}",
+            r#"{"five_hour": null, "seven_day": null}"#,
+            r#"{"error": {"type": "x"}}"#,
+        ] {
+            assert!(
+                matches!(parse_snapshot(json), Err(UsageSourceError::Parse(_))),
+                "{json}"
+            );
         }
     }
 
